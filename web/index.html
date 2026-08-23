@@ -8,6 +8,8 @@
   #drop { border: 2px dashed currentColor; border-radius: .5rem; padding: 2.5rem 1rem;
           text-align: center; opacity: .6; }
   #drop.over { opacity: 1; background: color-mix(in srgb, currentColor 12%, transparent); }
+  #drop label { text-decoration: underline; cursor: pointer; }
+  #drop input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
   form { display: flex; gap: .5rem; margin: 1rem 0; }
   input[type=url] { flex: 1; min-width: 0; padding: .5rem; font: inherit; }
   button { padding: .5rem .9rem; font: inherit; cursor: pointer; }
@@ -19,7 +21,14 @@
 
 <h1>Room display</h1>
 
-<div id="drop">Drop or paste a link here</div>
+<div id="drop">
+  Drop or paste a link or file here, or
+  <!-- drag-and-drop is mouse-only; the picker is the keyboard path -->
+  <label>
+    <input type="file" id="pick" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt">
+    choose a file
+  </label>
+</div>
 
 <form id="go">
   <label for="url" class="sr-only" hidden>URL</label>
@@ -57,6 +66,19 @@ async function api(path, body) {
   if (r.status === 401) { delete localStorage.token; throw new Error("bad token"); }
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
   return r.json();
+}
+
+async function send(file) {
+  $("#status").textContent = "uploading " + file.name + "…";
+  const body = new FormData();
+  body.append("file", file);
+  try {
+    const r = await fetch("/v1/upload", { method: "POST", body,
+      headers: { Authorization: "Bearer " + token() } });
+    if (r.status === 401) { delete localStorage.token; throw new Error("bad token"); }
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  } catch (e) { $("#status").textContent = "✗ " + e.message; return; }
+  refresh();
 }
 
 async function show(url) {
@@ -99,18 +121,22 @@ $("#save").onclick = () => {
 $("#home").onclick = () => api("/v1/home").then(refresh);
 $("#reload").onclick = () => api("/v1/reload").then(refresh);
 
+$("#pick").onchange = e => e.target.files[0] && send(e.target.files[0]);
+
 const drop = $("#drop");
 drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
 drop.ondrop = e => {
   e.preventDefault();
   drop.classList.remove("over");
-  if (e.dataTransfer.files.length) { $("#status").textContent = "files: phase 4"; return; }
+  // ponytail: one file per drop — a display shows one thing at a time.
+  if (e.dataTransfer.files.length) { send(e.dataTransfer.files[0]); return; }
   const url = (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text")).trim();
   if (url) show(url.split("\n")[0]);
 };
 document.onpaste = e => {
   if (document.activeElement === $("#url")) return;
+  if (e.clipboardData.files.length) { send(e.clipboardData.files[0]); return; }
   const url = e.clipboardData.getData("text").trim();
   if (url) show(url);
 };

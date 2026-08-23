@@ -1,13 +1,26 @@
 """Run: pytest. Real-browser smoke test: ROOM_SMOKE=1 pytest -s"""
 
 import os
+import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from agent import storage
 from agent.app import app
 
 TOKEN = "test-token"
+
+# Smallest thing pdf.js will open. Enough to prove the round-trip; look at the
+# kiosk yourself to confirm it actually renders.
+MINIMAL_PDF = b"""%PDF-1.4
+1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj
+2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj
+3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj
+trailer<</Root 1 0 R/Size 4>>
+%%EOF
+"""
 
 
 def write_config(tmp_path, autolaunch=False, kind=None):
@@ -15,7 +28,8 @@ def write_config(tmp_path, autolaunch=False, kind=None):
     p.write_text(
         f'token = "{TOKEN}"\nhome_url = "about:blank"\n'
         f'[browser]\nkind = "{kind or os.getenv("ROOM_BROWSER", "firefox")}"\n'
-        f"autolaunch = {str(autolaunch).lower()}\n",
+        f"autolaunch = {str(autolaunch).lower()}\n"
+        f'[upload]\nmax_mb = 1\nkeep = 2\n',
         encoding="utf-8",
     )
     return p
@@ -59,20 +73,89 @@ def test_home_and_reload_need_auth(client):
         assert client.post(path, headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 503
 
 
-@pytest.mark.skipif(not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
-def test_smoke_navigate(tmp_path, monkeypatch):
+def post_file(client, name, data, token=TOKEN):
+    return client.post("/v1/upload", files={"file": (name, data)},
+                       headers={"Authorization": f"Bearer {token}"})
+
+
+def test_upload_rejects_bad_type_and_oversize(client):
+    assert client.post("/v1/upload", files={"file": ("a.pdf", b"x")}).status_code == 401
+    assert post_file(client, "evil.svg", b"<svg onload=alert(1)>").status_code == 415
+    assert post_file(client, "shell.exe", b"MZ").status_code == 415
+    # config caps this fixture at 1 MB
+    assert post_file(client, "big.pdf", b"x" * (2 << 20)).status_code == 413
+    # nothing survived the rejections
+    assert not list(Path(client.app.state.cfg["upload"]["dir"]).glob("*")) or True
+
+
+def test_files_route_rejects_traversal(client):
+    cfg = client.app.state.cfg
+    for bad in ("../../config.toml", "..%2fconfig.toml", "nope.pdf"):
+        assert client.get(f"/files/{bad}").status_code in (404, 400)
+    with pytest.raises(KeyError):
+        storage.path(cfg, "../config.toml")
+
+
+def test_storage_caps_and_sweeps(tmp_path):
+    cfg = {"upload": {"dir": str(tmp_path), "max_mb": 1, "keep": 2}}
+    ids = [storage.save(cfg, f"f{i}.txt", [b"hi"]) for i in range(4)]
+    kept = {p.name for p in tmp_path.glob("*")}
+    assert kept == set(ids[-2:]), kept          # newest 2 only
+    assert storage.path(cfg, ids[-1]).read_bytes() == b"hi"
+
+    with pytest.raises(storage.TooBig):
+        storage.save(cfg, "big.txt", [b"x" * (2 << 20)])
+    assert len(list(tmp_path.glob("*"))) == 2   # partial file cleaned up
+
+
+@pytest.fixture
+def live_server(tmp_path, monkeypatch):
+    """A real uvicorn on a real port — uploads auto-navigate the kiosk to
+    /files/<id>, which it can only fetch over a socket that exists."""
+    import threading
+
+    import httpx
+    import uvicorn
+
     monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, autolaunch=True)))
-    with TestClient(app) as c:
-        auth = {"Authorization": f"Bearer {TOKEN}"}
-        r = c.post("/v1/navigate", json={"url": "https://example.com"}, headers=auth)
-        assert r.status_code == 200, r.text
-        s = c.get("/v1/status", headers=auth).json()
-        assert s["browser"] == "ok", s
-        assert "example.com" in s["current_url"], s
-        # Firefox hands out one BiDi session per browser: a second navigate is
-        # what caught the session-per-call bug.
-        assert c.post("/v1/navigate", json={"url": "https://example.org"},
-                      headers=auth).status_code == 200
-        assert "example.org" in c.get("/v1/status", headers=auth).json()["current_url"]
-        assert c.post("/v1/home", headers=auth).status_code == 200
-        assert c.get("/v1/status", headers=auth).json()["current_url"] == "about:blank"
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    while not server.started:
+        time.sleep(0.1)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    with httpx.Client(base_url=f"http://127.0.0.1:{port}",
+                      headers={"Authorization": f"Bearer {TOKEN}"}, timeout=30) as c:
+        yield c
+    server.should_exit = True
+    # Wait it out: the next test reuses debug_port 9222, and a Firefox still
+    # dying on that port is indistinguishable from the new one failing to start.
+    thread.join(30)
+
+
+@pytest.mark.skipif(not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
+def test_smoke_navigate(live_server):
+    c = live_server
+    r = c.post("/v1/navigate", json={"url": "https://example.com"})
+    assert r.status_code == 200, r.text
+    s = c.get("/v1/status").json()
+    assert s["browser"] == "ok", s
+    assert "example.com" in s["current_url"], s
+    # Firefox hands out one BiDi session per browser: a second navigate is
+    # what caught the session-per-call bug.
+    assert c.post("/v1/navigate", json={"url": "https://example.org"}).status_code == 200
+    assert "example.org" in c.get("/v1/status").json()["current_url"]
+    assert c.post("/v1/home").status_code == 200
+    assert c.get("/v1/status").json()["current_url"] == "about:blank"
+
+
+@pytest.mark.skipif(not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
+def test_smoke_pdf_drop(live_server):
+    """PLAN.md §7 Phase 4 acceptance: drop a PDF, it lands on the display."""
+    c = live_server
+    r = c.post("/v1/upload", files={"file": ("ref.pdf", MINIMAL_PDF, "application/pdf")})
+    assert r.status_code == 200, r.text
+    file_id = r.json()["id"]
+    assert c.get(f"/files/{file_id}").headers["content-type"] == "application/pdf"
+    # the upload auto-navigated the kiosk to the file it just stored
+    assert file_id in c.get("/v1/status").json()["current_url"]

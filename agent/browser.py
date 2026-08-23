@@ -9,7 +9,9 @@ Both are JSON-RPC over one websocket, so `_rpc` serves both.
 import contextlib
 import itertools
 import json
+import os
 import shutil
+import signal
 import subprocess
 import time
 import urllib.request
@@ -67,9 +69,25 @@ def launch(cfg: dict) -> subprocess.Popen:
                 f"--user-data-dir={profile}", "--kiosk",
                 "--no-first-run", "--no-default-browser-check", home]
 
-    proc = subprocess.Popen(argv)
+    # own process group on POSIX so stop() can take the whole tree down
+    proc = subprocess.Popen(argv, start_new_session=os.name != "nt")
     wait_ready(kind, port)
     return proc
+
+
+def stop(proc: subprocess.Popen) -> None:
+    """Kill the browser *and its children*. Both Firefox and Chromium fork a
+    process tree; terminating the launcher alone leaves a fullscreen kiosk on
+    screen and the debug port held — on a box with no keyboard, forever."""
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        proc.wait(10)
 
 
 def wait_ready(kind: str, port: int, timeout: float = 30.0) -> None:
