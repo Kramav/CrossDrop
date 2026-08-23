@@ -56,3 +56,8 @@ def test_smoke_navigate(tmp_path, monkeypatch):
         s = c.get("/v1/status", headers=auth).json()
         assert s["browser"] == "ok", s
         assert "example.com" in s["current_url"], s
+        # Firefox hands out one BiDi session per browser: a second navigate is
+        # what caught the session-per-call bug.
+        assert c.post("/v1/navigate", json={"url": "https://example.org"},
+                      headers=auth).status_code == 200
+        assert "example.org" in c.get("/v1/status", headers=auth).json()["current_url"]

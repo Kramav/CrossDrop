@@ -20,7 +20,8 @@ DEFAULTS = {
 
 def load_config(path: str | os.PathLike | None = None) -> dict:
     path = Path(path or os.getenv("ROOM_CONFIG") or Path(__file__).parent / "config.toml")
-    cfg = tomllib.loads(path.read_text(encoding="utf-8"))
+    # utf-8-sig: Windows editors and PowerShell write a BOM that tomllib chokes on.
+    cfg = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     cfg["browser"] = DEFAULTS | cfg.get("browser", {})
     if not cfg["browser"]["profile_dir"]:
         cfg["browser"]["profile_dir"] = str(path.parent / "profile")
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
     # with an orphaned fullscreen window after the agent stops.
     proc = browser.launch(cfg) if cfg["browser"]["autolaunch"] else None
     yield
+    browser.close()
     if proc:
         proc.terminate()
 

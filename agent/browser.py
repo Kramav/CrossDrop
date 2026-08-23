@@ -90,12 +90,16 @@ def wait_ready(kind: str, port: int, timeout: float = 30.0) -> None:
 
 
 def navigate(cfg: dict, url: str) -> str:
-    """Point the kiosk tab at `url`. Returns the tab's url afterwards."""
+    """Point the kiosk tab at `url`. Returns the url we sent it to."""
     b = cfg["browser"]
     if b["kind"] == "firefox":
-        with _bidi(b["debug_port"]) as (call, ctx):
-            call("browsingContext.navigate",
-                 {"context": ctx["context"], "url": url, "wait": "none"})
+        port = b["debug_port"]
+        # "interactive", not "none": we want /v1/navigate to mean the page really
+        # committed, and it matches CDP's Page.navigate, which returns after commit.
+        # A page slower than the 15s socket timeout surfaces as a 503.
+        _bidi(port, "browsingContext.navigate",
+              {"context": _top_context(port)["context"], "url": url,
+               "wait": "interactive"})
     else:
         page = _cdp_page(b["debug_port"])
         with _rpc(page["webSocketDebuggerUrl"]) as call:
@@ -106,9 +110,18 @@ def navigate(cfg: dict, url: str) -> str:
 def current_url(cfg: dict) -> str:
     b = cfg["browser"]
     if b["kind"] == "firefox":
-        with _bidi(b["debug_port"]) as (_call, ctx):
-            return ctx["url"]
+        return _top_context(b["debug_port"])["url"]
     return _cdp_page(b["debug_port"])["url"]
+
+
+def close() -> None:
+    """Release BiDi sessions. A browser we didn't launch outlives the agent, and
+    Firefox won't hand out a second session while the first is open."""
+    for port, (ws, call) in list(_bidi_conns.items()):
+        del _bidi_conns[port]
+        for shutdown in (lambda: call("session.end"), ws.close):
+            with contextlib.suppress(Exception):
+                shutdown()
 
 
 # --- plumbing ---------------------------------------------------------------
@@ -118,9 +131,8 @@ def _get(port: int, path: str):
         return json.loads(r.read())
 
 
-@contextlib.contextmanager
-def _rpc(ws_url: str):
-    """Yield call(method, params) -> result over one websocket."""
+def _connect(ws_url: str):
+    """Open a websocket, return (ws, call(method, params) -> result)."""
     # suppress_origin: Chrome rejects unexpected Origins, Firefox validates them.
     # Sending none keeps both happy.
     ws = websocket.create_connection(ws_url, timeout=15, suppress_origin=True)
@@ -137,6 +149,12 @@ def _rpc(ws_url: str):
             raise RuntimeError(f"{method} failed: {msg['error']}")
         return msg.get("result", {})
 
+    return ws, call
+
+
+@contextlib.contextmanager
+def _rpc(ws_url: str):
+    ws, call = _connect(ws_url)
     try:
         yield call
     finally:
@@ -155,9 +173,38 @@ def _bidi_url(port: int) -> str:
     return f"ws://127.0.0.1:{port}/session"
 
 
-@contextlib.contextmanager
-def _bidi(port: int):
-    """Yield (call, top-level browsing context) for a fresh BiDi session."""
-    with _rpc(_bidi_url(port)) as call:
+# Firefox allows ONE BiDi session per browser and does not end it when the socket
+# closes, so a session per call fails from the second call on. Hold the socket.
+_bidi_conns: dict[int, tuple] = {}
+
+
+def _bidi(port: int, method: str, params: dict | None = None) -> dict:
+    """Call a BiDi method on the long-lived session, reconnecting once if stale."""
+    for final in (False, True):
+        ws, call = _bidi_conns.get(port) or _bidi_connect(port)
+        try:
+            return call(method, params)
+        except (OSError, websocket.WebSocketException):
+            _bidi_conns.pop(port, None)
+            with contextlib.suppress(Exception):
+                ws.close()
+            if final:
+                raise
+
+
+def _bidi_connect(port: int) -> tuple:
+    ws, call = _connect(_bidi_url(port))
+    try:
+        # ponytail: if this says "session not created", a previous agent died
+        # holding the session — restart the browser. Stealing it needs a session
+        # id we never saw.
         call("session.new", {"capabilities": {}})
-        yield call, call("browsingContext.getTree", {})["contexts"][0]
+    except Exception:
+        ws.close()
+        raise
+    _bidi_conns[port] = (ws, call)
+    return _bidi_conns[port]
+
+
+def _top_context(port: int) -> dict:
+    return _bidi(port, "browsingContext.getTree")["contexts"][0]
