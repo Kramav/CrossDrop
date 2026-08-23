@@ -7,6 +7,7 @@ import tomllib
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import AnyHttpUrl, BaseModel
 
@@ -67,13 +68,32 @@ class Status(BaseModel):
     version: str
 
 
-@app.post("/v1/navigate", response_model=NavigateOut, dependencies=[Depends(auth)])
-def navigate(body: NavigateIn) -> NavigateOut:
+def _go(url: str) -> NavigateOut:
     try:
-        url = browser.navigate(app.state.cfg, str(body.url))
+        return NavigateOut(ok=True, current_url=browser.navigate(app.state.cfg, url))
     except (OSError, RuntimeError) as e:
         raise HTTPException(503, f"browser unreachable: {e}")
-    return NavigateOut(ok=True, current_url=url)
+
+
+@app.post("/v1/navigate", response_model=NavigateOut, dependencies=[Depends(auth)])
+def navigate(body: NavigateIn) -> NavigateOut:
+    return _go(str(body.url))
+
+
+@app.post("/v1/home", response_model=NavigateOut, dependencies=[Depends(auth)])
+def home() -> NavigateOut:
+    return _go(app.state.cfg["home_url"])
+
+
+@app.post("/v1/reload", response_model=NavigateOut, dependencies=[Depends(auth)])
+def reload() -> NavigateOut:
+    # ponytail: re-navigate rather than a real reload — same result for a display,
+    # and one code path. Use BiDi browsingContext.reload / CDP Page.reload if a
+    # page ever needs its POST state kept.
+    try:
+        return _go(browser.current_url(app.state.cfg))
+    except (OSError, RuntimeError) as e:
+        raise HTTPException(503, f"browser unreachable: {e}")
 
 
 @app.get("/v1/status", response_model=Status, dependencies=[Depends(auth)])
@@ -84,3 +104,10 @@ def status() -> Status:
         url, state = None, "down"
     return Status(up=True, current_url=url, browser=state,
                   version=os.getenv("ROOM_VERSION", "dev"))
+
+
+# Unauthenticated on purpose: you need the page before you can type the token.
+# It ships no secrets — every /v1 call it makes carries the bearer header.
+@app.get("/", include_in_schema=False)
+def index() -> FileResponse:
+    return FileResponse(Path(__file__).parent.parent / "web" / "index.html")

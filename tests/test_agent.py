@@ -46,6 +46,19 @@ def test_status_reports_dead_browser(client):
     assert r.json() == {"up": True, "current_url": None, "browser": "down", "version": "dev"}
 
 
+def test_ui_served_without_token(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert "/v1/navigate" in r.text
+
+
+def test_home_and_reload_need_auth(client):
+    for path in ("/v1/home", "/v1/reload"):
+        assert client.post(path).status_code == 401
+        # browser is down in this fixture, so authorised calls fail loudly, not silently
+        assert client.post(path, headers={"Authorization": f"Bearer {TOKEN}"}).status_code == 503
+
+
 @pytest.mark.skipif(not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
 def test_smoke_navigate(tmp_path, monkeypatch):
     monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, autolaunch=True)))
@@ -61,3 +74,5 @@ def test_smoke_navigate(tmp_path, monkeypatch):
         assert c.post("/v1/navigate", json={"url": "https://example.org"},
                       headers=auth).status_code == 200
         assert "example.org" in c.get("/v1/status", headers=auth).json()["current_url"]
+        assert c.post("/v1/home", headers=auth).status_code == 200
+        assert c.get("/v1/status", headers=auth).json()["current_url"] == "about:blank"
