@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# real configs (ship .example only)
+config.toml
+targets.toml
+
+# runtime state
+releases/
+snapshots/
+uploads/
+profile/
+*.log

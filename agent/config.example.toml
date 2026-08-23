@@ -1,0 +1,12 @@
+# Copy to config.toml (git-ignored). On the Pi this lives at
+# /etc/room-display/config.toml and is pointed at with ROOM_CONFIG.
+
+token = "change-me"          # bearer token for every /v1 route
+home_url = "about:blank"     # page the kiosk opens on launch
+
+[browser]
+kind = "firefox"             # "firefox" (WebDriver BiDi) | "edge" | "chromium" (CDP)
+path = ""                    # optional absolute path; empty = auto-detect
+profile_dir = ""             # empty = ./profile next to this config
+autolaunch = true            # false = drive a browser you started yourself
+debug_port = 9222            # 127.0.0.1 only. Debug port == full browser control.
