@@ -1,0 +1,12 @@
+# Opt-in half of PLAN.md §9's power-loss choice. Default (a) is snapshot-on-stop
+# only, which is what display-agent.service already does; enable the paired
+# .timer for option (b) if the study loses power often enough to matter.
+#
+#   systemctl --user enable --now room-display-snapshot.timer
+
+[Unit]
+Description=Snapshot the room display browser profile to SD
+
+[Service]
+Type=oneshot
+ExecStart=/opt/room-display/current/deploy/pi/profile-snapshot.sh save

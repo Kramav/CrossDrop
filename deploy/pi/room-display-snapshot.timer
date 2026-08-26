@@ -1,0 +1,16 @@
+[Unit]
+Description=Hourly room display profile snapshot
+
+[Timer]
+# Hourly, measured from the last run rather than from boot, so a Pi that reboots
+# often doesn't snapshot on every boot. Persistent=false on purpose: a missed
+# window is not worth an extra SD write at boot, which is what we are avoiding.
+OnUnitActiveSec=1h
+OnStartupSec=1h
+# The snapshot catches a live browser mid-write, so scatter it: two Pis on the
+# same timer would otherwise hit the card in lockstep after a power blip.
+RandomizedDelaySec=5m
+Persistent=false
+
+[Install]
+WantedBy=timers.target

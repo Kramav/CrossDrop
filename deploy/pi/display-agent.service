@@ -15,6 +15,16 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=/opt/room-display/current
 Environment=ROOM_CONFIG=/etc/room-display/config.toml
+
+# Phase 6: the profile lives on tmpfs, so it starts empty every boot. Restore it
+# before the agent launches the browser, save it after the browser is gone.
+# The leading `-` means a failed restore still lets the kiosk come up -- the
+# script handles a corrupt archive itself, this is the second layer of the same
+# rule: never let snapshot trouble brick a Pi with no keyboard.
+ExecStartPre=-/opt/room-display/current/deploy/pi/profile-snapshot.sh restore
+# Runs after the main process exits, including on restart. The script's own
+# 5-minute floor is what stops a crash loop turning this into constant SD writes.
+ExecStopPost=-/opt/room-display/current/deploy/pi/profile-snapshot.sh save
 # Both, deliberately. Pi OS defaults to labwc (Wayland), but its Chromium may
 # use either the native Wayland backend or the X11 one under XWayland, and the
 # wrong variable alone means the kiosk never appears. Setting both costs

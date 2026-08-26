@@ -119,9 +119,12 @@ def test_chromium_kiosk_flags(tmp_path, monkeypatch):
 
     browser.launch({"home_url": "about:blank",
                     "browser": {"kind": "chromium", "path": "", "debug_port": 9222,
+                                "disk_cache_mb": 100,
                                 "profile_dir": str(tmp_path / "profile")}})
     assert "--password-store=basic" in seen[0], seen[0]
     assert "--disable-session-crashed-bubble" in seen[0], seen[0]
+    # Phase 6: the profile is tmpfs, so an uncapped cache is RAM the Pi loses.
+    assert "--disk-cache-size=104857600" in seen[0], seen[0]
 
 
 @pytest.fixture

@@ -15,7 +15,7 @@ from . import browser, storage
 
 DEFAULTS = {
     "kind": "firefox", "path": "", "profile_dir": "", "autolaunch": True,
-    "debug_port": 9222,
+    "debug_port": 9222, "disk_cache_mb": 100,
 }
 UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 20}
 

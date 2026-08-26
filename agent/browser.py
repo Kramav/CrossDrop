@@ -76,6 +76,10 @@ def launch(cfg: dict) -> subprocess.Popen:
                 # Same class of problem: after a power cut Chromium offers to
                 # restore the last session in a bubble nobody can dismiss.
                 "--disable-session-crashed-bubble",
+                # Phase 6 puts the profile on tmpfs, so this cache is RAM the Pi
+                # cannot get back. Uncapped, Chromium sizes it from free space
+                # and eventually fills /run/user/<uid>, taking the kiosk with it.
+                f"--disk-cache-size={b['disk_cache_mb'] * 1024 * 1024}",
                 "--no-first-run", "--no-default-browser-check", home]
 
     # own process group on POSIX so stop() can take the whole tree down

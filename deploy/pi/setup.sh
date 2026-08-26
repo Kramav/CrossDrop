@@ -74,7 +74,7 @@ if [ -f "$CFG" ]; then
 else
   sed -e "s|^token = .*|token = \"$(openssl rand -hex 32)\"|" \
       -e "s|^kind = .*|kind = \"chromium\"|" \
-      -e "s|^profile_dir = .*|profile_dir = \"$HOME/.local/share/room-display/profile\"|" \
+      -e "s|^profile_dir = .*|profile_dir = \"/run/user/$(id -u)/room-display/profile\"|" \
       -e "s|^dir = .*|dir = \"/run/user/$(id -u)/room-display/uploads\"|" \
       agent/config.example.toml | sudo tee "$CFG" >/dev/null
 fi
@@ -82,11 +82,28 @@ sudo chown root:"$USER" "$CFG"
 sudo chmod 640 "$CFG"                      # it holds the bearer token
 mkdir -p "$HOME/.local/share/room-display"
 
+echo "== logs in RAM"
+# See journald-volatile.conf for why this rather than log2ram, and what it costs.
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo cp deploy/pi/journald-volatile.conf /etc/systemd/journald.conf.d/room-display.conf
+sudo systemctl restart systemd-journald
+
 echo "== service"
+chmod +x deploy/pi/profile-snapshot.sh
 mkdir -p ~/.config/systemd/user
 cp deploy/pi/display-agent.service ~/.config/systemd/user/
+# Timer stays installed-but-disabled: PLAN.md §9 default is snapshot-on-stop.
+# Enable it if the study loses power often: systemctl --user enable --now room-display-snapshot.timer
+cp deploy/pi/room-display-snapshot.service deploy/pi/room-display-snapshot.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now display-agent
+
+# An existing config is never rewritten, so a Pi provisioned before Phase 6 still
+# points its profile at the SD card and silently keeps grinding it.
+if ! sudo grep -q '^profile_dir = "/run/user/' "$CFG"; then
+  echo "   NOTE: profile_dir in $CFG is not on tmpfs — Phase 6 is not active."
+  echo "         Set it to /run/user/$(id -u)/room-display/profile and restart."
+fi
 
 echo "== checks"
 findmnt -no FSTYPE "/run/user/$(id -u)" | grep -qx tmpfs && echo "   uploads on tmpfs: ok"

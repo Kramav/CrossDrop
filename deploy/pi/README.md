@@ -1,15 +1,16 @@
-# Phase 5 — Pi provisioning
+# Pi provisioning (Phases 5–6)
 
-Gets the agent running on the Pi under the autologin desktop session, with a
-persistent (on-SD) browser profile. RAM profile + auth snapshotting is Phase 6.
+Gets the agent running on the Pi under the autologin desktop session, with the
+browser profile in RAM and snapshotted to SD so logins survive a reboot.
 
 Paths match PLAN.md §8, so Phase 8 only has to repoint the `current` symlink —
 nothing here changes when auto-update lands.
 
-    /opt/room-display/current          code + venv   (a plain dir now, a symlink in Phase 8)
-    /etc/room-display/config.toml      token, paths  (never overwritten by updates)
-    ~/.local/share/room-display/       browser profile (persistent, Phase 5)
-    /run/user/1000/room-display/       uploads — already tmpfs, so already RAM
+    /opt/room-display/current               code + venv   (a plain dir now, a symlink in Phase 8)
+    /etc/room-display/config.toml           token, paths  (never overwritten by updates)
+    /run/user/1000/room-display/profile     browser profile — tmpfs, so RAM (Phase 6)
+    /run/user/1000/room-display/uploads     uploads — tmpfs too
+    ~/.local/share/room-display/profile.tar.gz   the only thing that touches SD (0600)
 
 **Just want it running?** [setup.sh](setup.sh) does this page *and* pi-setup.md
 §2-§7 in one go, on a card you've already imaged:
@@ -91,7 +92,47 @@ systemctl --user enable --now display-agent
 No `kiosk-launch.sh`: the agent launches and owns the kiosk itself, so a
 separate launcher would just be a second thing to keep in sync.
 
-## 6. Acceptance (PLAN.md §7 Phase 5)
+## 6. RAM profile and snapshots (Phase 6)
+
+`/run/user/1000` is already tmpfs, so pointing `profile_dir` at it is the whole
+of "profile in RAM" — no fstab entry, no mount unit. What that costs is that the
+profile is empty every boot, which is what [profile-snapshot.sh](profile-snapshot.sh)
+exists to fix:
+
+```sh
+profile-snapshot.sh restore   # SD -> RAM, ExecStartPre
+profile-snapshot.sh save      # RAM -> SD, ExecStopPost
+```
+
+It archives the **whole profile minus caches**, not just `Cookies` — Local
+Storage and IndexedDB hold session tokens too, and an allowlist would quietly
+log you out of exactly the pages you cared about. The archive is `0600`.
+
+Two guards worth knowing about, because both look like bugs otherwise:
+
+- **A save inside 5 minutes of the last one is skipped.** `Restart=always` fires
+  `ExecStopPost` on every crash-loop iteration; without the floor that's an SD
+  write every 5 seconds, which is the wear this phase exists to prevent.
+- **A corrupt snapshot never blocks startup.** It's moved to `.bad` and the Pi
+  comes up with a fresh profile. You lose the logins, not the display.
+
+Default is snapshot-on-stop (PLAN.md §9 option (a)). If the study loses power
+often, take option (b) — the timer is already installed, just disabled:
+
+```sh
+systemctl --user enable --now room-display-snapshot.timer
+```
+
+Logs go to RAM too, via [journald-volatile.conf](journald-volatile.conf). Read
+that file before enabling it: the trade is that the journal doesn't survive a
+reboot, which is exactly when you most want it.
+
+Cache size matters now that the profile is RAM: `disk_cache_mb` (default 100)
+caps it. Uncapped, Chromium sizes its cache from free space and fills
+`/run/user/1000`. Watch the headroom with `df -h /run/user/1000` — uploads share
+it, and the shipped `max_mb` × `keep` can reach 500 MB on its own.
+
+## 7. Acceptance (PLAN.md §7 Phase 5)
 
 ```sh
 sudo reboot

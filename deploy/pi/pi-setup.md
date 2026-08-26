@@ -179,9 +179,8 @@ If all four are good, go to [README.md](README.md) and install the agent.
 
 - **No static IP.** Tailscale gives the Pi a stable 100.x address that works
   from anywhere; a LAN static IP is a second address to keep in sync.
-- **No log2ram, no tmpfs profile.** That's Phase 6. Phase 5 runs a persistent
-  on-SD profile on purpose, to isolate variables — get the kiosk working first,
-  then make it stop writing to the card.
+- **No fstab entry for the tmpfs profile.** `/run/user/<uid>` is already tmpfs,
+  so Phase 6 just points `profile_dir` at it. See README.md §6.
 - **No unattended-upgrades change.** Updates to *this project* are release-gated
   in Phase 8; OS package updates are a separate concern, left at the default.
 - **No VNC.** `tailscale up --ssh` already gives you a way in. Turn it on only

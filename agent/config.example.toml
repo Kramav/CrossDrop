@@ -10,6 +10,8 @@ path = ""                    # optional absolute path; empty = auto-detect
 profile_dir = ""             # empty = ./profile next to this config
 autolaunch = true            # false = drive a browser you started yourself
 debug_port = 9222            # 127.0.0.1 only. Debug port == full browser control.
+disk_cache_mb = 100          # On the Pi the profile is tmpfs, so this is RAM.
+                             # Uncapped, Chromium fills /run/user/<uid>. Lower on a 2 GB Pi.
 
 [upload]
 dir = ""                     # empty = ./uploads next to this config.
