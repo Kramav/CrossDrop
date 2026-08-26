@@ -1,0 +1,19 @@
+# Exists to put `roomctl` on PATH on the two controller boxes. The agent is not
+# packaged — it runs from a checkout on the Pi (PLAN.md §8), so it stays out.
+
+[project]
+name = "roomctl"
+version = "0.1.0"
+description = "Client for the room-display agent"
+requires-python = ">=3.11"
+dependencies = ["httpx"]
+
+[project.scripts]
+roomctl = "roomctl.cli:main"
+
+[tool.setuptools]
+packages = ["roomctl"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
