@@ -11,6 +11,15 @@ nothing here changes when auto-update lands.
     ~/.local/share/room-display/       browser profile (persistent, Phase 5)
     /run/user/1000/room-display/       uploads — already tmpfs, so already RAM
 
+**Just want it running?** [setup.sh](setup.sh) does this page *and* pi-setup.md
+§2-§7 in one go, on a card you've already imaged:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | bash
+```
+
+The rest of this page is what it does, for when a step needs debugging.
+
 ## 1. A configured Pi
 
 [pi-setup.md](pi-setup.md) first — imaging, SSH, Tailscale, desktop autologin,

@@ -11,6 +11,16 @@ You have two Pis (`rpi4b`, `rpi54gb`). Either works. Doing both is worth it: the
 spare becomes the box you test a release tag on before cutting it, which is
 what makes Phase 8's auto-update safe to leave unattended.
 
+Step 1 is the only part that needs a human at a Windows box. Everything after it
+— and all of README.md — is [setup.sh](setup.sh), run once over SSH:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | bash
+```
+
+It pauses once, for the Tailscale auth URL. Read on if a step needs debugging,
+or if your screen isn't 1920x1080 (`VIDEO=1280x720@60D bash setup.sh`).
+
 ---
 
 ## 1. Image the card
