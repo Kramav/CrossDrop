@@ -108,6 +108,22 @@ def test_storage_caps_and_sweeps(tmp_path):
     assert len(list(tmp_path.glob("*"))) == 2   # partial file cleaned up
 
 
+def test_chromium_kiosk_flags(tmp_path, monkeypatch):
+    """The Pi has no keyboard. A Chromium that reaches for the system keyring, or
+    offers to restore a crashed session, puts a modal over the kiosk that nobody
+    can dismiss — so these two flags are load-bearing, not tidiness."""
+    seen = []
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda argv, **kw: seen.append(argv))
+    monkeypatch.setattr(browser, "wait_ready", lambda *a, **kw: None)
+    monkeypatch.setattr(browser, "_exe", lambda kind, path="": "/usr/bin/chromium")
+
+    browser.launch({"home_url": "about:blank",
+                    "browser": {"kind": "chromium", "path": "", "debug_port": 9222,
+                                "profile_dir": str(tmp_path / "profile")}})
+    assert "--password-store=basic" in seen[0], seen[0]
+    assert "--disable-session-crashed-bubble" in seen[0], seen[0]
+
+
 @pytest.fixture
 def live_server(tmp_path, monkeypatch):
     """A real uvicorn on a real port — uploads auto-navigate the kiosk to

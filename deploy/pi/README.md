@@ -128,3 +128,13 @@ msedge.exe --app=http://<pi-tailnet-ip>:8080/
   strays and restart. (This is why PLAN.md §6 wants the profile dir dedicated.)
 - **Dropped files 404 on the display** — the browser is fetching a hostname the
   Pi itself cannot resolve. Reach the agent by tailnet IP or MagicDNS name.
+- **"Unlock your login keyring" dialog over the kiosk** — Chromium's default
+  password store on Linux is the system keyring, and desktop autologin never
+  unlocks it, so it asks. The agent launches with `--password-store=basic` to
+  avoid it entirely. If you see this, you're on older code: `git pull` in
+  `/opt/room-display/current` and `systemctl --user restart display-agent`.
+  If a dialog somehow survives, `pkill -u "$USER" chromium` and restart — the
+  agent relaunches its own browser.
+- **Blank white screen** — that's `home_url = "about:blank"` rendering, i.e. the
+  kiosk working. Prove it with `/v1/navigate`; set `home_url` in
+  `/etc/room-display/config.toml` if you want something else at boot.

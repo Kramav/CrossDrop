@@ -67,6 +67,15 @@ def launch(cfg: dict) -> subprocess.Popen:
                 # with the Pi's Chromium.
                 "--remote-allow-origins=*",
                 f"--user-data-dir={profile}", "--kiosk",
+                # Never touch the system keyring. Chromium's default on Linux is
+                # libsecret, and under desktop autologin the login keyring is
+                # locked (nobody typed a password), so it puts up a modal unlock
+                # dialog over the kiosk — on a Pi with no keyboard, forever.
+                # "basic" is Chromium's own store; ignored on Windows.
+                "--password-store=basic",
+                # Same class of problem: after a power cut Chromium offers to
+                # restore the last session in a bubble nobody can dismiss.
+                "--disable-session-crashed-bubble",
                 "--no-first-run", "--no-default-browser-check", home]
 
     # own process group on POSIX so stop() can take the whole tree down
