@@ -1,0 +1,37 @@
+# PLAN.md §4 filed this under deploy/github/ci.yml, but GitHub only reads
+# .github/workflows/, so it lives here or it never runs.
+#
+# A green run is the signal that it is safe to cut a tag -- which is what the
+# Pi's update.sh then deploys. Tags are also built, so a bad tag shows up red
+# here before the timer picks it up on the Pi.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor (tomllib, pyproject requires-python); the newer one
+        # is what a current Pi OS actually runs.
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -r agent/requirements.txt
+      - run: pip install -e .
+      # Errors only, not style: undefined names, syntax, unused imports. The
+      # things that make a release fail to boot on a box with no keyboard.
+      - run: pip install ruff && ruff check --select E9,F .
+      # `python -m`, not bare `pytest`: the agent package is imported from the
+      # repo root and only -m puts the working directory on sys.path.
+      - run: python -m pytest -q

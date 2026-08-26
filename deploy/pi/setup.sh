@@ -94,12 +94,17 @@ sudo cp deploy/pi/journald-volatile.conf /etc/systemd/journald.conf.d/room-displ
 sudo systemctl restart systemd-journald
 
 echo "== service"
-chmod +x deploy/pi/profile-snapshot.sh
+chmod +x deploy/pi/profile-snapshot.sh deploy/pi/update.sh
 mkdir -p ~/.config/systemd/user
 cp deploy/pi/display-agent.service ~/.config/systemd/user/
 # Timer stays installed-but-disabled: PLAN.md §9 default is snapshot-on-stop.
 # Enable it if the study loses power often: systemctl --user enable --now room-display-snapshot.timer
 cp deploy/pi/room-display-snapshot.service deploy/pi/room-display-snapshot.timer ~/.config/systemd/user/
+# Phase 8 auto-update, also installed-but-disabled. Handing a Pi the right to
+# replace its own code unattended is a decision to make on purpose, not a side
+# effect of running a setup script:
+#   systemctl --user enable --now room-display-update.timer
+cp deploy/pi/room-display-update.service deploy/pi/room-display-update.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now display-agent
 

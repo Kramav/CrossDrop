@@ -1,0 +1,15 @@
+[Unit]
+Description=Check for a new room display release every 30 minutes
+
+[Timer]
+# Not at boot: the Pi has just come up, the tailnet may not be ready, and an
+# update racing the kiosk's first launch is a bad first impression.
+OnBootSec=10min
+OnUnitActiveSec=30min
+# Two Pis on the same tailnet would otherwise hit GitHub in lockstep, and the
+# spare is supposed to be testing a tag *before* the display takes it.
+RandomizedDelaySec=5m
+Persistent=false
+
+[Install]
+WantedBy=timers.target

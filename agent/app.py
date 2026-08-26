@@ -40,7 +40,11 @@ async def lifespan(app: FastAPI):
     app.state.cfg = cfg = load_config()
     # We own the kiosk only if we started it — a no-input box must not be left
     # with an orphaned fullscreen window after the agent stops.
-    proc = browser.launch(cfg) if cfg["browser"]["autolaunch"] else None
+    # ROOM_SELFCHECK: `python -m agent selfcheck` boots this app in-process to
+    # prove a new release can start, while the live kiosk is still running the
+    # old one. It must never launch a second browser onto that port or screen.
+    launch = cfg["browser"]["autolaunch"] and not os.getenv("ROOM_SELFCHECK")
+    proc = browser.launch(cfg) if launch else None
     yield
     if proc:
         browser.stop(cfg, proc)  # ours: take the whole tree down with us

@@ -138,7 +138,68 @@ caps it. Uncapped, Chromium sizes its cache from free space and fills
 `/run/user/1000`. Watch the headroom with `df -h /run/user/1000` — uploads share
 it, and the shipped `max_mb` × `keep` can reach 500 MB on its own.
 
-## 7. Acceptance (PLAN.md §7 Phase 5)
+## 7. Auto-update (Phase 8)
+
+The Pi pulls; GitHub never reaches in. Every ~30 min
+[update.sh](update.sh) asks GitHub for the highest `v*` tag and does nothing at
+all if it already runs it — no clone, no writes, which is what keeps a timer
+firing 48×/day off the SD card.
+
+When there *is* a new tag:
+
+1. `git archive` it into `releases/<tag>/` (no per-release `.git`)
+2. build a per-release venv
+3. **boot check** — `python -m agent selfcheck` from the new venv, in-process,
+   no port, no browser. Fails → the swap never happens.
+4. swap the `current` symlink, restart the agent
+5. **verify the live port** for 30 s — this is what catches runtime and kiosk
+   regressions a boot check cannot see
+6. not healthy → **roll back** to the previous release and restart
+7. prune to the last 3, never the running or previous one
+
+Enable it when you're ready to let the Pi replace its own code:
+
+```sh
+systemctl --user enable --now room-display-update.timer
+systemctl --user list-timers room-display-update.timer
+```
+
+**Cutting a release.** Push to main, wait for CI green, then tag:
+
+```sh
+git tag v1.0.0 && git push --tags
+```
+
+Within 30 minutes the Pi is on it, and `/v1/status` reports `"version": "v1.0.0"`
+— that comes from a `VERSION` file update.sh writes into each release dir and
+the unit reads via `EnvironmentFile`.
+
+**Layout.** Updates swap code only. Your token, snapshot and uploads live
+outside the release tree and are never touched:
+
+    /opt/room-display/cache-repo/      one bare clone, fetched --tags
+    /opt/room-display/releases/<tag>/  code + venv, one per release
+    /opt/room-display/current -> releases/<tag>
+
+**Test the rollback before you trust it** — that's PLAN.md §7's acceptance, and
+it's the only feature here that matters. Use the spare Pi: tag a deliberately
+broken commit, watch it refuse to deploy or roll itself back, then tag a good
+one and watch it land.
+
+```sh
+journalctl --user -u room-display-update -f
+systemctl --user start room-display-update    # don't wait for the timer
+```
+
+A failed update leaves the unit failed on purpose (`systemctl --user
+list-units --failed`) while the display keeps running the old release.
+
+**Credentials:** none, while the repo is public — `git ls-remote` and
+`git archive` work unauthenticated. If you take it private, put an SSH url in
+`REPO` and a **read-only deploy key** on the Pi (PLAN.md §8), never a personal
+token.
+
+## 8. Acceptance (PLAN.md §7 Phase 5)
 
 ```sh
 sudo reboot

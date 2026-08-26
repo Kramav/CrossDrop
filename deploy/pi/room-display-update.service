@@ -1,0 +1,16 @@
+# Paired with room-display-update.timer. A *user* unit, like display-agent:
+# update.sh restarts display-agent, and only its own user manager can do that.
+#
+#   systemctl --user enable --now room-display-update.timer
+
+[Unit]
+Description=Check for and deploy a new room display release
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/room-display/current/deploy/pi/update.sh
+# A failed update is not a failed machine: update.sh rolls back on its own and
+# exits 1 so the failure is visible in `systemctl --user list-units --failed`.
+# The timer keeps running either way, so a later good tag still deploys.

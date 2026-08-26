@@ -15,6 +15,10 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=/opt/room-display/current
 Environment=ROOM_CONFIG=/etc/room-display/config.toml
+# Written by update.sh into each release dir as `ROOM_VERSION=<tag>`, so
+# /v1/status reports the tag it is actually running. The `-` keeps a plain
+# Phase 5 checkout (no VERSION file) working -- it just reports "dev".
+EnvironmentFile=-/opt/room-display/current/VERSION
 
 # Phase 6: the profile lives on tmpfs, so it starts empty every boot. Restore it
 # before the agent launches the browser, save it after the browser is gone.
