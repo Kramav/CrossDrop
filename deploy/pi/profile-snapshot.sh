@@ -45,11 +45,17 @@ save)
     echo "no profile at $PROFILE - nothing to save"
     exit 0
   fi
-  # ponytail: 5-minute floor. Restart=always means a crash-looping agent fires
-  # ExecStopPost every 5s, and without this that is an SD write every 5s -- the
-  # exact wear this phase exists to stop. Drop it only if you also drop Restart.
-  if [ -f "$SNAP" ] && [ -z "$(find "$SNAP" -mmin +5)" ]; then
-    echo "snapshot is under 5 min old - skipping"
+  # ponytail: 5-minute floor, but only on a crash. Restart=always means a
+  # crash-looping agent fires ExecStopPost every 5s, and unguarded that is an SD
+  # write every 5s -- the exact wear this phase exists to stop.
+  #
+  # A *clean* stop is the opposite case: reboot, restart, `systemctl stop`. That
+  # is the save carrying the login you just made, and skipping it silently
+  # throws the login away. systemd sets SERVICE_RESULT in ExecStopPost, so we
+  # can tell them apart. Unset (the hourly timer, a manual run) counts as clean.
+  if [ "${SERVICE_RESULT:-success}" != "success" ] \
+     && [ -f "$SNAP" ] && [ -z "$(find "$SNAP" -mmin +5)" ]; then
+    echo "crash restart, snapshot under 5 min old - skipping (SERVICE_RESULT=$SERVICE_RESULT)"
     exit 0
   fi
 
