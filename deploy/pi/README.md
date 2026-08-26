@@ -23,8 +23,8 @@ The rest of this page is what it does, for when a step needs debugging.
 ## 1. A configured Pi
 
 [pi-setup.md](pi-setup.md) first — imaging, SSH, Tailscale, desktop autologin,
-screen blanking off, display mode pinned. Its step 7 is the checklist that says
-you're ready for this page.
+screen blanking off, display left on auto-detect. Its step 7 is the checklist
+that says you're ready for this page.
 
 ## 2. Packages
 

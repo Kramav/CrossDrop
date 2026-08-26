@@ -18,8 +18,7 @@ Step 1 is the only part that needs a human at a Windows box. Everything after it
 curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | bash
 ```
 
-It pauses once, for the Tailscale auth URL. Read on if a step needs debugging,
-or if your screen isn't 1920x1080 (`VIDEO=1280x720@60D bash setup.sh`).
+It pauses once, for the Tailscale auth URL. Read on if a step needs debugging.
 
 ---
 
@@ -107,31 +106,39 @@ Reboot and confirm it comes back to a logged-in desktop by itself:
 sudo reboot
 ```
 
-## 5. Pin the display mode
+## 5. Display mode — leave it dynamic
 
-A Pi with no monitor attached at boot — or one whose screen powers on after the
-Pi does — comes up with no display detected and the kiosk lands on a 640×480
-phantom output. Pin the mode in firmware so it never depends on what the screen
-reports at the moment of boot:
+**Do nothing here.** The kernel reads each monitor's EDID at boot and brings
+every connected output up at its own preferred mode. That is the behaviour you
+want: plug in a different screen, or a second one, and it just works.
 
-```sh
-sudo nano /boot/firmware/cmdline.txt
-```
+Resist the urge to pin `video=HDMI-A-1:1920x1080@60D` in
+`/boot/firmware/cmdline.txt`. Forcing one connector is what leaves the **second
+monitor dark** — the pinned output wins and the other never gets configured. It
+also locks the Pi to one resolution, so the next screen you attach is letterboxed
+or blank.
 
-Append to the **single existing line** (it must stay one line):
-
-```
-video=HDMI-A-1:1920x1080@60D
-```
-
-The trailing `D` forces the output on whether or not a monitor answers. Match
-the resolution to the actual screen.
-
-After a reboot, check what you actually got:
+Check what the outputs are actually doing — this works over SSH, no session
+needed:
 
 ```sh
-wlr-randr          # labwc / Wayland
+grep -H . /sys/class/drm/card*-HDMI-A-*/status   # connected / disconnected
+wlr-randr                                        # modes in use (labwc, from the desktop session)
 ```
+
+### The one case that needs a pin
+
+A Pi that boots with **no monitor attached at all** — or whose screen powers on
+*after* the Pi does — has no EDID to read, so it lands on a 640×480 phantom
+output and the kiosk renders into it. Only then, pin it:
+
+```sh
+VIDEO=HDMI-A-1:1920x1080@60D bash setup.sh
+```
+
+The trailing `D` forces the output on whether or not a monitor answers. Run
+`setup.sh` with `VIDEO` unset to strip the pin again and go back to auto-detect.
+Both paths rewrite the single existing line in place; it must stay one line.
 
 ## 6. Check what the session actually exports
 

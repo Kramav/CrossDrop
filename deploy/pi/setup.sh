@@ -11,7 +11,8 @@
 set -euo pipefail
 
 REPO="${REPO:-https://github.com/Kramav/CrossDrop.git}"
-VIDEO="${VIDEO:-1920x1080@60D}"   # match your actual screen; trailing D forces output on
+VIDEO="${VIDEO:-}"   # empty = auto-detect (default). Override only for a Pi that
+                     # boots with no monitor attached: VIDEO=HDMI-A-1:1920x1080@60D
 PORT="${PORT:-8080}"
 
 [ "$(id -u)" -ne 0 ] || { echo "run as your normal user, not root — the agent runs as you"; exit 1; }
@@ -35,11 +36,23 @@ sudo raspi-config nonint do_blanking 1          # 1 = disable blanking. A kiosk 
 
 echo "== display mode"
 CMDLINE=/boot/firmware/cmdline.txt
-if grep -q "video=HDMI" "$CMDLINE"; then
-  echo "   already pinned: $(grep -o 'video=HDMI[^ ]*' "$CMDLINE")"
-else
-  sudo sed -i "1s|\$| video=HDMI-A-1:$VIDEO|" "$CMDLINE"   # single line, append in place
+# ponytail: no pinning by default. The kernel reads EDID and brings every
+# connected output up at its own preferred mode, which is the dynamic behaviour
+# we want. Pinning one `video=HDMI-A-1:...` forces that output and leaves the
+# second monitor dark — pin only on a Pi that boots with nothing plugged in.
+if [ -n "$VIDEO" ]; then
+  case "$VIDEO" in *:*) ;; *) echo "VIDEO must be <connector>:<mode>, e.g. HDMI-A-1:1920x1080@60D"; exit 1 ;; esac
+  sudo sed -i -e '1s| video=[^ ]*||g' -e "1s|\$| video=$VIDEO|" "$CMDLINE"
+  echo "   pinned: $VIDEO"
+elif grep -q 'video=' "$CMDLINE"; then
+  sudo sed -i '1s| video=[^ ]*||g' "$CMDLINE"              # single line, edit in place
+  echo "   removed a previous pin — outputs auto-detect again (reboot to apply)"
 fi
+for s in /sys/class/drm/card*-HDMI-A-*/status; do
+  [ -e "$s" ] || continue
+  n="${s%/status}"; n="${n##*/}"
+  echo "   ${n#*-}: $(cat "$s")"
+done
 
 echo "== code"
 sudo mkdir -p /opt/room-display
