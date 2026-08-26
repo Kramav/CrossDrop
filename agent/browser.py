@@ -75,12 +75,30 @@ def launch(cfg: dict) -> subprocess.Popen:
     return proc
 
 
-def stop(proc: subprocess.Popen) -> None:
-    """Kill the browser *and its children*. Both Firefox and Chromium fork a
+def stop(cfg: dict, proc: subprocess.Popen) -> None:
+    """Shut the browser down *and its children*. Both Firefox and Chromium fork a
     process tree; terminating the launcher alone leaves a fullscreen kiosk on
-    screen and the debug port held — on a box with no keyboard, forever."""
-    if proc.poll() is not None:
+    screen and the debug port held — on a box with no keyboard, forever.
+
+    Ask over the debug protocol first, because the pid is not a reliable handle:
+    on Windows the msedge/chrome launcher exits the moment it hands off (poll()
+    returns 0 with the browser very much alive), so `taskkill /T` walks a tree
+    that is no longer rooted at that pid and every process survives.
+    """
+    b = cfg["browser"]
+    kind, port = b["kind"], b["debug_port"]
+
+    with contextlib.suppress(Exception):
+        if kind == "firefox":
+            _bidi(port, "browser.close")
+        else:
+            with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
+                call("Browser.close")
+    close()
+    if _wait_gone(kind, port):
         return
+
+    # Wedged, or a build that ignored the request: fall back to the pid tree.
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
     else:
@@ -88,6 +106,19 @@ def stop(proc: subprocess.Popen) -> None:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     with contextlib.suppress(subprocess.TimeoutExpired):
         proc.wait(10)
+
+
+def _wait_gone(kind: str, port: int, timeout: float = 10.0) -> bool:
+    """True once the debug port stops answering — the browser is really down.
+    The port, not the pid, is what the next agent start collides with."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            wait_ready(kind, port, timeout=0.5)
+        except RuntimeError:
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def wait_ready(kind: str, port: int, timeout: float = 30.0) -> None:
@@ -129,7 +160,9 @@ def current_url(cfg: dict) -> str:
     b = cfg["browser"]
     if b["kind"] == "firefox":
         return _top_context(b["debug_port"])["url"]
-    return _cdp_page(b["debug_port"])["url"]
+    # CDP reports a blank tab as "", BiDi as "about:blank". Normalise, or the two
+    # backends disagree and /v1/reload tries to navigate to the empty string.
+    return _cdp_page(b["debug_port"])["url"] or "about:blank"
 
 
 def close() -> None:

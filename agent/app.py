@@ -42,9 +42,10 @@ async def lifespan(app: FastAPI):
     # with an orphaned fullscreen window after the agent stops.
     proc = browser.launch(cfg) if cfg["browser"]["autolaunch"] else None
     yield
-    browser.close()
     if proc:
-        browser.stop(proc)
+        browser.stop(cfg, proc)  # ours: take the whole tree down with us
+    else:
+        browser.close()  # not ours: just release the session and leave it running
 
 
 app = FastAPI(title="room-display agent", version="1", lifespan=lifespan)
@@ -118,10 +119,10 @@ def upload(request: Request, file: UploadFile) -> UploadOut:
     except storage.TooBig as e:
         raise HTTPException(413, str(e))
 
-    # The kiosk browser is on this same box, so send it to loopback: it works
-    # whether the uploader reached us by tailnet name, IP, or localhost.
-    served = request.url_for("serve_file", file_id=file_id).replace(hostname="127.0.0.1")
-    _go(str(served))
+    # Send the kiosk to the same address the uploader used. Not loopback: on the
+    # Pi we bind the tailnet interface only (PLAN.md §10), so 127.0.0.1 is not
+    # listening and every dropped file would 404 on the display.
+    _go(str(request.url_for("serve_file", file_id=file_id)))
     return UploadOut(id=file_id, url=f"/files/{file_id}")
 
 

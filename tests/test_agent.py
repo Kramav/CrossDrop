@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from agent import storage
+from agent import browser, storage
 from agent.app import app
 
 TOKEN = "test-token"
@@ -131,6 +131,11 @@ def live_server(tmp_path, monkeypatch):
     # Wait it out: the next test reuses debug_port 9222, and a Firefox still
     # dying on that port is indistinguishable from the new one failing to start.
     thread.join(30)
+    # Shutdown must take the whole browser tree with it. A leaked kiosk keeps
+    # holding 9222, and the next agent then silently drives that stale browser
+    # instead of the one it launched — which is how this got noticed.
+    with pytest.raises(RuntimeError):
+        browser.wait_ready(os.getenv("ROOM_BROWSER", "firefox"), 9222, timeout=10)
 
 
 @pytest.mark.skipif(not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
