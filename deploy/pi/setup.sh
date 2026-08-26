@@ -21,7 +21,12 @@ sudo -v
 echo "== packages"
 sudo apt update
 sudo apt full-upgrade -y
-sudo apt install -y chromium-browser python3-venv git
+sudo apt install -y python3-venv git
+# Trixie Pi OS ships Debian's `chromium`, which installs /usr/bin/chromium and
+# NO /usr/bin/chromium-browser. Bookworm and earlier shipped Raspberry Pi's own
+# `chromium-browser` build. Current name first, old name for an older card.
+sudo apt install -y chromium || sudo apt install -y chromium-browser
+CHROMIUM="$(command -v chromium || command -v chromium-browser || true)"
 
 echo "== tailscale"
 command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
@@ -105,11 +110,27 @@ if ! sudo grep -q '^profile_dir = "/run/user/' "$CFG"; then
   echo "         Set it to /run/user/$(id -u)/room-display/profile and restart."
 fi
 
+# Diagnostics only. Nothing below may abort the script: the install is already
+# done by this point, and `set -e` turning a failed *check* into a failed *run*
+# is what hid the summary and the token the first time.
 echo "== checks"
-findmnt -no FSTYPE "/run/user/$(id -u)" | grep -qx tmpfs && echo "   uploads on tmpfs: ok"
-chromium-browser --version
+if findmnt -no FSTYPE "/run/user/$(id -u)" | grep -qx tmpfs; then
+  echo "   profile + uploads on tmpfs: ok"
+else
+  echo "   WARNING: /run/user/$(id -u) is not tmpfs - Phase 6 buys you nothing"
+fi
+if [ -n "$CHROMIUM" ]; then
+  echo "   $("$CHROMIUM" --version)"
+else
+  echo "   WARNING: no chromium binary found - set browser.path in $CFG"
+fi
 sleep 5
-systemctl --user is-active display-agent || journalctl --user -u display-agent -n 20 --no-pager
+if systemctl --user is-active --quiet display-agent; then
+  echo "   display-agent: active"
+else
+  echo "   display-agent is NOT active:"
+  journalctl --user -u display-agent -n 20 --no-pager || true
+fi
 
 TOKEN="$(sudo sed -n 's|^token = "\(.*\)"|\1|p' "$CFG")"
 cat <<EOF

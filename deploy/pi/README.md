@@ -31,8 +31,14 @@ that says you're ready for this page.
 
 ```sh
 sudo apt update
-sudo apt install -y chromium-browser python3-venv git
+sudo apt install -y python3-venv git
+sudo apt install -y chromium || sudo apt install -y chromium-browser
 ```
+
+Trixie Pi OS ships Debian's `chromium` package, which installs `/usr/bin/chromium`
+and **no** `/usr/bin/chromium-browser`. Bookworm and earlier shipped Raspberry
+Pi's own `chromium-browser` build. `browser.py` and `setup.sh` both accept either
+name, so don't "fix" a script that calls the one you don't have.
 
 Tailscale should already be up (`tailscale ip -4` prints a 100.x address).
 

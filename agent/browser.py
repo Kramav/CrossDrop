@@ -30,8 +30,10 @@ CANDIDATES = {
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
     ],
     "chromium": [
-        "/usr/bin/chromium-browser",
+        # Trixie Pi OS ships Debian's chromium -> /usr/bin/chromium. Bookworm and
+        # earlier shipped Raspberry Pi's own build -> /usr/bin/chromium-browser.
         "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     ],
 }

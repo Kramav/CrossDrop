@@ -168,7 +168,7 @@ adjust the `upload.dir` path in the agent config accordingly — check with `id 
 id -u                      # expect 1000; upload.dir in the config uses it
 tailscale ip -4            # expect 100.x, no sudo
 findmnt /run/user/$(id -u) # expect tmpfs — this is what makes uploads RAM-only
-chromium-browser --version # expect a version; installed in README.md step 2
+chromium --version         # or chromium-browser on Bookworm; installed in README.md step 2
 ```
 
 If all four are good, go to [README.md](README.md) and install the agent.
