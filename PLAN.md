@@ -153,6 +153,8 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 **Phase 8 — Auto-update from GitHub (release-gated CD).** See §8 below for the full design. *Accept:* tag a deliberately broken commit → Pi's health-check fails → it stays on the previous good version (logged); tag a good commit → Pi updates within one timer interval and `/v1/status.version` shows the new tag.
 
+**v1.1.0 — screens editor in the web UI.** Edit a screen's `position`, `size`, `home_url` and name from the drop-zone page instead of `ssh` + `nano` + restart. Worth building because it applies **live**: `browser.place()` and `browser.open_window()` already work at runtime, so dragging a position moves the window while you watch it — which is the only reason this beats editing a file. *Constraints:* persist to a separate `screens.toml` the agent owns; **never** make `/etc/room-display/config.toml` agent-writable, it holds the token. `token`, `profile_dir`, `upload.dir`, `debug_port` and `browser.kind` stay file-only — they are install-time facts wired to the tmpfs layout, and changing them needs a browser relaunch. *Accept:* move a window between monitors from the UI, with no restart, and have it survive one.
+
 **Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**
 
 ---

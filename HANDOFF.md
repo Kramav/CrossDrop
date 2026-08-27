@@ -77,13 +77,9 @@ across reboots — deliberately not done.
 
 ## Open decisions
 
-- **Config editing in the desktop UI.** Discussed, deliberately deferred. If
-  built, do one narrow slice for **v1.1.0**: a screens editor (`position`,
-  `size`, `home_url`, name) with live apply — `place()` and `open_window()`
-  already work at runtime, so a position change can take effect without a
-  restart. Persist to a separate `screens.toml` the agent owns; do **not** make
-  `/etc/room-display/config.toml` agent-writable, it holds the token.
-  Token, paths, `debug_port` and `browser.kind` should stay file-only.
+- **Config editing in the desktop UI.** Deferred, and now written up as
+  **v1.1.0 in PLAN.md §7** with its constraints. Narrow slice only: a screens
+  editor with live apply. Token and install-time paths stay file-only.
 - **Saved links are per-browser** (`localStorage`), so the desktop and laptop
   each keep their own. Moving them to the agent was offered and not taken.
 - **Repo is public.** PLAN.md §10 assumes private + read-only deploy key. No
