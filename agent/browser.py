@@ -259,36 +259,42 @@ def current_url(cfg: dict, screen: str | None = None) -> str:
     return _cdp_page(cfg, screen)["url"] or "about:blank"
 
 
-# Home/End rather than a huge wheel delta: a long page has no "far enough".
-_JUMP = {"top": ("Home", 36), "bottom": ("End", 35)}
+# Far enough to hit the end of anything: scroll offsets clamp, so one oversized
+# wheel event lands exactly at the top or bottom. Key events (Home/End) look
+# tidier but do not reliably reach the PDF viewer's embedded frame.
+_JUMP = {"top": -10_000_000, "bottom": 10_000_000}
 
 
 def scroll(cfg: dict, screen: str | None = None, dy: int = 0,
            to: str | None = None) -> None:
     """Scroll one screen. `to` jumps to top/bottom, otherwise `dy` pixels.
 
-    Synthesised as real input events, not `window.scrollBy`: Chromium's built-in
-    PDF viewer is a plugin that ignores scripted window scrolling, and showing a
-    PDF is half of what this display is for.
+    Synthesised as a real wheel event, not `window.scrollBy`: Chromium's PDF
+    viewer is a plugin that ignores scripted window scrolling, and showing a PDF
+    is half of what this display is for.
     """
     if cfg["browser"]["kind"] == "firefox":
         raise NotImplementedError(
             "scroll needs CDP; use kind = \"chromium\" or \"edge\"")
+    if to is not None and to not in _JUMP:
+        raise ValueError(f"to must be one of {sorted(_JUMP)}")
     page = _cdp_page(cfg, screen)
     with _rpc(page["webSocketDebuggerUrl"]) as call:
-        if to:
-            if to not in _JUMP:
-                raise ValueError(f"to must be one of {sorted(_JUMP)}")
-            key, code = _JUMP[to]
-            for kind in ("rawKeyDown", "keyUp"):
-                call("Input.dispatchKeyEvent",
-                     {"type": kind, "key": key, "code": key,
-                      "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code})
-        else:
-            # x/y just have to land inside the viewport for the event to route.
-            call("Input.dispatchMouseEvent",
-                 {"type": "mouseWheel", "x": 100, "y": 100,
-                  "deltaX": 0, "deltaY": dy})
+        # Aim at the middle of the viewport. A fixed point near the top-left
+        # lands in the PDF viewer's thumbnail sidebar, and scrolls *that*.
+        x, y = _viewport_centre(call)
+        call("Input.dispatchMouseEvent",
+             {"type": "mouseWheel", "x": x, "y": y,
+              "deltaX": 0, "deltaY": _JUMP[to] if to else dy})
+
+
+def _viewport_centre(call) -> tuple[int, int]:
+    with contextlib.suppress(Exception):        # older builds, odd targets
+        v = call("Page.getLayoutMetrics").get("cssLayoutViewport") or {}
+        w, h = v.get("clientWidth"), v.get("clientHeight")
+        if w and h:
+            return w // 2, h // 2
+    return 400, 400                             # better than a sidebar hit
 
 
 def close() -> None:

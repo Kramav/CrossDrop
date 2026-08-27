@@ -81,23 +81,34 @@ def test_lost_window_falls_back_to_config_order(cdp):
 
 # --- scroll -----------------------------------------------------------------
 
+def wheel(cdp):
+    return next(p for _, m, p in cdp if m == "Input.dispatchMouseEvent")
+
+
 def test_scroll_dy_is_a_wheel_event(cdp):
     browser.scroll(make_cfg(), "left", dy=450)
-    ws, method, params = cdp[0]
     # A wheel event, not window.scrollBy: the PDF viewer ignores scripted scroll.
-    assert (ws, method) == ("ws://one", "Input.dispatchMouseEvent")
-    assert params["type"] == "mouseWheel" and params["deltaY"] == 450
+    assert [ws for ws, m, _ in cdp if m == "Input.dispatchMouseEvent"] == ["ws://one"]
+    assert wheel(cdp)["type"] == "mouseWheel" and wheel(cdp)["deltaY"] == 450
 
 
-def test_scroll_to_bottom_presses_end(cdp):
+def test_scroll_aims_at_the_viewport_centre(cdp):
+    """A fixed point near the top-left lands in the PDF viewer's thumbnail
+    sidebar and scrolls that instead of the document."""
+    browser.scroll(make_cfg(), "left", dy=100)
+    # The stub reports no layout metrics, so this is the fallback -- what matters
+    # is that it is nowhere near the sidebar.
+    assert wheel(cdp)["x"] >= 300 and wheel(cdp)["y"] >= 300
+
+
+def test_jumps_are_oversized_wheel_events(cdp):
+    """Scroll offsets clamp, so one huge delta lands exactly at the end -- and
+    unlike Home/End it reaches the PDF viewer's embedded frame."""
     browser.scroll(make_cfg(), "right", to="bottom")
-    assert [m for _, m, _ in cdp] == ["Input.dispatchKeyEvent"] * 2   # down, up
-    assert {p["windowsVirtualKeyCode"] for _, _, p in cdp} == {35}    # End
-
-
-def test_scroll_to_top_presses_home(cdp):
+    assert wheel(cdp)["deltaY"] > 1_000_000
+    cdp.clear()
     browser.scroll(make_cfg(), "left", to="top")
-    assert {p["windowsVirtualKeyCode"] for _, _, p in cdp} == {36}
+    assert wheel(cdp)["deltaY"] < -1_000_000
 
 
 def test_bad_jump_target_rejected(cdp):
