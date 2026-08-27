@@ -146,10 +146,16 @@ ignored there, so per-monitor targeting depends on Chromium running under
 XWayland and labwc honouring the X11 move request:
 
 ```sh
-wlr-randr        # note the second output's x offset — probably 1920
-chromium --ozone-platform=x11 --user-data-dir=/tmp/probe \
-         --window-position=1920,0 --window-size=800,600 about:blank &
+wlr-randr        # read the second output's "Position:" line — that x is what you want
+# DISPLAY=:0 is required: over SSH it is unset, and Chromium's X11 backend then
+# dies with "Missing X server or $DISPLAY" without telling you anything about
+# whether the compositor would have honoured the move.
+DISPLAY=:0 chromium --ozone-platform=x11 --user-data-dir=/tmp/probe \
+         --window-position=<x from wlr-randr>,0 --window-size=800,600 about:blank &
 ```
+
+Take the offset from `wlr-randr`, not from the monitor's resolution — outputs are
+laid out edge to edge, so a 1366-wide first screen puts the second at `1366,0`.
 
 Lands on the second monitor → configure screens below. Lands on the first →
 labwc ignored it, and the fallbacks are Wayfire (`wayfire.ini` window rules) or

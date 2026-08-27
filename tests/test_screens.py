@@ -132,6 +132,22 @@ def test_window_without_a_position_is_left_where_it_lands(cdp):
     assert [m for _, m, _ in cdp] == ["Target.createTarget"]
 
 
+def test_first_window_is_moved_not_opened(cdp):
+    """--kiosk already opened window 1 wherever the compositor wanted it. It has
+    to be *moved*, or its `position` silently does nothing and picking its
+    monitor becomes a matter of reordering the config until it guesses right."""
+    browser.place(make_cfg(), {"name": "left", "position": "0,0",
+                               "home_url": "about:blank"})
+    methods = [m for _, m, _ in cdp]
+    assert "Target.createTarget" not in methods          # no second window
+    assert methods == ["Browser.getWindowForTarget",
+                       "Browser.setWindowBounds", "Browser.setWindowBounds"]
+    move, full = [p["bounds"] for _, m, p in cdp if m == "Browser.setWindowBounds"]
+    # "normal" is also what un-fullscreens a --kiosk window so it can be moved.
+    assert move["windowState"] == "normal" and move["left"] == 0
+    assert full["windowState"] == "fullscreen"
+
+
 # --- autoscroll -------------------------------------------------------------
 
 def test_autoscroll_stops_when_the_screen_navigates(monkeypatch):

@@ -10,8 +10,10 @@ home_url = "/home"           # page the kiosk opens on launch. "/home" is the
 # One [[screen]] per monitor. Omit the lot and you get a single screen named
 # "main", which is what every single-monitor config already does.
 #
-# `position` is the window's x,y in the session's coordinate space -- check the
-# second output's x offset with `wlr-randr`. The FIRST screen lands wherever the
+# `position` is the window's x,y in the session's coordinate space -- take it
+# from the "Position:" line of `wlr-randr`, not from a monitor's resolution.
+# Outputs sit edge to edge, so a 1366-wide first screen puts the second at
+# "1366,0". The FIRST screen lands wherever the
 # compositor puts the kiosk window; positions only steer screens 2 and up.
 # Wayland ignores client positioning, so multi-screen forces Chromium under
 # XWayland. See deploy/pi/README.md before relying on it.

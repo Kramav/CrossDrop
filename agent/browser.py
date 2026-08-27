@@ -109,34 +109,58 @@ def launch(cfg: dict) -> subprocess.Popen:
     wait_ready(kind, port)
 
     _targets.clear()
+    if len(scr) > 1 or scr[0]["position"]:
+        # Window 1 exists already (--kiosk put it wherever the compositor liked),
+        # so it is *moved* rather than opened. Without this its `position` would
+        # silently do nothing and the only way to choose its monitor would be to
+        # reorder the config until it guessed right.
+        place(cfg, scr[0])
     for s in scr[1:]:
-        # --kiosk already fullscreened window 1 wherever the compositor put it;
-        # the rest are opened and placed over CDP.
         open_window(cfg, s)
     return proc
 
 
+def _place(call, target_id: str, position: str) -> None:
+    """Move a window onto the monitor containing `position`, then fullscreen it."""
+    if not position:
+        return
+    x, y = (int(v) for v in position.split(","))
+    win = call("Browser.getWindowForTarget", {"targetId": target_id})["windowId"]
+    # Move first, fullscreen second: Chromium refuses to move a window that is
+    # already fullscreen, so the order here is the whole trick. Setting "normal"
+    # is also what un-fullscreens a --kiosk window so it *can* be moved.
+    call("Browser.setWindowBounds", {"windowId": win, "bounds": {
+        "left": x, "top": y, "width": 800, "height": 600, "windowState": "normal"}})
+    call("Browser.setWindowBounds",
+         {"windowId": win, "bounds": {"windowState": "fullscreen"}})
+
+
+def place(cfg: dict, screen: dict) -> str:
+    """Move the window already belonging to `screen` onto its monitor."""
+    _require_cdp(cfg)
+    port = cfg["browser"]["debug_port"]
+    page = _cdp_page(cfg, screen["name"])
+    with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
+        _place(call, page["id"], screen["position"])
+    return page["id"]
+
+
 def open_window(cfg: dict, screen: dict) -> str:
     """Open a fullscreen window for `screen` and return its CDP target id."""
-    if cfg["browser"]["kind"] == "firefox":
-        raise NotImplementedError(
-            "multiple screens need CDP; use kind = \"chromium\" or \"edge\"")
+    _require_cdp(cfg)
     port = cfg["browser"]["debug_port"]
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
         tid = call("Target.createTarget",
                    {"url": screen["home_url"], "newWindow": True})["targetId"]
-        if screen["position"]:
-            x, y = (int(v) for v in screen["position"].split(","))
-            win = call("Browser.getWindowForTarget", {"targetId": tid})["windowId"]
-            # Move first, fullscreen second: Chromium refuses to move a window
-            # that is already fullscreen, so the order here is the whole trick.
-            call("Browser.setWindowBounds", {"windowId": win, "bounds": {
-                "left": x, "top": y, "width": 800, "height": 600,
-                "windowState": "normal"}})
-            call("Browser.setWindowBounds",
-                 {"windowId": win, "bounds": {"windowState": "fullscreen"}})
+        _place(call, tid, screen["position"])
     _targets[screen["name"]] = tid
     return tid
+
+
+def _require_cdp(cfg: dict) -> None:
+    if cfg["browser"]["kind"] == "firefox":
+        raise NotImplementedError(
+            "multiple screens need CDP; use kind = \"chromium\" or \"edge\"")
 
 
 def stop(cfg: dict, proc: subprocess.Popen) -> None:
