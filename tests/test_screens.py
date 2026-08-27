@@ -201,6 +201,40 @@ position = "1920,0"
     assert cfg["screens"][0]["home_url"] == "about:blank"   # inherited
 
 
+def test_home_url_carries_the_screen_name(tmp_path):
+    """Both windows share a profile and a debug port, so the url is the only way
+    the idle page can tell which monitor it is on. Without this every screen
+    renders the first screen's name."""
+    cfg = appmod.load_config(write_cfg(tmp_path, """
+[[screen]]
+name = "samsung"
+[[screen]]
+name = "acer"
+"""))
+    for s in cfg["screens"]:
+        assert s["home_url"] == "about:blank"      # not a /home url, left alone
+
+    cfg = appmod.load_config(write_cfg(tmp_path, """
+[[screen]]
+name = "samsung"
+home_url = "http://100.1.2.3:8080/home"
+[[screen]]
+name = "acer"
+home_url = "http://100.1.2.3:8080/home?x=1"
+"""))
+    assert cfg["screens"][0]["home_url"].endswith("/home?screen=samsung")
+    assert cfg["screens"][1]["home_url"].endswith("?x=1&screen=acer")
+
+
+def test_home_url_screen_name_not_doubled(tmp_path):
+    cfg = appmod.load_config(write_cfg(tmp_path, """
+[[screen]]
+name = "acer"
+home_url = "http://100.1.2.3:8080/home?screen=chosen"
+"""))
+    assert cfg["screens"][0]["home_url"].count("screen=") == 1
+
+
 def test_unnamed_screens_get_names(tmp_path):
     cfg = appmod.load_config(write_cfg(tmp_path, "[[screen]]\n[[screen]]\n"))
     assert [s["name"] for s in cfg["screens"]] == ["main", "screen2"]

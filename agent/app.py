@@ -7,7 +7,7 @@ import threading
 import time
 import tomllib
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
@@ -44,6 +44,14 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     for i, s in enumerate(cfg["screens"]):
         s["name"] = s["name"] or ("main" if i == 0 else f"screen{i + 1}")
         s["home_url"] = s["home_url"] or cfg.get("home_url", "about:blank")
+        # The idle page names the monitor it is on, and the url is the only way
+        # it can know: every window shares one profile and one debug port, so
+        # there is nothing else to tell them apart client-side.
+        # Match on the path: a url ending "?x=1" still points at /home.
+        if urlparse(s["home_url"]).path.rstrip("/").endswith("/home") \
+                and "screen=" not in s["home_url"]:
+            sep = "&" if "?" in s["home_url"] else "?"
+            s["home_url"] += f"{sep}screen={quote(s['name'])}"
     names = [s["name"] for s in cfg["screens"]]
     if len(set(names)) != len(names):
         raise RuntimeError(f"{path}: duplicate screen names {names}")
