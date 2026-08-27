@@ -131,6 +131,12 @@ def _place(call, target_id: str, position: str) -> None:
     # is also what un-fullscreens a --kiosk window so it *can* be moved.
     call("Browser.setWindowBounds", {"windowId": win, "bounds": {
         "left": x, "top": y, "width": 800, "height": 600, "windowState": "normal"}})
+    # ponytail: let the move land before asking for fullscreen. CDP returns as
+    # soon as Chromium has *sent* the request; a compositor that applies it
+    # asynchronously would otherwise fullscreen against the window's old output
+    # and put it straight back where it started. 300ms, not a handshake, because
+    # there is no event to wait on -- raise it if placement is ever flaky.
+    time.sleep(PLACE_SETTLE)
     call("Browser.setWindowBounds",
          {"windowId": win, "bounds": {"windowState": "fullscreen"}})
 
@@ -331,6 +337,10 @@ def _rpc(ws_url: str):
     finally:
         ws.close()
 
+
+# Seconds between moving a window and fullscreening it. Override with
+# ROOM_PLACE_SETTLE to test a compositor that is slower than this.
+PLACE_SETTLE = float(os.getenv("ROOM_PLACE_SETTLE", "0.3"))
 
 # screen name -> CDP target id, filled in by launch()/open_window().
 _targets: dict[str, str] = {}
