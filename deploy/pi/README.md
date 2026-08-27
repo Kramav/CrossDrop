@@ -138,7 +138,54 @@ caps it. Uncapped, Chromium sizes its cache from free space and fills
 `/run/user/1000`. Watch the headroom with `df -h /run/user/1000` — uploads share
 it, and the shipped `max_mb` × `keep` can reach 500 MB on its own.
 
-## 7. Auto-update (Phase 8)
+## 7. Two monitors
+
+**Run the probe before you configure anything.** Wayland gives the compositor
+final authority over window position and Chromium's `--window-position` is
+ignored there, so per-monitor targeting depends on Chromium running under
+XWayland and labwc honouring the X11 move request:
+
+```sh
+wlr-randr        # note the second output's x offset — probably 1920
+chromium --ozone-platform=x11 --user-data-dir=/tmp/probe \
+         --window-position=1920,0 --window-size=800,600 about:blank &
+```
+
+Lands on the second monitor → configure screens below. Lands on the first →
+labwc ignored it, and the fallbacks are Wayfire (`wayfire.ini` window rules) or
+an X11 session (`raspi-config` → Advanced → Wayland → X11). **The agent doesn't
+change either way** — only this step does.
+
+Then in `/etc/room-display/config.toml`:
+
+```toml
+[[screen]]
+name = "left"
+position = "0,0"
+[[screen]]
+name = "right"
+position = "1920,0"
+```
+
+One browser, one profile, one window per screen — so both monitors share your
+logins and Phase 6 still snapshots a single profile. Two browser instances would
+double the tmpfs footprint and split your cookies in half.
+
+The **first** screen lands wherever the compositor puts the kiosk window;
+`position` only steers the second and later ones. Order the config so the screen
+you care least about is first.
+
+```sh
+roomctl screens
+roomctl navigate https://example.com --screen right
+roomctl upload notes.pdf --screen left
+roomctl navigate https://example.com --screen all
+```
+
+Omit `--screen` and you hit the first one, which is exactly what a single-monitor
+Pi does today.
+
+## 8. Auto-update (Phase 8)
 
 The Pi pulls; GitHub never reaches in. Every ~30 min
 [update.sh](update.sh) asks GitHub for the highest `v*` tag and does nothing at
@@ -199,7 +246,7 @@ list-units --failed`) while the display keeps running the old release.
 `REPO` and a **read-only deploy key** on the Pi (PLAN.md §8), never a personal
 token.
 
-## 8. Acceptance (PLAN.md §7 Phase 5)
+## 9. Acceptance (PLAN.md §7 Phase 5)
 
 ```sh
 sudo reboot

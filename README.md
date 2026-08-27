@@ -33,7 +33,16 @@ roomctl navigate https://example.com
 roomctl upload ~/slides.pdf
 roomctl home
 roomctl -t spare status                           # a second display
+
+roomctl screens                                   # what monitors this Pi has
+roomctl navigate https://example.com -s right     # one monitor
+roomctl navigate https://example.com -s all       # both
+roomctl scroll --down | --up | --top | --bottom
+roomctl autoscroll start -s right --speed 60
 ```
+
+A **target** is a Pi; a **screen** is one monitor on it. Omit `-s` and you get
+the first screen, which is the whole story on a single-monitor display.
 
 Every command prints the agent's JSON reply, so it pipes into `jq`; errors go to
 stderr with exit 1. `targets.toml` holds bearer tokens and is git-ignored.
@@ -44,13 +53,25 @@ has the checkout: `python -m roomctl status`.
 
 Frozen. Bearer token on every route; FastAPI publishes the schema at `/docs`.
 
+Every route takes an optional `screen` (a name, or `"all"`). Omitted means the
+first screen — multi-monitor was added by *adding* a field, so a client written
+before it keeps working unchanged.
+
 | Route | Body | Returns |
 |---|---|---|
-| `POST /v1/navigate` | `{"url": "..."}` | `{"ok": true, "current_url": "..."}` |
-| `POST /v1/upload` | multipart `file` | `{"id": "...", "url": "/files/<id>"}`, then auto-navigates |
-| `POST /v1/reload` | — | `{"ok": true, "current_url": "..."}` |
-| `POST /v1/home` | — | `{"ok": true, "current_url": "..."}` |
-| `GET /v1/status` | — | `{"up": true, "current_url": "...", "browser": "ok", "version": "<tag>"}` |
+| `POST /v1/navigate` | `{"url": "...", "screen"?}` | `{"ok": true, "current_url": "..."}` |
+| `POST /v1/upload` | multipart `file`, `screen`? | `{"id": "...", "url": "/files/<id>"}`, then auto-navigates |
+| `POST /v1/reload` | `{"screen"?}` | `{"ok": true, "current_url": "..."}` |
+| `POST /v1/home` | `{"screen"?}` | `{"ok": true, "current_url": "..."}` |
+| `POST /v1/scroll` | `{"screen"?, "dy"?, "to"?}` | `to` is `"top"`\|`"bottom"`; else `dy` pixels |
+| `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
+| `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
+| `GET /v1/status` | — | as before, plus `"screens": [...]` |
+
+`GET /home` is the idle screen the kiosk sits on, and `GET /home-status` feeds
+it. Both are unauthenticated for the same reason `/files` is — the kiosk browser
+can't send a header. `/home-status` reports the **host** of what other screens
+are showing, never the full URL.
 
 `GET /files/{id}` is unauthenticated on purpose — the kiosk browser fetches it
 and cannot send a header. The random id is the capability, and ids are never
