@@ -51,13 +51,25 @@ def _exe(kind: str, path: str = "") -> str:
     return found
 
 
+def screens(cfg: dict) -> list[dict]:
+    # Configs built before multi-monitor have no "screens" key at all.
+    return cfg.get("screens") or [{"name": "main", "position": "",
+                                   "home_url": cfg.get("home_url", "about:blank")}]
+
+
 def launch(cfg: dict) -> subprocess.Popen:
-    """Start the kiosk browser and block until its debug port answers."""
+    """Start the kiosk browser and block until its debug port answers.
+
+    One browser, one profile, one debug port -- and one window per screen. Two
+    browser instances would double the RAM on a tmpfs profile and, worse, split
+    your logins across two cookie stores (PLAN.md §6 SSO note).
+    """
     b = cfg["browser"]
     kind, port = b["kind"], b["debug_port"]
     profile = Path(b["profile_dir"])
     profile.mkdir(parents=True, exist_ok=True)
-    home = cfg["home_url"]
+    scr = screens(cfg)
+    home = scr[0]["home_url"]
 
     if kind == "firefox":
         argv = [_exe(kind, b["path"]), "--remote-debugging-port", str(port),
@@ -82,12 +94,49 @@ def launch(cfg: dict) -> subprocess.Popen:
                 # cannot get back. Uncapped, Chromium sizes it from free space
                 # and eventually fills /run/user/<uid>, taking the kiosk with it.
                 f"--disk-cache-size={b['disk_cache_mb'] * 1024 * 1024}",
-                "--no-first-run", "--no-default-browser-check", home]
+                "--no-first-run", "--no-default-browser-check"]
+        # Wayland gives the compositor final say on window position and Chromium
+        # ignores --window-position there. Under XWayland the move is an X11
+        # configure request, which labwc honours. See deploy/pi/README.md.
+        if len(scr) > 1:
+            argv += ["--ozone-platform=x11"]
+        if scr[0]["position"]:
+            argv += [f"--window-position={scr[0]['position']}"]
+        argv += [home]
 
     # own process group on POSIX so stop() can take the whole tree down
     proc = subprocess.Popen(argv, start_new_session=os.name != "nt")
     wait_ready(kind, port)
+
+    _targets.clear()
+    for s in scr[1:]:
+        # --kiosk already fullscreened window 1 wherever the compositor put it;
+        # the rest are opened and placed over CDP.
+        open_window(cfg, s)
     return proc
+
+
+def open_window(cfg: dict, screen: dict) -> str:
+    """Open a fullscreen window for `screen` and return its CDP target id."""
+    if cfg["browser"]["kind"] == "firefox":
+        raise NotImplementedError(
+            "multiple screens need CDP; use kind = \"chromium\" or \"edge\"")
+    port = cfg["browser"]["debug_port"]
+    with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
+        tid = call("Target.createTarget",
+                   {"url": screen["home_url"], "newWindow": True})["targetId"]
+        if screen["position"]:
+            x, y = (int(v) for v in screen["position"].split(","))
+            win = call("Browser.getWindowForTarget", {"targetId": tid})["windowId"]
+            # Move first, fullscreen second: Chromium refuses to move a window
+            # that is already fullscreen, so the order here is the whole trick.
+            call("Browser.setWindowBounds", {"windowId": win, "bounds": {
+                "left": x, "top": y, "width": 800, "height": 600,
+                "windowState": "normal"}})
+            call("Browser.setWindowBounds",
+                 {"windowId": win, "bounds": {"windowState": "fullscreen"}})
+    _targets[screen["name"]] = tid
+    return tid
 
 
 def stop(cfg: dict, proc: subprocess.Popen) -> None:
@@ -153,8 +202,8 @@ def wait_ready(kind: str, port: int, timeout: float = 30.0) -> None:
             time.sleep(0.3)
 
 
-def navigate(cfg: dict, url: str) -> str:
-    """Point the kiosk tab at `url`. Returns the url we sent it to."""
+def navigate(cfg: dict, url: str, screen: str | None = None) -> str:
+    """Point one screen's window at `url`. Returns the url we sent it to."""
     b = cfg["browser"]
     if b["kind"] == "firefox":
         port = b["debug_port"]
@@ -165,19 +214,51 @@ def navigate(cfg: dict, url: str) -> str:
               {"context": _top_context(port)["context"], "url": url,
                "wait": "interactive"})
     else:
-        page = _cdp_page(b["debug_port"])
+        page = _cdp_page(cfg, screen)
         with _rpc(page["webSocketDebuggerUrl"]) as call:
             call("Page.navigate", {"url": url})
     return url
 
 
-def current_url(cfg: dict) -> str:
+def current_url(cfg: dict, screen: str | None = None) -> str:
     b = cfg["browser"]
     if b["kind"] == "firefox":
         return _top_context(b["debug_port"])["url"]
     # CDP reports a blank tab as "", BiDi as "about:blank". Normalise, or the two
     # backends disagree and /v1/reload tries to navigate to the empty string.
-    return _cdp_page(b["debug_port"])["url"] or "about:blank"
+    return _cdp_page(cfg, screen)["url"] or "about:blank"
+
+
+# Home/End rather than a huge wheel delta: a long page has no "far enough".
+_JUMP = {"top": ("Home", 36), "bottom": ("End", 35)}
+
+
+def scroll(cfg: dict, screen: str | None = None, dy: int = 0,
+           to: str | None = None) -> None:
+    """Scroll one screen. `to` jumps to top/bottom, otherwise `dy` pixels.
+
+    Synthesised as real input events, not `window.scrollBy`: Chromium's built-in
+    PDF viewer is a plugin that ignores scripted window scrolling, and showing a
+    PDF is half of what this display is for.
+    """
+    if cfg["browser"]["kind"] == "firefox":
+        raise NotImplementedError(
+            "scroll needs CDP; use kind = \"chromium\" or \"edge\"")
+    page = _cdp_page(cfg, screen)
+    with _rpc(page["webSocketDebuggerUrl"]) as call:
+        if to:
+            if to not in _JUMP:
+                raise ValueError(f"to must be one of {sorted(_JUMP)}")
+            key, code = _JUMP[to]
+            for kind in ("rawKeyDown", "keyUp"):
+                call("Input.dispatchKeyEvent",
+                     {"type": kind, "key": key, "code": key,
+                      "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code})
+        else:
+            # x/y just have to land inside the viewport for the event to route.
+            call("Input.dispatchMouseEvent",
+                 {"type": "mouseWheel", "x": 100, "y": 100,
+                  "deltaX": 0, "deltaY": dy})
 
 
 def close() -> None:
@@ -227,11 +308,31 @@ def _rpc(ws_url: str):
         ws.close()
 
 
-def _cdp_page(port: int) -> dict:
+# screen name -> CDP target id, filled in by launch()/open_window().
+_targets: dict[str, str] = {}
+
+
+def _cdp_page(cfg: dict, screen: str | None = None) -> dict:
+    """The page target belonging to `screen`."""
+    port = cfg["browser"]["debug_port"]
     pages = [t for t in _get(port, "/json") if t.get("type") == "page"]
     if not pages:
         raise RuntimeError("browser has no page target")
-    return pages[0]
+
+    names = [s["name"] for s in screens(cfg)]
+    name = screen or names[0]
+    tid = _targets.get(name)
+    for p in pages:
+        if p["id"] == tid:
+            return p
+
+    # No mapping, or the window was closed and reopened, or we are driving a
+    # browser we did not launch. Fall back to config order -- that is the order
+    # the windows were opened in -- and remember what we picked.
+    i = names.index(name) if name in names else 0
+    page = pages[i] if i < len(pages) else pages[0]
+    _targets[name] = page["id"]
+    return page
 
 
 def _bidi_url(port: int) -> str:

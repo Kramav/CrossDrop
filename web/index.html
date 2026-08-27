@@ -3,23 +3,54 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Room display</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font: 16px system-ui, sans-serif; max-width: 34rem; margin: 2rem auto; padding: 0 1rem; }
+  :root { color-scheme: light dark; --line: color-mix(in srgb, currentColor 22%, transparent); }
+  * { box-sizing: border-box; }
+  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto;
+         padding: 0 1rem 3rem; }
+  h1 { font-size: 1.3rem; margin: 0 0 1rem; }
+  fieldset { border: 1px solid var(--line); border-radius: .6rem; padding: .8rem;
+             margin: 0 0 1rem; }
+  legend { padding: 0 .4rem; font-size: .8rem; text-transform: uppercase;
+           letter-spacing: .08em; opacity: .65; }
+
+  /* screen picker */
+  #screens { display: flex; flex-wrap: wrap; gap: .4rem; }
+  #screens button { flex: 1; min-width: 7rem; border: 1px solid var(--line);
+                    background: transparent; border-radius: .4rem; padding: .5rem;
+                    text-align: left; line-height: 1.25; }
+  #screens button[aria-pressed=true] { border-color: currentColor;
+    background: color-mix(in srgb, currentColor 12%, transparent); font-weight: 600; }
+  #screens .where { display: block; font-size: .78rem; font-weight: 400; opacity: .6;
+                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
   #drop { border: 2px dashed currentColor; border-radius: .5rem; padding: 2.5rem 1rem;
           text-align: center; opacity: .6; }
   #drop.over { opacity: 1; background: color-mix(in srgb, currentColor 12%, transparent); }
   #drop label { text-decoration: underline; cursor: pointer; }
   #drop input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
   form { display: flex; gap: .5rem; margin: 1rem 0; }
   input[type=url] { flex: 1; min-width: 0; padding: .5rem; font: inherit; }
   button { padding: .5rem .9rem; font: inherit; cursor: pointer; }
+  .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .row.tight { gap: .3rem; }
   #saved { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; list-style: none; }
-  #saved button { max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #saved button { max-width: 16rem; overflow: hidden; text-overflow: ellipsis;
+                  white-space: nowrap; }
   #saved .x { padding: .5rem; }
-  #status { opacity: .7; word-break: break-all; }
+  #auto[aria-pressed=true] { background: color-mix(in srgb, currentColor 20%, transparent);
+                             font-weight: 600; }
+  #status { opacity: .7; word-break: break-all; min-height: 1.5em; }
+  kbd { font: .8em ui-monospace, monospace; border: 1px solid var(--line);
+        border-bottom-width: 2px; border-radius: .3rem; padding: 0 .3em; }
 </style>
 
 <h1>Room display</h1>
+
+<fieldset>
+  <legend>Send to</legend>
+  <div id="screens"></div>
+</fieldset>
 
 <div id="drop">
   Drop or paste a link or file here, or
@@ -39,10 +70,27 @@
 
 <ul id="saved"></ul>
 
-<form id="controls">
+<fieldset>
+  <legend>Scroll</legend>
+  <div class="row tight">
+    <button type="button" id="top" title="Jump to top">⤒</button>
+    <button type="button" id="up" title="Up a screenful">▲</button>
+    <button type="button" id="down" title="Down a screenful">▼</button>
+    <button type="button" id="bottom" title="Jump to bottom">⤓</button>
+    <button type="button" id="auto" aria-pressed="false"
+            title="Scroll slowly and continuously">Auto-scroll</button>
+    <label>speed <input id="speed" type="range" min="10" max="120" value="40"></label>
+  </div>
+  <p style="margin:.6rem 0 0;font-size:.85rem;opacity:.65">
+    <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> <kbd>Home</kbd>
+    <kbd>End</kbd> work here too, unless you're typing in the box.
+  </p>
+</fieldset>
+
+<div class="row">
   <button type="button" id="home">Home</button>
   <button type="button" id="reload">Reload</button>
-</form>
+</div>
 
 <p id="status" role="status" aria-live="polite">…</p>
 
@@ -53,46 +101,83 @@ const store = { // ponytail: saved links live in this browser only; move to the 
   set: v => localStorage.saved = JSON.stringify(v),
 };
 
+// "" means "whatever the agent calls its first screen" — the same default the
+// API uses, so a single-monitor Pi needs no selection at all.
+let screens = [];
+let target = localStorage.screen || "";
+
 function token() {
   return localStorage.token || (localStorage.token = prompt("Agent token:") || "");
 }
 
-async function api(path, body) {
-  const r = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: "Bearer " + token() },
-    body: JSON.stringify(body || {}),
-  });
+function auth() { return { Authorization: "Bearer " + token() }; }
+
+async function req(path, opts) {
+  const r = await fetch(path, opts);
   if (r.status === 401) { delete localStorage.token; throw new Error("bad token"); }
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
   return r.json();
 }
 
-async function send(file) {
-  $("#status").textContent = "uploading " + file.name + "…";
-  const body = new FormData();
-  body.append("file", file);
-  try {
-    const r = await fetch("/v1/upload", { method: "POST", body,
-      headers: { Authorization: "Bearer " + token() } });
-    if (r.status === 401) { delete localStorage.token; throw new Error("bad token"); }
-    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
-  } catch (e) { $("#status").textContent = "✗ " + e.message; return; }
+// Every action carries the selected screen. Omitted server-side = first screen.
+async function api(path, body) {
+  return req(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...auth() },
+    body: JSON.stringify({ screen: target || undefined, ...body }),
+  });
+}
+
+async function act(fn) {
+  $("#status").textContent = "…";
+  try { await fn(); $("#status").textContent = ""; }
+  catch (e) { $("#status").textContent = "✗ " + e.message; }
   refresh();
 }
 
-async function show(url) {
-  $("#status").textContent = "…";
-  try { await api("/v1/navigate", { url }); } catch (e) { $("#status").textContent = "✗ " + e.message; }
-  refresh();
+const show = url => act(() => api("/v1/navigate", { url }));
+
+function send(file) {
+  return act(async () => {
+    $("#status").textContent = "uploading " + file.name + "…";
+    const body = new FormData();
+    body.append("file", file);
+    if (target) body.append("screen", target);
+    await req("/v1/upload", { method: "POST", body, headers: auth() });
+  });
+}
+
+function drawScreens() {
+  // One monitor: the picker is noise. Hide the whole fieldset.
+  $("#screens").closest("fieldset").hidden = screens.length < 2;
+  const all = [...screens, { name: "all", current_url: "every screen" }];
+  $("#screens").replaceChildren(...all.map(s => {
+    const b = document.createElement("button");
+    b.type = "button";
+    const sel = target === s.name || (!target && s === screens[0]);
+    b.setAttribute("aria-pressed", String(sel));
+    const where = document.createElement("span");
+    where.className = "where";
+    where.textContent = s.name === "all" ? "every screen"
+      : (s.current_url || "—").replace(/^https?:\/\//, "");
+    b.append(s.name + (s.autoscroll ? " ⏬" : ""), where);
+    b.onclick = () => { target = localStorage.screen = s.name; drawScreens(); };
+    return b;
+  }));
 }
 
 async function refresh() {
   try {
-    const r = await fetch("/v1/status", { headers: { Authorization: "Bearer " + token() } });
-    if (r.status === 401) { delete localStorage.token; throw new Error("bad token"); }
-    const s = await r.json();
-    $("#status").textContent = s.browser === "ok" ? s.current_url : "browser down";
+    const s = await req("/v1/status", { headers: auth() });
+    screens = s.screens || [];
+    if (target && target !== "all" && !screens.some(x => x.name === target)) target = "";
+    const me = screens.find(x => x.name === target) || screens[0];
+    if (!$("#status").textContent) {
+      $("#status").textContent = s.browser === "ok"
+        ? (me ? `${me.name}: ${me.current_url || "—"}` : s.current_url) : "browser down";
+    }
+    $("#auto").setAttribute("aria-pressed", String(!!(me && me.autoscroll)));
+    drawScreens();
   } catch (e) { $("#status").textContent = "✗ " + e.message; }
 }
 
@@ -118,8 +203,34 @@ $("#save").onclick = () => {
   const url = $("#url").value;
   if (url && !store.get().includes(url)) { store.set([...store.get(), url]); drawSaved(); }
 };
-$("#home").onclick = () => api("/v1/home").then(refresh);
-$("#reload").onclick = () => api("/v1/reload").then(refresh);
+$("#home").onclick = () => act(() => api("/v1/home"));
+$("#reload").onclick = () => act(() => api("/v1/reload"));
+
+const scroll = body => act(() => api("/v1/scroll", body));
+const page = () => Number($("#speed").value) * 15;   // a screenful-ish per press
+$("#up").onclick = () => scroll({ dy: -page() });
+$("#down").onclick = () => scroll({ dy: page() });
+$("#top").onclick = () => scroll({ to: "top" });
+$("#bottom").onclick = () => scroll({ to: "bottom" });
+$("#auto").onclick = () => {
+  const on = $("#auto").getAttribute("aria-pressed") === "true";
+  act(() => api("/v1/autoscroll", {
+    action: on ? "stop" : "start", speed: Number($("#speed").value),
+  }));
+};
+
+// Keyboard control, the third scroll mode. Ignored while typing, so the URL box
+// still behaves like a URL box.
+const KEYS = {
+  ArrowDown: () => scroll({ dy: 120 }), ArrowUp: () => scroll({ dy: -120 }),
+  PageDown: () => scroll({ dy: page() }), PageUp: () => scroll({ dy: -page() }),
+  Home: () => scroll({ to: "top" }), End: () => scroll({ to: "bottom" }),
+};
+document.onkeydown = e => {
+  if (e.target.matches("input, textarea") || e.ctrlKey || e.altKey || e.metaKey) return;
+  const fn = KEYS[e.key];
+  if (fn) { e.preventDefault(); fn(); }
+};
 
 $("#pick").onchange = e => e.target.files[0] && send(e.target.files[0]);
 

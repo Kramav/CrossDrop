@@ -1,0 +1,78 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room display</title>
+<style>
+  /* Read from across a room, not from a desk: everything scales with vmin. */
+  :root { color-scheme: dark; --dim: #7c8595; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    justify-content: center; gap: 4vmin; padding: 6vmin;
+    font: 400 2.2vmin/1.5 system-ui, sans-serif;
+    color: #e8ecf3;
+    background: radial-gradient(120vmin 90vmin at 25% 0%, #1d2740 0%, #0b0f18 70%);
+  }
+  h1 { margin: 0; font-size: 7vmin; font-weight: 600; letter-spacing: -.02em; }
+  h1 small { display: block; font-size: 2.4vmin; font-weight: 400;
+             color: var(--dim); letter-spacing: .18em; text-transform: uppercase;
+             margin-bottom: 1.2vmin; }
+  .send { font-size: 3vmin; }
+  .addr { display: inline-block; margin-top: 1vmin; padding: 1.2vmin 2vmin;
+          border-radius: .8vmin; background: #ffffff12; border: 1px solid #ffffff20;
+          font-family: ui-monospace, monospace; font-size: 3.4vmin; }
+  .hint { color: var(--dim); margin-top: 2vmin; }
+  footer { margin-top: auto; display: flex; flex-wrap: wrap; gap: 3vmin;
+           align-items: center; color: var(--dim); font-size: 1.9vmin; }
+  .pill { display: flex; align-items: center; gap: .8vmin; }
+  .dot { width: 1.1vmin; height: 1.1vmin; border-radius: 50%; background: #4ade80; }
+  .dot.idle { background: #47506380; }
+  .err { color: #fca5a5; }
+</style>
+
+<h1><small id="screen-label">Room display</small><span id="screen">…</span></h1>
+
+<div class="send">
+  Send something here from any box on the tailnet:
+  <div><span class="addr" id="addr">…</span></div>
+  <div class="hint">Open that in a browser, then drop a link or a file on it.</div>
+</div>
+
+<footer>
+  <span class="pill"><span class="dot" id="live"></span><span id="version">…</span></span>
+  <span id="others"></span>
+</footer>
+
+<script>
+const $ = s => document.querySelector(s);
+// ?screen=<name> is set by the agent when it opens this window, so each monitor
+// knows which one it is without the page having to guess.
+const me = new URLSearchParams(location.search).get("screen") || "";
+
+$("#addr").textContent = location.host;
+
+async function tick() {
+  try {
+    const s = await (await fetch("/home-status")).json();
+    $("#screen").textContent = s.screens.length > 1 && me ? me : (s.name || "Room display");
+    $("#screen-label").textContent = s.screens.length > 1 ? "This screen" : "Ready";
+    $("#version").textContent = s.version;
+    $("#live").classList.remove("idle");
+    // Other monitors: host only, never the full url -- see /home-status.
+    $("#others").replaceChildren(...s.screens.filter(x => x.name !== me).map(x => {
+      const el = document.createElement("span");
+      el.className = "pill";
+      const dot = document.createElement("span");
+      dot.className = "dot" + (x.showing ? "" : " idle");
+      el.append(dot, `${x.name}: ${x.showing || "idle"}`);
+      return el;
+    }));
+  } catch (e) {
+    $("#live").classList.add("idle");
+    $("#version").textContent = "agent unreachable";
+    $("#version").className = "err";
+  }
+}
+tick();
+setInterval(tick, 10000);
+</script>

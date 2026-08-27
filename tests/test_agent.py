@@ -57,7 +57,13 @@ def test_scheme_allowlist(client):
 def test_status_reports_dead_browser(client):
     r = client.get("/v1/status", headers={"Authorization": f"Bearer {TOKEN}"})
     assert r.status_code == 200
-    assert r.json() == {"up": True, "current_url": None, "browser": "down", "version": "dev"}
+    s = r.json()
+    # The pre-multi-monitor shape, unchanged. Multi-screen was added by *adding*
+    # a field, never by changing one of these -- old clients must keep working.
+    assert {k: s[k] for k in ("up", "current_url", "browser", "version")} == {
+        "up": True, "current_url": None, "browser": "down", "version": "dev"}
+    # A config with no [[screen]] blocks still has exactly one screen.
+    assert [x["name"] for x in s["screens"]] == ["main"]
 
 
 def test_ui_served_without_token(client):

@@ -2,7 +2,28 @@
 # /etc/room-display/config.toml and is pointed at with ROOM_CONFIG.
 
 token = "change-me"          # bearer token for every /v1 route
-home_url = "about:blank"     # page the kiosk opens on launch
+home_url = "/home"           # page the kiosk opens on launch. "/home" is the
+                             # agent's own idle screen; on the Pi make it the
+                             # full tailnet url, e.g. http://100.x.y.z:8080/home
+                             # ("about:blank" is still valid — a white screen.)
+
+# One [[screen]] per monitor. Omit the lot and you get a single screen named
+# "main", which is what every single-monitor config already does.
+#
+# `position` is the window's x,y in the session's coordinate space -- check the
+# second output's x offset with `wlr-randr`. The FIRST screen lands wherever the
+# compositor puts the kiosk window; positions only steer screens 2 and up.
+# Wayland ignores client positioning, so multi-screen forces Chromium under
+# XWayland. See deploy/pi/README.md before relying on it.
+#
+# [[screen]]
+# name = "left"
+# position = "0,0"
+# home_url = ""              # empty = the top-level home_url above
+#
+# [[screen]]
+# name = "right"
+# position = "1920,0"
 
 [browser]
 kind = "firefox"             # "firefox" (WebDriver BiDi) | "edge" | "chromium" (CDP)

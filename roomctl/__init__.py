@@ -60,23 +60,45 @@ def _call(target: str | None, method: str, path: str, **kw) -> dict:
     return r.json()
 
 
+# A *target* is a Pi. A *screen* is one monitor attached to it. screen=None means
+# that Pi's first screen, which is the whole API on a single-monitor display.
 def status(target: str | None = None) -> dict:
     return _call(target, "GET", "/v1/status")
 
 
-def navigate(url: str, target: str | None = None) -> dict:
-    return _call(target, "POST", "/v1/navigate", json={"url": url})
+def screens(target: str | None = None) -> dict:
+    return _call(target, "GET", "/v1/screens")
 
 
-def upload(path: str | Path, target: str | None = None) -> dict:
+def navigate(url: str, target: str | None = None, screen: str | None = None) -> dict:
+    return _call(target, "POST", "/v1/navigate", json={"url": url, "screen": screen})
+
+
+def upload(path: str | Path, target: str | None = None,
+           screen: str | None = None) -> dict:
     p = Path(path)
     with p.open("rb") as fh:
-        return _call(target, "POST", "/v1/upload", files={"file": (p.name, fh)})
+        # multipart, so `screen` rides along as a form field, not JSON
+        data = {"screen": screen} if screen else None
+        return _call(target, "POST", "/v1/upload",
+                     files={"file": (p.name, fh)}, data=data)
 
 
-def reload(target: str | None = None) -> dict:
-    return _call(target, "POST", "/v1/reload")
+def reload(target: str | None = None, screen: str | None = None) -> dict:
+    return _call(target, "POST", "/v1/reload", json={"screen": screen})
 
 
-def home(target: str | None = None) -> dict:
-    return _call(target, "POST", "/v1/home")
+def home(target: str | None = None, screen: str | None = None) -> dict:
+    return _call(target, "POST", "/v1/home", json={"screen": screen})
+
+
+def scroll(target: str | None = None, screen: str | None = None,
+           dy: int = 600, to: str | None = None) -> dict:
+    return _call(target, "POST", "/v1/scroll",
+                 json={"screen": screen, "dy": dy, "to": to})
+
+
+def autoscroll(action: str, target: str | None = None, screen: str | None = None,
+               speed: int = 40) -> dict:
+    return _call(target, "POST", "/v1/autoscroll",
+                 json={"screen": screen, "action": action, "speed": speed})
