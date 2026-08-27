@@ -18,14 +18,21 @@ home_url = "/home"           # page the kiosk opens on launch. "/home" is the
 # Wayland ignores client positioning, so multi-screen forces Chromium under
 # XWayland. See deploy/pi/README.md before relying on it.
 #
+# `size` is cosmetic: the window is briefly visible between being moved and being
+# fullscreened, and matching it to the monitor avoids a small-window flash at
+# every boot. Omit it and you get 800x600 for that moment. Fullscreen wins either
+# way, so a wrong size costs you nothing but the flash.
+#
 # [[screen]]
 # name = "left"
 # position = "0,0"
+# size = "1366x768"
 # home_url = ""              # empty = the top-level home_url above
 #
 # [[screen]]
 # name = "right"
-# position = "1920,0"
+# position = "1366,0"
+# size = "2560x1440"
 
 [browser]
 kind = "firefox"             # "firefox" (WebDriver BiDi) | "edge" | "chromium" (CDP)

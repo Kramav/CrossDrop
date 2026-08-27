@@ -120,17 +120,33 @@ def launch(cfg: dict) -> subprocess.Popen:
     return proc
 
 
-def _place(call, target_id: str, position: str) -> None:
+def _pair(value: str, sep: str, field: str) -> tuple[int, int]:
+    """Parse "1366,0" / "2560x1440". A typo here breaks the kiosk at boot on a
+    box with no keyboard, so it fails with the offending value, not a ValueError
+    from deep inside a generator."""
+    try:
+        a, b = value.split(sep)
+        return int(a), int(b)
+    except ValueError:
+        raise RuntimeError(
+            f"screen {field} must look like {sep.join(('1920', '1080'))}, got {value!r}")
+
+
+def _place(call, target_id: str, position: str, size: str = "") -> None:
     """Move a window onto the monitor containing `position`, then fullscreen it."""
     if not position:
         return
-    x, y = (int(v) for v in position.split(","))
+    x, y = _pair(position, ",", "position")
+    # Sized to the monitor when we know it: the window is briefly visible between
+    # the move and the fullscreen, and an 800x600 box on a 1440p panel is a
+    # conspicuous flash at every boot. Cosmetic only -- fullscreen overrides it.
+    w, h = _pair(size, "x", "size") if size else (800, 600)
     win = call("Browser.getWindowForTarget", {"targetId": target_id})["windowId"]
     # Move first, fullscreen second: Chromium refuses to move a window that is
     # already fullscreen, so the order here is the whole trick. Setting "normal"
     # is also what un-fullscreens a --kiosk window so it *can* be moved.
     call("Browser.setWindowBounds", {"windowId": win, "bounds": {
-        "left": x, "top": y, "width": 800, "height": 600, "windowState": "normal"}})
+        "left": x, "top": y, "width": w, "height": h, "windowState": "normal"}})
     # ponytail: let the move land before asking for fullscreen. CDP returns as
     # soon as Chromium has *sent* the request; a compositor that applies it
     # asynchronously would otherwise fullscreen against the window's old output
@@ -147,7 +163,7 @@ def place(cfg: dict, screen: dict) -> str:
     port = cfg["browser"]["debug_port"]
     page = _cdp_page(cfg, screen["name"])
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
-        _place(call, page["id"], screen["position"])
+        _place(call, page["id"], screen["position"], screen.get("size", ""))
     return page["id"]
 
 
@@ -158,7 +174,7 @@ def open_window(cfg: dict, screen: dict) -> str:
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
         tid = call("Target.createTarget",
                    {"url": screen["home_url"], "newWindow": True})["targetId"]
-        _place(call, tid, screen["position"])
+        _place(call, tid, screen["position"], screen.get("size", ""))
     _targets[screen["name"]] = tid
     return tid
 

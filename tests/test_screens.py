@@ -137,6 +137,25 @@ def test_second_window_is_moved_then_fullscreened(cdp):
     assert full["windowState"] == "fullscreen"
 
 
+def test_size_matches_the_monitor_to_avoid_a_boot_flash(cdp):
+    browser.open_window(make_cfg(), {"name": "right", "position": "1366,0",
+                                     "size": "2560x1440", "home_url": "about:blank"})
+    move = next(p["bounds"] for _, m, p in cdp
+                if m == "Browser.setWindowBounds" and p["bounds"].get("width"))
+    assert (move["width"], move["height"]) == (2560, 1440)
+
+
+def test_a_typo_in_position_names_the_value(cdp):
+    """This runs at boot on a box with no keyboard: the error has to say what to
+    fix, not raise ValueError from inside a generator."""
+    with pytest.raises(RuntimeError, match="1366:0"):
+        browser.open_window(make_cfg(), {"name": "right", "position": "1366:0",
+                                         "size": "", "home_url": "about:blank"})
+    with pytest.raises(RuntimeError, match="2560,1440"):
+        browser.open_window(make_cfg(), {"name": "right", "position": "0,0",
+                                         "size": "2560,1440", "home_url": "about:blank"})
+
+
 def test_window_without_a_position_is_left_where_it_lands(cdp):
     browser.open_window(make_cfg(), {"name": "right", "position": "",
                                      "home_url": "about:blank"})

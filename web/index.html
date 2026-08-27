@@ -71,7 +71,7 @@
 <ul id="saved"></ul>
 
 <fieldset>
-  <legend>Scroll</legend>
+  <legend id="scroll-legend">Scroll</legend>
   <div class="row tight">
     <button type="button" id="top" title="Jump to top">⤒</button>
     <button type="button" id="up" title="Up a screenful">▲</button>
@@ -101,8 +101,10 @@ const store = { // ponytail: saved links live in this browser only; move to the 
   set: v => localStorage.saved = JSON.stringify(v),
 };
 
-// "" means "whatever the agent calls its first screen" — the same default the
-// API uses, so a single-monitor Pi needs no selection at all.
+// Always a real screen name once we've talked to the agent, never "". Letting
+// it stay empty meant every button silently acted on the first screen with
+// nothing in the UI saying so — which reads as "scroll is broken on that
+// monitor" rather than "you didn't pick it".
 let screens = [];
 let target = localStorage.screen || "";
 
@@ -150,12 +152,14 @@ function send(file) {
 function drawScreens() {
   // One monitor: the picker is noise. Hide the whole fieldset.
   $("#screens").closest("fieldset").hidden = screens.length < 2;
+  // Name the armed screen on the controls too, so it is never a guess.
+  $("#scroll-legend").textContent =
+    screens.length > 1 && target ? `Scroll — ${target}` : "Scroll";
   const all = [...screens, { name: "all", current_url: "every screen" }];
   $("#screens").replaceChildren(...all.map(s => {
     const b = document.createElement("button");
     b.type = "button";
-    const sel = target === s.name || (!target && s === screens[0]);
-    b.setAttribute("aria-pressed", String(sel));
+    b.setAttribute("aria-pressed", String(target === s.name));
     const where = document.createElement("span");
     where.className = "where";
     where.textContent = s.name === "all" ? "every screen"
@@ -170,11 +174,18 @@ async function refresh() {
   try {
     const s = await req("/v1/status", { headers: auth() });
     screens = s.screens || [];
-    if (target && target !== "all" && !screens.some(x => x.name === target)) target = "";
-    const me = screens.find(x => x.name === target) || screens[0];
+    // Pin the selection to a real screen: first run, or a screen that has since
+    // been renamed out of the config.
+    if (target !== "all" && !screens.some(x => x.name === target)) {
+      target = screens.length ? screens[0].name : "";
+      if (target) localStorage.screen = target;
+    }
+    const me = screens.find(x => x.name === target);
     if (!$("#status").textContent) {
       $("#status").textContent = s.browser === "ok"
-        ? (me ? `${me.name}: ${me.current_url || "—"}` : s.current_url) : "browser down";
+        ? (target === "all" ? "all screens"
+           : me ? `${me.name}: ${me.current_url || "—"}` : s.current_url)
+        : "browser down";
     }
     $("#auto").setAttribute("aria-pressed", String(!!(me && me.autoscroll)));
     drawScreens();

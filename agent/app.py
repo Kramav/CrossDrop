@@ -22,7 +22,7 @@ DEFAULTS = {
     "debug_port": 9222, "disk_cache_mb": 100,
 }
 UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 20}
-SCREEN_DEFAULTS = {"name": "", "position": "", "home_url": ""}
+SCREEN_DEFAULTS = {"name": "", "position": "", "size": "", "home_url": ""}
 
 
 def load_config(path: str | os.PathLike | None = None) -> dict:
