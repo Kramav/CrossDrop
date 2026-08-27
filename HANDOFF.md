@@ -17,23 +17,25 @@ The four v1.0.0 features are built **and verified on real hardware**:
 
 ## The next thing to do
 
-**Tag v1.0.0 and run the Phase 8 acceptance on the spare Pi.** This is the only
-mechanism in the project that has never run outside stubs, and it is the safety
-net for every future change. Do not enable auto-update on the display Pi until
-the spare has survived it.
+**Tag v1.0.0 and run the Phase 8 acceptance.** This is the only mechanism in the
+project that has never run outside stubs — updates so far have been manual
+`git pull`s, which bypass all of it — and it is the safety net for every future
+change. There is no spare Pi to break first, so the display Pi runs the
+acceptance itself: drive it by hand and leave the timer disabled until it passes.
 
 Order:
 
 1. Check CI is green on GitHub (it has run on pushes; confirm before tagging).
-2. On the **spare** Pi (`rpi4b`): install units, then
-   `systemctl --user enable --now room-display-update.timer`.
-3. `git tag v1.0.0 && git push --tags` → within 30 min the spare deploys it and
-   `/v1/status` reports `"version": "v1.0.0"`.
-4. Deliberately break something, tag `v1.0.1`, and confirm the spare either
-   refuses at selfcheck or rolls back. **That is the acceptance test.**
-5. Only then enable the timer on the display Pi.
+2. `git tag v1.0.0 && git push --tags`, then force one check by hand:
+   `systemctl --user start room-display-update`. → `/v1/status` reports
+   `"version": "v1.0.0"`. This first deploy also migrates `current` from the
+   Phase 5 plain clone to the release symlink.
+3. Deliberately break something, tag `v1.0.1`, force another check, and confirm
+   it either refuses at selfcheck or rolls back. **That is the acceptance test.**
+4. Only then `systemctl --user enable --now room-display-update.timer`.
 
 `systemctl --user start room-display-update` forces a check without waiting.
+
 
 ## The display Pi's actual state
 
