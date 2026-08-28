@@ -97,7 +97,9 @@ async def lifespan(app: FastAPI):
     if proc:
         # Only when we own the kiosk: selfcheck boots this app beside a running
         # instance, and must not reach out and blank the real monitors.
-        display.claim()
+        # claim() itself runs on the thread below, off the startup path: lifespan
+        # blocks the port from binding, and update.sh rolls the release back if
+        # /v1/status doesn't answer within 30s of the restart.
         watching = display.watch(cfg)
         threading.Thread(target=_home_when_ready, args=(cfg,), daemon=True).start()
     yield
@@ -118,6 +120,7 @@ def _home_when_ready(cfg: dict) -> None:
     at the agent's own /home during launch renders "can't be reached" and stays
     there. Wait for the port, then navigate.
     """
+    display.claim()          # take DPMS off the session before anything can blank
     urls = [s["home_url"] for s in cfg["screens"]]
     probe = next((u for u in urls if u.startswith(("http://", "https://"))), None)
     if not probe:
