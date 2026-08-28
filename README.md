@@ -10,9 +10,21 @@ point it at a URL, or drop a file on it and have it render.
 
 ## Controlling a display
 
-Two ways, same frozen API underneath.
+Three ways, same frozen API underneath.
 
-**Web UI** — the drop zone the agent serves. Open it as its own window:
+**Tray app (Windows)** — [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1).
+Copy a link or a file, double-click the tray icon, it's on the wall. The icon
+colour is the display's state: blue awake, grey asleep, red unreachable.
+Right-click for screen, Home, Reload, Display off. Reads the same
+`targets.toml`; no install, no dependencies. See
+[deploy/windows/README.md](deploy/windows/README.md).
+
+```powershell
+powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File deploy\windows\roomtray.ps1
+```
+
+**Web UI** — the drop zone the agent serves, and the only place with scroll
+controls and saved links. Open it as its own window:
 
 ```powershell
 msedge.exe --app=http://<pi-tailnet-ip>:8080/
