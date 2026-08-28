@@ -111,6 +111,9 @@ room-display-control/
 - `POST /v1/upload` (multipart file) → `{ "id": "...", "url": "/files/<id>" }`, then auto-navigate
 - `GET  /v1/status` → `{ "up": true, "current_url": "...", "browser": "ok", "version": "<tag>" }`
 - `POST /v1/reload`, `POST /v1/home`
+- `POST /v1/display` `{ "action": "on"|"off" }` → `{ "ok": true, "awake": bool }`.
+  No `screen`: X11 powers every monitor together. Every other route wakes the
+  display as a side effect, so this exists for turning it **off** on the way out.
 - Auth: `Authorization: Bearer <token>` on all `/v1` routes.
 
 Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once the native app targets it.
@@ -155,7 +158,19 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 **v1.1.0 — screens editor in the web UI.** Edit a screen's `position`, `size`, `home_url` and name from the drop-zone page instead of `ssh` + `nano` + restart. Worth building because it applies **live**: `browser.place()` and `browser.open_window()` already work at runtime, so dragging a position moves the window while you watch it — which is the only reason this beats editing a file. *Constraints:* persist to a separate `screens.toml` the agent owns; **never** make `/etc/room-display/config.toml` agent-writable, it holds the token. `token`, `profile_dir`, `upload.dir`, `debug_port` and `browser.kind` stay file-only — they are install-time facts wired to the tmpfs layout, and changing them needs a browser relaunch. *Accept:* move a window between monitors from the UI, with no restart, and have it survive one.
 
+**v1.0.1 — agent-owned display power.** Done. The Pi has no keyboard, so anything that blanks the screen and wakes only on *input* can only be cured by unplugging the box. The agent claims DPMS at startup (timeouts zeroed, DPMS kept enabled) and drives power itself: idle on its home page → off after 10 min, showing a site → off after 2 h without a request, and **any `/v1` call wakes it**. `POST /v1/display` and a UI button cover leaving the room. Both monitors sleep together — X11 has no per-output power. Same commit made screens self-detecting (`xrandr --listmonitors`), so a fresh install needs no `[[screen]]` blocks written by hand. See `agent/display.py`, `deploy/pi/README.md` §8.
+
 **Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**
+
+**Future considerations.** Deliberately deferred, each with the trigger that should bring it back. Not a wish list — if the trigger doesn't happen, the item is correct as unbuilt.
+
+| Deferred | Add when |
+|---|---|
+| `roomctl display on\|off` | you want the display off from a terminal, or **eve** (Phase 7) needs it as an intent — eve imports `roomctl`, so that is where it lands |
+| Monitor hotplug re-detection | you actually replug a monitor while the agent runs; today `detect()` runs once at startup and a swap needs a restart. Natural pairing with the v1.1.0 screens editor, which wants a "re-detect" button anyway |
+| A Wayland backend for `display.py` | you move back to labwc. Swap `xset dpms force` → `wlopm --off/--on`, `xrandr --listmonitors` → `wlr-randr`; it gains per-monitor power for free. Not written now because it could not be tested — the box is X11 |
+| Per-monitor power on X11 (`xrandr --output X --off`) | one monitor really does idle for hours while the other works. Costs a layout reflow, a `browser.place()` and the scroll position on wake |
+| Quiet hours / clock-based off | the monitors are still on at 2am despite both timeouts |
 
 ---
 

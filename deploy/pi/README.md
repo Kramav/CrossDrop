@@ -61,6 +61,10 @@ sudo cp /opt/room-display/current/agent/config.example.toml /etc/room-display/co
 sudo nano /etc/room-display/config.toml
 ```
 
+`setup.sh` writes this file for you, including a random token — the manual route
+below is for a hand-built Pi. Monitors are detected at startup and display
+timeouts default in code, so neither needs a line here.
+
 Pi values — the rest of the file is fine as shipped:
 
 ```toml
@@ -140,10 +144,24 @@ it, and the shipped `max_mb` × `keep` can reach 500 MB on its own.
 
 ## 7. Two monitors
 
-**Run the probe before you configure anything.** Wayland gives the compositor
-final authority over window position and Chromium's `--window-position` is
-ignored there, so per-monitor targeting depends on Chromium running under
-XWayland and labwc honouring the X11 move request:
+**The agent detects them itself.** With no `[[screen]]` blocks in the config it
+reads `xrandr --listmonitors` and makes one screen per connected output, named
+after the connector. Configure blocks below only to override that — to give the
+screens better names than `HDMI-1`, or to give one its own `home_url`.
+
+The study Pi runs an **X11 session** (Xorg + openbox under lightdm), where
+Chromium's `--window-position` is honoured directly. Check what you're on:
+
+```sh
+pgrep -a Xorg && echo "X11"          # openbox/lightdm: positions just work
+pgrep -a labwc && echo "wayland"     # then read the note below
+```
+
+Under Wayland the compositor has final authority over window position and
+`--window-position` is ignored, so per-monitor targeting depends on Chromium
+running under XWayland (`--ozone-platform=x11`, which `browser.py` adds for
+multi-screen) and the compositor honouring the X11 move request. If windows land
+on the wrong monitor there, the probe is:
 
 ```sh
 wlr-randr        # read the second output's "Position:" line — that x is what you want
@@ -154,13 +172,12 @@ DISPLAY=:0 chromium --ozone-platform=x11 --user-data-dir=/tmp/probe \
          --window-position=<x from wlr-randr>,0 --window-size=800,600 about:blank &
 ```
 
-Take the offset from `wlr-randr`, not from the monitor's resolution — outputs are
-laid out edge to edge, so a 1366-wide first screen puts the second at `1366,0`.
+Take the offset from the compositor, not from the monitor's resolution — outputs
+are laid out edge to edge, so a 1366-wide first screen puts the second at
+`1366,0`.
 
-Lands on the second monitor → configure screens below. Lands on the first →
-labwc ignored it, and the fallbacks are Wayfire (`wayfire.ini` window rules) or
-an X11 session (`raspi-config` → Advanced → Wayland → X11). **The agent doesn't
-change either way** — only this step does.
+Note that display power (§8) is X11-only: on Wayland the agent leaves the
+monitors alone.
 
 Then in `/etc/room-display/config.toml`:
 
@@ -191,7 +208,43 @@ roomctl navigate https://example.com --screen all
 Omit `--screen` and you hit the first one, which is exactly what a single-monitor
 Pi does today.
 
-## 8. Auto-update (Phase 8)
+## 8. Display power
+
+The Pi has no keyboard, so a screen that blanks on a timer and wakes on input is
+a trap — the only cure left is unplugging the box. The agent therefore owns
+display power: at startup it zeroes every automatic timeout (`xset dpms 0 0 0`,
+`xset s off`) while keeping DPMS **enabled**, then drives power itself.
+
+- Idle on its home page for `idle_off_minutes` (10) → monitors off.
+- Showing a site: `content_off_minutes` (120) with no API activity → off.
+- **Anything you send wakes them.** Navigate, upload, scroll, home, reload — a
+  dark display is never a stuck display.
+- `POST /v1/display {"action":"off"}`, or the "Display off" button in the web UI,
+  for leaving the room.
+
+Both monitors sleep together: X11 has no per-output power (`xrandr --prop`
+reports no DPMS property on either output). One screen showing something keeps
+the pair awake.
+
+Check it took:
+
+```sh
+DISPLAY=:0 xset q | grep -A3 "^DPMS"     # Enabled, and 0 0 0 — the agent's doing
+```
+
+If that shows non-zero timeouts, the agent is not managing power (wrong session,
+no `DISPLAY`, or no `xset`) and the OS will blank the screen on its own. The
+journal says which: `journalctl --user -u display-agent | grep display:`.
+
+Overrides, if the defaults don't suit — `0` disables that timer:
+
+```toml
+[display]
+idle_off_minutes = 10
+content_off_minutes = 120
+```
+
+## 9. Auto-update (Phase 8)
 
 The Pi pulls; GitHub never reaches in. Every ~30 min
 [update.sh](update.sh) asks GitHub for the highest `v*` tag and does nothing at
@@ -252,7 +305,7 @@ list-units --failed`) while the display keeps running the old release.
 `REPO` and a **read-only deploy key** on the Pi (PLAN.md §8), never a personal
 token.
 
-## 9. Acceptance (PLAN.md §7 Phase 5)
+## 10. Acceptance (PLAN.md §7 Phase 5)
 
 ```sh
 sudo reboot

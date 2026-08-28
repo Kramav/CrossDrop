@@ -36,8 +36,14 @@ echo "   $TS_IP"
 
 echo "== raspi-config"
 sudo raspi-config nonint do_boot_behaviour B4   # desktop autologin
-sudo raspi-config nonint do_blanking 1          # 1 = disable blanking. A kiosk must never sleep.
-# Wayland compositor left alone: labwc is the default and is what the unit assumes.
+# 1 = disable blanking. Belt and braces only: this covers the window between
+# login and the agent starting. Once up, the agent claims DPMS itself (zeroed
+# timeouts, explicit on/off) so it can wake monitors nothing else can -- see
+# agent/display.py and README.md §8. It re-enables DPMS, which this line disables
+# on X11, so the two are safe in either order.
+sudo raspi-config nonint do_blanking 1
+# Compositor left alone. The unit exports both DISPLAY and WAYLAND_DISPLAY, so
+# either session works -- but display power is X11-only.
 
 echo "== display mode"
 CMDLINE=/boot/firmware/cmdline.txt
@@ -128,6 +134,15 @@ if [ -n "$CHROMIUM" ]; then
   echo "   $("$CHROMIUM" --version)"
 else
   echo "   WARNING: no chromium binary found - set browser.path in $CFG"
+fi
+# Display power needs an X session and xset; on Wayland the agent leaves the
+# monitors to the compositor, which on a keyboard-less box means they can blank
+# with nothing able to wake them. Worth saying out loud at install time.
+if DISPLAY=:0 xset q >/dev/null 2>&1; then
+  echo "   display power: ok (X11) - agent sleeps/wakes the monitors"
+else
+  echo "   NOTE: no X session on :0 - agent will not manage display power."
+  echo "         On Wayland, monitors may blank with no keyboard to wake them."
 fi
 sleep 5
 if systemctl --user is-active --quiet display-agent; then

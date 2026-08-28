@@ -90,6 +90,8 @@
 <div class="row">
   <button type="button" id="home">Home</button>
   <button type="button" id="reload">Reload</button>
+  <!-- Both monitors together: X11 has no per-output power. agent/display.py -->
+  <button type="button" id="power">Display off</button>
 </div>
 
 <p id="status" role="status" aria-live="polite">…</p>
@@ -107,6 +109,7 @@ const store = { // ponytail: saved links live in this browser only; move to the 
 // monitor" rather than "you didn't pick it".
 let screens = [];
 let target = localStorage.screen || "";
+let awake = true;
 
 function token() {
   return localStorage.token || (localStorage.token = prompt("Agent token:") || "");
@@ -181,8 +184,13 @@ async function refresh() {
       if (target) localStorage.screen = target;
     }
     const me = screens.find(x => x.name === target);
+    // A dark display is the one state the page can't show by naming a url, and
+    // the one most likely to be mistaken for "the Pi is broken".
+    awake = s.awake !== false;
+    $("#power").textContent = awake ? "Display off" : "Wake display";
     if (!$("#status").textContent) {
-      $("#status").textContent = s.browser === "ok"
+      $("#status").textContent = !awake ? "display asleep — anything you send wakes it"
+        : s.browser === "ok"
         ? (target === "all" ? "all screens"
            : me ? `${me.name}: ${me.current_url || "—"}` : s.current_url)
         : "browser down";
@@ -216,6 +224,12 @@ $("#save").onclick = () => {
 };
 $("#home").onclick = () => act(() => api("/v1/home"));
 $("#reload").onclick = () => act(() => api("/v1/reload"));
+// Not api(): /v1/display takes no screen — the monitors sleep together.
+$("#power").onclick = () => act(() => req("/v1/display", {
+  method: "POST",
+  headers: { "Content-Type": "application/json", ...auth() },
+  body: JSON.stringify({ action: awake ? "off" : "on" }),
+}));
 
 const scroll = body => act(() => api("/v1/scroll", body));
 const page = () => Number($("#speed").value) * 15;   // a screenful-ish per press

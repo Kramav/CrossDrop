@@ -39,11 +39,16 @@ Order:
 
 ## The display Pi's actual state
 
-Host `STUDYPERIPHERAL`, user `admin`, Trixie, labwc (Wayland) — **not** switched
-to X11; it turned out not to be necessary.
+Host `STUDYPERIPHERAL`, user `admin`, Trixie, **X11** — Xorg `:0` under lightdm
+on vt7, window manager openbox (`rpd-rc.xml`). No labwc or wayfire running.
+(An earlier note here said labwc; that was wrong. Confirmed 2026-08-27 by
+`pgrep -a Xorg` on the box. `wlopm`/`wlr-randr` are installed but inert on X11.)
 
-    HDMI-A-1  Samsung  1366x768   position 0,0      screen name "samsung"
-    HDMI-A-2  Acer     2560x1440  position 1366,0   screen name "acer"
+    HDMI-1  Samsung  1366x768   position 0,0      screen name "samsung"
+    HDMI-2  Acer     2560x1440  position 1366,0   screen name "acer"
+
+Connector names are `HDMI-1`/`HDMI-2` under X11 (`xrandr --listmonitors`), not
+the kernel's `HDMI-A-1`/`HDMI-A-2` that `/sys/class/drm` reports.
 
 Still on the **Phase 5 layout** — `/opt/room-display/current` is a plain git
 clone, not a symlink. Updates have been manual (`git pull` + restart). The first
@@ -59,10 +64,16 @@ across reboots — deliberately not done.
 
 ## Gotchas found the hard way (all fixed, don't re-derive)
 
-- **labwc applies the window move asynchronously.** Moving then immediately
-  fullscreening puts the window back on its old monitor. Fixed with a 300 ms
-  settle in `browser._place`, tunable via `ROOM_PLACE_SETTLE`. This is why the
-  X11 switch was avoided — labwc does honour the move, just not instantly.
+- **The compositor may apply the window move asynchronously.** Moving then
+  immediately fullscreening puts the window back on its old monitor. Fixed with a
+  300 ms settle in `browser._place`, tunable via `ROOM_PLACE_SETTLE`.
+- **X11 has no per-output display power.** `xrandr --prop` reports no DPMS
+  property on either output, so `xset dpms force off` takes both monitors or
+  neither. The per-output alternative (`xrandr --output X --off`) drops the CRTC
+  and reflows the layout, which moves the kiosk windows.
+- **`raspi-config`'s screen-blanking setting disables DPMS on X11**, which would
+  make `xset dpms force off` a silent no-op. `display.claim()` re-enables it and
+  zeroes the timeouts instead.
 - **Window 1 must be moved, not opened.** `--kiosk` already placed it; its
   `position` was silently ignored until `place()` was added.
 - **The wheel event must hit the viewport centre.** A fixed point near the

@@ -7,8 +7,12 @@ home_url = "/home"           # page the kiosk opens on launch. "/home" is the
                              # full tailnet url, e.g. http://100.x.y.z:8080/home
                              # ("about:blank" is still valid — a white screen.)
 
-# One [[screen]] per monitor. Omit the lot and you get a single screen named
-# "main", which is what every single-monitor config already does.
+# One [[screen]] per monitor -- but you probably don't need any. Omit the lot and
+# the agent reads `xrandr --listmonitors` and makes one screen per connected
+# output, named after the connector ("HDMI-1"). Nothing detected -- Windows, or no
+# X session -- and you get a single screen named "main", which is what every
+# single-monitor config already does. Write blocks only to override: better
+# names, or a per-screen home_url.
 #
 # `position` is the window's x,y in the session's coordinate space -- take it
 # from the "Position:" line of `wlr-randr`, not from a monitor's resolution.
@@ -42,6 +46,14 @@ autolaunch = true            # false = drive a browser you started yourself
 debug_port = 9222            # 127.0.0.1 only. Debug port == full browser control.
 disk_cache_mb = 100          # On the Pi the profile is tmpfs, so this is RAM.
                              # Uncapped, Chromium fills /run/user/<uid>. Lower on a 2 GB Pi.
+
+# Display power. Both keys are optional -- these are the defaults, and the point
+# is that a working install needs none of this written down. X11 only; on Wayland
+# the agent leaves the monitors alone. `0` disables that timer.
+#
+# [display]
+# idle_off_minutes = 10        # sitting on its home page
+# content_off_minutes = 120    # showing a site, no navigate/scroll/upload since
 
 [upload]
 dir = ""                     # empty = ./uploads next to this config.

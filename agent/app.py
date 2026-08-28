@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import AnyHttpUrl, BaseModel
 
-from . import browser, storage
+from . import browser, display, storage
 
 DEFAULTS = {
     "kind": "firefox", "path": "", "profile_dir": "", "autolaunch": True,
@@ -31,6 +31,7 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     cfg = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     cfg["browser"] = DEFAULTS | cfg.get("browser", {})
     cfg["upload"] = UPLOAD_DEFAULTS | cfg.get("upload", {})
+    cfg["display"] = display.DEFAULTS | cfg.get("display", {})
     if not cfg["browser"]["profile_dir"]:
         cfg["browser"]["profile_dir"] = str(path.parent / "profile")
     if not cfg["upload"]["dir"]:
@@ -38,9 +39,16 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     if not cfg.get("token"):
         raise RuntimeError(f"{path}: token is required")
 
-    # No [[screen]] blocks -> one screen called "main", which is exactly the
+    # No [[screen]] blocks -> ask X what monitors exist, so a fresh install drives
+    # every connected screen without anyone editing a config file. Explicit blocks
+    # always win, so this changes nothing for a config that has them. Nothing
+    # detected (Windows, no DISPLAY) -> one screen called "main", exactly the
     # single-monitor behaviour every existing config already has.
-    cfg["screens"] = [SCREEN_DEFAULTS | s for s in (cfg.get("screen") or [{}])]
+    blocks = cfg.get("screen") or [
+        {"name": d["output"], "position": d["position"], "size": d["size"]}
+        for d in display.detect()
+    ]
+    cfg["screens"] = [SCREEN_DEFAULTS | s for s in (blocks or [{}])]
     for i, s in enumerate(cfg["screens"]):
         s["name"] = s["name"] or ("main" if i == 0 else f"screen{i + 1}")
         s["home_url"] = s["home_url"] or cfg.get("home_url", "about:blank")
@@ -85,11 +93,18 @@ async def lifespan(app: FastAPI):
     # old one. It must never launch a second browser onto that port or screen.
     launch = cfg["browser"]["autolaunch"] and not os.getenv("ROOM_SELFCHECK")
     proc = browser.launch(cfg) if launch else None
+    watching = None
     if proc:
+        # Only when we own the kiosk: selfcheck boots this app beside a running
+        # instance, and must not reach out and blank the real monitors.
+        display.claim()
+        watching = display.watch(cfg)
         threading.Thread(target=_home_when_ready, args=(cfg,), daemon=True).start()
     yield
     for name in list(_autoscroll):
         _autoscroll_stop(name)
+    if watching:
+        watching.set()
     if proc:
         browser.stop(cfg, proc)  # ours: take the whole tree down with us
     else:
@@ -150,9 +165,19 @@ class AutoScrollIn(BaseModel):
     speed: int = 40                 # pixels per tick, ~10 ticks a second
 
 
+class DisplayIn(BaseModel):
+    action: str                     # "on" | "off". No screen: X11 powers all
+                                    # monitors together (agent/display.py).
+
+
 class NavigateOut(BaseModel):
     ok: bool
     current_url: str
+
+
+class DisplayOut(BaseModel):
+    ok: bool
+    awake: bool
 
 
 class UploadOut(BaseModel):
@@ -172,6 +197,7 @@ class Status(BaseModel):
     current_url: str | None
     browser: str
     version: str
+    awake: bool                     # whole display, not per screen
     screens: list[ScreenOut]
 
 
@@ -211,6 +237,10 @@ def _go(url: str, screen: str | None = None) -> NavigateOut:
     last = url
     try:
         for s in targets(cfg, screen):
+            # Wake before navigating: pushing something to a sleeping display is
+            # how you turn it back on. This one line covers navigate, home,
+            # reload and upload.
+            display.touch(s, url)
             # Any navigation ends an autoscroll on that screen. Without this the
             # loop keeps scrolling whatever page lands next, which looks like a
             # haunted display and is impossible to guess from the UI.
@@ -255,6 +285,7 @@ def scroll(body: ScrollIn) -> NavigateOut:
     cfg = app.state.cfg
     out = None
     for s in targets(cfg, body.screen):
+        display.touch(s)     # reading a long PDF is activity, even without a navigate
         try:
             browser.scroll(cfg, s["name"], dy=body.dy, to=body.to)
         except NotImplementedError as e:
@@ -282,6 +313,23 @@ def autoscroll(body: AutoScrollIn) -> NavigateOut:
             _autoscroll_stop(s["name"])
         out = NavigateOut(ok=True, current_url=s["name"])
     return out
+
+
+@app.post("/v1/display", response_model=DisplayOut, dependencies=[Depends(auth)])
+def display_power(body: DisplayIn) -> DisplayOut:
+    """Turn the monitors off when you leave, or back on. Every other /v1 route
+    already wakes them, so this exists for "off" — "on" is just the way back if
+    you hit it by mistake."""
+    if body.action not in ("on", "off"):
+        raise HTTPException(422, "action must be 'on' or 'off'")
+    if body.action == "off":
+        display.power(False)
+    else:
+        # Reset every idle clock too, or the next tick finds them all long idle
+        # and puts the display straight back to sleep.
+        for s in app.state.cfg["screens"]:
+            display.touch(s)
+    return DisplayOut(ok=True, awake=display.awake())
 
 
 @app.get("/v1/screens", response_model=list[ScreenOut], dependencies=[Depends(auth)])
@@ -337,7 +385,7 @@ def status() -> Status:
     # current_url stays the first screen's, so a pre-multi-monitor client that
     # reads it keeps working unchanged.
     return Status(up=True, current_url=url, browser=state,
-                  version=os.getenv("ROOM_VERSION", "dev"),
+                  version=os.getenv("ROOM_VERSION", "dev"), awake=display.awake(),
                   screens=[_screen_out(s) for s in app.state.cfg["screens"]])
 
 

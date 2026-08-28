@@ -92,13 +92,20 @@ Four settings, all required:
 | Menu | Setting | Why |
 |---|---|---|
 | System Options → Boot / Auto Login | **Desktop Autologin** | the kiosk needs a graphical session at boot with nobody present |
-| Display Options → **Screen Blanking** | **No** | otherwise the display sleeps after 10 minutes and the whole project looks broken |
-| Display Options → Wayland | **labwc** (the default) | what the service unit's environment assumes |
+| Display Options → **Screen Blanking** | **No** | otherwise the display sleeps after 10 minutes and, with no keyboard, only a replug brings it back |
+| Display Options → Wayland | **X11** on the study Pi; labwc also works | X11 is what it actually runs, and display power (README.md §8) needs it |
 | Advanced Options → Wayland/GL | leave alone | the defaults are right on Pi 4 and 5 |
 
-Screen Blanking is the one people miss. It is a kiosk display; it must never
-sleep. `raspi-config` sets this correctly on both labwc and X11, which is why
-it's the setting to use rather than editing a compositor config by hand.
+Screen Blanking is the one people miss, but it is only half the story. It covers
+the window between login and the agent starting; after that the **agent** owns
+display power — it zeroes the DPMS timeouts and turns the monitors on and off
+itself, so anything you send from the web UI wakes them. That is the part
+`raspi-config` cannot do: it can stop a screen sleeping, but nothing in the OS
+can wake one on a box with no keyboard.
+
+On X11 `raspi-config` disables DPMS outright; the agent re-enables it (with all
+timeouts at zero) because `xset dpms force off/on` needs it. Safe in either
+order. Verify with `DISPLAY=:0 xset q | grep -A3 "^DPMS"` — Enabled, `0 0 0`.
 
 Reboot and confirm it comes back to a logged-in desktop by itself:
 
@@ -123,7 +130,8 @@ needed:
 
 ```sh
 grep -H . /sys/class/drm/card*-HDMI-A-*/status   # connected / disconnected
-wlr-randr                                        # modes in use (labwc, from the desktop session)
+DISPLAY=:0 xrandr --listmonitors                 # name, size and position (X11)
+wlr-randr                                        # the same, on a labwc session
 ```
 
 ### The one case that needs a pin
