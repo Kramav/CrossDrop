@@ -7,7 +7,7 @@ import threading
 import time
 import tomllib
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import AnyHttpUrl, BaseModel
 
-from . import browser, display, storage
+from . import browser, display, settings, storage
 
 DEFAULTS = {
     "kind": "firefox", "path": "", "profile_dir": "", "autolaunch": True,
@@ -49,6 +49,9 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         for d in display.detect()
     ]
     cfg["screens"] = [SCREEN_DEFAULTS | s for s in (blocks or [{}])]
+    # Saved edits from the web UI, before names and home urls are finalised
+    # below — a renamed screen has to get its new name stamped into its home url.
+    settings.apply(cfg)
     for i, s in enumerate(cfg["screens"]):
         s["name"] = s["name"] or ("main" if i == 0 else f"screen{i + 1}")
         s["home_url"] = s["home_url"] or cfg.get("home_url", "about:blank")
@@ -56,10 +59,14 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         # it can know: every window shares one profile and one debug port, so
         # there is nothing else to tell them apart client-side.
         # Match on the path: a url ending "?x=1" still points at /home.
-        if urlparse(s["home_url"]).path.rstrip("/").endswith("/home") \
-                and "screen=" not in s["home_url"]:
-            sep = "&" if "?" in s["home_url"] else "?"
-            s["home_url"] += f"{sep}screen={quote(s['name'])}"
+        u = urlparse(s["home_url"])
+        if u.path.rstrip("/").endswith("/home"):
+            # Re-stamp, never just append: renaming a screen has to move the
+            # name on its idle page too, and the previous ?screen= is still
+            # sitting in the url we just loaded back from settings.json.
+            q = [(k, v) for k, v in parse_qsl(u.query) if k != "screen"]
+            q.append(("screen", s["name"]))
+            s["home_url"] = urlunparse(u._replace(query=urlencode(q)))
     names = [s["name"] for s in cfg["screens"]]
     if len(set(names)) != len(names):
         raise RuntimeError(f"{path}: duplicate screen names {names}")
@@ -193,6 +200,28 @@ class ScreenOut(BaseModel):
     position: str
     current_url: str | None
     autoscroll: bool
+
+
+class ScreenSettingIn(BaseModel):
+    name: str
+    home_url: str
+    position: str = ""      # "" means "use what xrandr detected" — the reset path
+    size: str = ""
+
+
+class SettingsIn(BaseModel):
+    screens: list[ScreenSettingIn]
+
+
+class ScreenSettingOut(ScreenSettingIn):
+    detected_position: str = ""     # what xrandr says right now, for placeholders
+    detected_size: str = ""
+
+
+class SettingsOut(BaseModel):
+    screens: list[ScreenSettingOut]
+    path: str               # where these persist, so the UI can say so
+    note: str = ""          # saved, but the live window move didn't happen
 
 
 class Status(BaseModel):
@@ -338,6 +367,88 @@ def display_power(body: DisplayIn) -> DisplayOut:
 @app.get("/v1/screens", response_model=list[ScreenOut], dependencies=[Depends(auth)])
 def screens() -> list[ScreenOut]:
     return [_screen_out(s) for s in app.state.cfg["screens"]]
+
+
+# --- settings ---------------------------------------------------------------
+# The screens editor (PLAN.md §7, v1.1.0). Only what is safe to change while the
+# agent runs: config.toml stays the source for the token and the install-time
+# paths, and is never made agent-writable.
+
+def _settings_out(note: str = "") -> SettingsOut:
+    found = display.detect()
+    return SettingsOut(
+        path=str(settings.path()), note=note,
+        screens=[ScreenSettingOut(
+            name=s["name"], home_url=s["home_url"],
+            position=s["position"], size=s["size"],
+            detected_position=found[i]["position"] if i < len(found) else "",
+            detected_size=found[i]["size"] if i < len(found) else "")
+            for i, s in enumerate(app.state.cfg["screens"])])
+
+
+@app.get("/v1/settings", response_model=SettingsOut, dependencies=[Depends(auth)])
+def get_settings() -> SettingsOut:
+    return _settings_out()
+
+
+@app.put("/v1/settings", response_model=SettingsOut, dependencies=[Depends(auth)])
+def put_settings(body: SettingsIn) -> SettingsOut:
+    """Save the screens editor, then apply it live.
+
+    Everything is validated *before* anything is written: a bad position that
+    reaches settings.json breaks the next boot, and the box has no keyboard.
+    """
+    cfg = app.state.cfg
+    if len(body.screens) != len(cfg["screens"]):
+        raise HTTPException(422, f"expected {len(cfg['screens'])} screens, "
+                                 f"got {len(body.screens)}")
+    names = [s.name.strip() for s in body.screens]
+    if not all(names):
+        raise HTTPException(422, "screen names cannot be empty")
+    if len(set(names)) != len(names):
+        raise HTTPException(422, f"duplicate screen names {names}")
+    for s in body.screens:
+        if not s.home_url.startswith(("http://", "https://")):
+            raise HTTPException(422, f"{s.home_url!r}: home_url must be http or https")
+        # browser._pair is the one place that knows these formats and it already
+        # names the offending value; a second regex here would only drift.
+        try:
+            if s.position.strip():
+                browser._pair(s.position.strip(), ",", "position")
+            if s.size.strip():
+                browser._pair(s.size.strip(), "x", "size")
+        except RuntimeError as e:
+            raise HTTPException(422, str(e))
+
+    before = [(s["position"], s["size"]) for s in cfg["screens"]]
+    data = {"screens": [{"name": n, "home_url": s.home_url.strip(),
+                         "position": s.position.strip(), "size": s.size.strip()}
+                        for n, s in zip(names, body.screens)]}
+    try:
+        settings.save(data)
+    except OSError as e:
+        raise HTTPException(500, f"cannot write {settings.path()}: {e}")
+
+    # Reload through load_config() rather than patching cfg field by field, so a
+    # save lands exactly where a restart would — one code path, no second
+    # implementation of the ?screen= stamping. Mutated in place, *not*
+    # reassigned: display.watch() closed over this dict at startup and would
+    # otherwise read a stale config forever.
+    cfg.clear()
+    cfg.update(load_config())
+
+    # The live half, and the only reason this beats editing a file: the window
+    # moves while you watch. It must not fail the request -- the settings are
+    # already saved, and a dead browser or a Firefox dev box is not a bad save.
+    note = ""
+    for i, s in enumerate(cfg["screens"]):
+        if (s["position"], s["size"]) == before[i] or not s["position"]:
+            continue
+        try:
+            browser.place(cfg, s)
+        except (NotImplementedError, OSError, RuntimeError) as e:
+            note = f"saved, but {s['name']} was not moved: {e}"
+    return _settings_out(note)
 
 
 def _screen_out(s: dict) -> ScreenOut:

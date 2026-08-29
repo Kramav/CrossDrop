@@ -1,16 +1,23 @@
 # Handoff — 2026-08-28
 
-State at end of session. `main` is at `312e750`; 49 tests passing + 2 skipped,
-`ruff check --select E9,F` clean (what CI runs).
+State at end of session. `main` is at `312e750`; **73 tests passing + 2 skipped**
+(was 49/2), `ruff check --select E9,F` clean (what CI runs).
 
 **Uncommitted in the working tree** — nothing here is pushed yet:
 
     ?? deploy/windows/        the tray app, its README, its selfcheck
-     M README.md              tray app added to "Controlling a display"
+    ?? agent/settings.py      agent-owned runtime settings (the screens editor)
+    ?? tests/test_settings.py  22 tests
+    ?? tests/test_web.py       page selector check
+    ?? tests/conftest.py       ROOM_SETTINGS isolation, autouse
+     M agent/app.py           settings.apply() + GET/PUT /v1/settings
+     M web/index.html         token field, screens editor, "All", footer
+     M README.md              tray app, settings, contract table
+     M PLAN.md                v1.1.0 marked built
      M HANDOFF.md             this file, including last session's rewrite
 
-No Python changed this session, so the test suite and CI are unaffected by it —
-the 49/2 above is the same number `312e750` produced.
+Two independent pieces of work sit here: the **tray app** (`deploy/windows/`,
+no Python, commit it on its own) and the **screens editor** (everything else).
 
 ## Where the project is
 
@@ -64,35 +71,70 @@ tooltip clamp, the icon, error-detail extraction. It pulls the real script's
 functions out of its AST rather than dot-sourcing, because dot-sourcing would
 start the tray and block. See `deploy/windows/README.md`.
 
+**New this session, uncommitted: the screens editor — PLAN.md §7's v1.1.0.**
+The controller page is now the home base. The agent token goes into a real field
+in a **Settings** panel instead of a `prompt()`, and a 401 reopens that panel and
+says the token was rejected rather than silently clearing it. The same panel
+edits each screen's **name, home URL, position and size**, applied live through
+the existing `browser.place()` — the window moves while you watch, which is the
+only reason this beats editing a file over `ssh`.
+
+Overrides persist to `~/.local/share/room-display/settings.json` (`ROOM_SETTINGS`
+overrides the path), a file the agent owns and `update.sh` never replaces.
+**JSON, not the `screens.toml` PLAN.md called for** — `tomllib` only reads, and a
+TOML writer is a new dependency for a file no human edits.
+`/etc/room-display/config.toml` stays `root:<user> 640` and un-writable by the
+agent, exactly as planned, so the token never becomes agent-editable.
+
+Three things are load-bearing and easy to undo by accident:
+
+- **Overrides match screens by index, not name**, because the name is itself
+  editable — matching on it would make every rename look like a new screen.
+- **`?screen=` is re-stamped, not appended.** It used to append only when
+  absent, so a rename left the old name on the idle page forever.
+- **`load_config()`'s result is merged into the live cfg with `clear()` +
+  `update()`, never reassigned.** `display.watch()` closed over that dict at
+  startup; reassigning would leave the idle watcher on a stale config.
+
+Display sleep timeouts and upload caps were considered and deliberately left
+file-only. `All` in the screen picker is now capitalised — label only, the wire
+value is still `"all"`.
+
 ## The next thing to do
 
-**Tag v1.0.1 to ship display power, then finish the Phase 8 acceptance.**
+**v1.0.1 is tagged, pushed and live — that part is done.** Checked against the
+Pi on 2026-08-28: `/v1/status` returns `"version": "v1.0.1"`, screens `Samsung`
+and `Acer`, `browser: ok`. Display power is deployed. What is left of Phase 8 is
+one item:
 
-1. Confirm CI is green on `312e750` before tagging — that gate is the entire
-   point of the pipeline.
-2. `git tag v1.0.1 && git push --tags`. The update timer is **enabled and
-   active**, so it lands within ~30 min on its own; force it with
-   `systemctl --user start room-display-update` and watch
-   `journalctl --user -u room-display-update -f`. Worth watching live: the v1.0.0
-   deploy was run by hand, so **the unit itself has never run** (it has no
-   journal entries at all).
-3. Verify on the Pi: `/v1/status` reports `"version": "v1.0.1"` and
-   `"awake": true`; `DISPLAY=:0 xset q | grep -A3 '^DPMS'` shows **Enabled** with
-   timeouts **0 0 0**. Then drop `idle_off_minutes = 1` / `content_off_minutes = 2`
-   into `/etc/room-display/config.toml`, restart, send both screens home, wait for
-   them to go dark, and push a link — they must wake. Remove the block after.
-4. **Still outstanding: the rollback acceptance.** Tag a deliberately broken
-   `v1.0.2` and confirm it either refuses at selfcheck or rolls back to v1.0.1.
-   Nothing has ever exercised that branch, and it is the only thing standing
-   between a bad tag and a Pi nobody can fix without a keyboard.
+1. **The rollback acceptance.** Tag a deliberately broken `v1.0.2` and confirm it
+   either refuses at selfcheck or rolls back to v1.0.1. Nothing has ever
+   exercised that branch, and it is the only thing standing between a bad tag and
+   a Pi nobody can fix without a keyboard.
 
-**Separately, and independent of the Pi work: look at the tray icon.** It has
-never been on screen. Run it, check the icon appears and reads at 16x16 on the
-taskbar, that the menu opens, that double-click sends the clipboard, and that
-blue/grey/red are distinguishable there. Then commit `deploy/windows/` — it
-touches no Python, so it can go in on its own without waiting for the tag.
+Still worth doing while you are on the box, if it hasn't been: confirm
+`DISPLAY=:0 xset q | grep -A3 '^DPMS'` shows **Enabled** with timeouts
+**0 0 0** under the deployed agent, rather than only from the hand-run probe.
 
-    powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File deploy\windows\roomtray.ps1
+**Separately, and independent of the Pi work: look at the tray icon.** It starts
+without crashing against the real Pi, but nobody has seen it. Check the icon
+appears and reads at 16x16 on the taskbar, that the menu opens and lists Samsung
+/ Acer / all, that double-click sends the clipboard, and that blue/grey/red are
+distinguishable there. Then commit `deploy/windows/` — it touches no Python, so
+it can go in on its own.
+
+    powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File "e:\Company\Github\CrossDrop\deploy\windows\roomtray.ps1"
+
+Quit from the tray menu. It reads `roomctl/targets.toml` via `$PSScriptRoot`, so
+it can be launched from any working directory.
+
+**And: run the v1.1.0 acceptance.** The screens editor is covered by 22 tests but
+has never touched the Pi. Deploy it, then from the page: rename `Acer`, press
+Home on it, and confirm the idle screen announces the new name (that proves the
+`?screen=` re-stamp). Swap the two positions, save, and watch the windows change
+monitors with no restart — that is PLAN.md §7's stated acceptance. Put them back,
+then blank a position and confirm it returns to the detected value. Restart the
+agent and confirm the surviving overrides come back.
 
 
 ## The display Pi's actual state
@@ -212,11 +254,12 @@ PowerShell 5.1, from building the tray app — all three cost real time:
 - **The rollback branch of `update.sh`** — deploy-forward now works on hardware,
   but nothing has ever failed a selfcheck or a post-restart health check for
   real. See "the next thing to do", item 4.
-- **Display power end to end under the running agent.** The mechanism, the
-  parser and `claim()` were each proved on the Pi by hand, and the policy is
-  covered by `tests/test_display.py` with a faked clock — but no monitor has yet
-  gone dark on an idle timer and woken from a pushed link. That needs the v1.0.1
-  deploy.
+- **The wake half of display power.** v1.0.1 is deployed and the Pi reported
+  `"awake": false` on 2026-08-28, so the monitors do go dark under the running
+  agent — though that could equally have been a "Display off" click, the two are
+  indistinguishable from `/v1/status`. What is still unproven is the *wake*: a
+  pushed link turning a dark display back on. One double-click of a copied link
+  in the tray app settles it.
 - **The tray app on screen.** Every non-GUI part was run for real against a live
   agent booted on `127.0.0.1:8099` (`ROOM_CONFIG` pointed at a temp config with
   `autolaunch = false`): TOML parse, tooltip clamp, icon draw, error detail on
@@ -226,6 +269,15 @@ PowerShell 5.1, from building the tray app — all three cost real time:
   that the menu opens, that double-click sends the clipboard, that the colours
   read at 16x16 on the taskbar. Run it and look; that is the only thing standing
   between this and committing `deploy/windows/`.
+- **The screens editor against a real browser.** All 22 tests run without one, so
+  what they prove is the file, the validation and the routing — that a bad
+  position never reaches disk, that a rename re-stamps `?screen=`, that a dead
+  browser returns a `note` instead of a 500. What no test can prove is
+  `browser.place()` actually moving a kiosk window on the Pi when the position
+  changes; that path is exercised only by the live half of the acceptance above.
+- **The Settings panel on screen.** The page's ids and JS selectors are checked
+  both ways by `tests/test_web.py` and the script parses under `node --check`,
+  but nobody has opened the panel. Per your standing rule I did not screenshot it.
 - Idle SD writes measured ~1.5 MB/10 min, all from tailscaled and
   `.xsession-errors`, none from this project. Judged fine for a 32 GB card
   (~2.5 full-card writes/year) and deliberately not chased further.

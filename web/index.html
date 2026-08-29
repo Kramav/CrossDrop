@@ -43,6 +43,21 @@
   #status { opacity: .7; word-break: break-all; min-height: 1.5em; }
   kbd { font: .8em ui-monospace, monospace; border: 1px solid var(--line);
         border-bottom-width: 2px; border-radius: .3rem; padding: 0 .3em; }
+
+  /* settings */
+  details { border: 1px solid var(--line); border-radius: .6rem; padding: .8rem; }
+  summary { cursor: pointer; font-size: .8rem; text-transform: uppercase;
+            letter-spacing: .08em; opacity: .65; }
+  details[open] summary { margin-bottom: .8rem; }
+  details h2 { font-size: .95rem; margin: 1.2rem 0 .5rem; }
+  details label { display: block; font-size: .78rem; opacity: .7; }
+  details input { width: 100%; padding: .4rem; font: inherit; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem .6rem;
+          margin-bottom: .8rem; }
+  .grid .wide { grid-column: 1 / -1; }
+  .note { font-size: .8rem; opacity: .7; margin: .4rem 0 0; }
+  footer { margin-top: 2rem; font-size: .78rem; opacity: .5;
+           display: flex; gap: .6rem; flex-wrap: wrap; }
 </style>
 
 <h1>Room display</h1>
@@ -96,6 +111,28 @@
 
 <p id="status" role="status" aria-live="polite">…</p>
 
+<details id="setup">
+  <summary>Settings</summary>
+
+  <label for="tok">Agent token — from <code>config.toml</code> on the Pi</label>
+  <div class="row tight">
+    <input id="tok" type="password" autocomplete="off" style="flex:1">
+    <button type="button" id="savetok">Save</button>
+  </div>
+  <p class="note">Kept in this browser only, never sent anywhere but the agent.</p>
+
+  <h2>Screens</h2>
+  <div id="screencfg"></div>
+  <div class="row tight">
+    <button type="button" id="savecfg">Save screens</button>
+    <button type="button" id="redetect" title="Clear position and size so xrandr wins again">
+      Re-detect layout</button>
+  </div>
+  <p class="note" id="cfgnote"></p>
+</details>
+
+<footer><span id="ver"></span><span id="host"></span></footer>
+
 <script>
 const $ = s => document.querySelector(s);
 const store = { // ponytail: saved links live in this browser only; move to the agent
@@ -111,15 +148,25 @@ let screens = [];
 let target = localStorage.screen || "";
 let awake = true;
 
-function token() {
-  return localStorage.token || (localStorage.token = prompt("Agent token:") || "");
-}
+// No prompt(): a popup you can't paste into comfortably, can't correct without
+// clearing site data, and which says nothing useful when the token is wrong.
+function auth() { return { Authorization: "Bearer " + (localStorage.token || "") }; }
 
-function auth() { return { Authorization: "Bearer " + token() }; }
+// Open Settings and point at the token box. Called on first run and on any 401,
+// so a rejected token always lands you where you fix it.
+function askToken(why) {
+  $("#setup").open = true;
+  $("#tok").focus();
+  $("#status").textContent = why;
+}
 
 async function req(path, opts) {
   const r = await fetch(path, opts);
-  if (r.status === 401) { delete localStorage.token; throw new Error("bad token"); }
+  if (r.status === 401) {
+    delete localStorage.token;
+    askToken("token rejected — paste it again");
+    throw new Error("bad token");
+  }
   if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
   return r.json();
 }
@@ -167,7 +214,9 @@ function drawScreens() {
     where.className = "where";
     where.textContent = s.name === "all" ? "every screen"
       : (s.current_url || "—").replace(/^https?:\/\//, "");
-    b.append(s.name + (s.autoscroll ? " ⏬" : ""), where);
+    // Label only. "all" is the wire value the agent matches on — see targets().
+    const label = s.name === "all" ? "All" : s.name;
+    b.append(label + (s.autoscroll ? " ⏬" : ""), where);
     b.onclick = () => { target = localStorage.screen = s.name; drawScreens(); };
     return b;
   }));
@@ -196,6 +245,8 @@ async function refresh() {
         : "browser down";
     }
     $("#auto").setAttribute("aria-pressed", String(!!(me && me.autoscroll)));
+    $("#ver").textContent = s.version;
+    $("#host").textContent = location.host;
     drawScreens();
   } catch (e) { $("#status").textContent = "✗ " + e.message; }
 }
@@ -259,6 +310,79 @@ document.onkeydown = e => {
 
 $("#pick").onchange = e => e.target.files[0] && send(e.target.files[0]);
 
+// --- settings ---------------------------------------------------------------
+// Everything here is a *runtime* setting the agent owns. The token, the browser
+// kind and the install paths stay in config.toml on the Pi — see PLAN.md §7.
+
+function field(label, value, placeholder) {
+  const wrap = document.createElement("label");
+  wrap.textContent = label;
+  const i = document.createElement("input");
+  Object.assign(i, { value: value || "", placeholder: placeholder || "" });
+  wrap.append(i);
+  return wrap;
+}
+
+function drawSettings(cfg) {
+  $("#screencfg").replaceChildren(...cfg.screens.map(s => {
+    const g = document.createElement("div");
+    g.className = "grid";
+    const name = field("Name", s.name);
+    const home = field("Home URL", s.home_url);
+    home.className = "wide";
+    // Placeholder, not value: blank means "use what xrandr detected", so the
+    // detected geometry has to show as the fallback rather than as an edit.
+    const pos = field("Position", s.position, s.detected_position || "e.g. 1366,0");
+    const size = field("Size", s.size, s.detected_size || "e.g. 2560x1440");
+    g.append(name, home, pos, size);
+    return g;
+  }));
+  $("#cfgnote").textContent = cfg.note || "Saved on the Pi at " + cfg.path;
+}
+
+function readSettings() {
+  return [...$("#screencfg").children].map(g => {
+    const [name, home, position, size] = [...g.querySelectorAll("input")].map(i => i.value);
+    return { name, home_url: home, position, size };
+  });
+}
+
+async function loadSettings() {
+  try { drawSettings(await req("/v1/settings", { headers: auth() })); }
+  catch (e) { $("#cfgnote").textContent = "✗ " + e.message; }
+}
+
+async function saveSettings(screens) {
+  $("#cfgnote").textContent = "saving…";
+  try {
+    drawSettings(await req("/v1/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...auth() },
+      body: JSON.stringify({ screens }),
+    }));
+    refresh();                       // names may have changed; redraw the picker
+  } catch (e) { $("#cfgnote").textContent = "✗ " + e.message; }
+}
+
+$("#savetok").onclick = () => {
+  localStorage.token = $("#tok").value.trim();
+  $("#status").textContent = "";
+  loadSettings();
+  refresh();
+};
+$("#tok").onkeydown = e => { if (e.key === "Enter") $("#savetok").click(); };
+$("#savecfg").onclick = () => saveSettings(readSettings());
+// Blank position and size and the agent falls back to xrandr — that is the
+// reset, so re-detect is just a save with those two fields empty.
+$("#redetect").onclick = () =>
+  saveSettings(readSettings().map(s => ({ ...s, position: "", size: "" })));
+// Fetch on first open only: the editor is not something to poll.
+$("#setup").addEventListener("toggle", function once() {
+  if (!$("#setup").open) return;
+  $("#setup").removeEventListener("toggle", once);
+  loadSettings();
+});
+
 const drop = $("#drop");
 drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
 drop.ondragleave = () => drop.classList.remove("over");
@@ -278,6 +402,7 @@ document.onpaste = e => {
 };
 
 drawSaved();
-refresh();
+if (localStorage.token) refresh();
+else askToken("paste the agent token below to get started");
 setInterval(refresh, 15000);
 </script>

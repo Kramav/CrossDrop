@@ -31,7 +31,20 @@ msedge.exe --app=http://<pi-tailnet-ip>:8080/
 ```
 
 Paste a link or drag a file (`.pdf .png .jpg .jpeg .gif .webp .txt`, 25 MB cap)
-and the display follows. It asks for the agent token once and remembers it.
+and the display follows. Paste the agent token into **Settings** on first run;
+it stays in that browser.
+
+**Settings** also holds the screens editor — each monitor's name, home URL,
+position and size, applied live with no restart, so moving a window between
+monitors happens while you watch. Leave position or size blank and the agent
+falls back to what `xrandr` detects; **Re-detect layout** is that, for both.
+
+Edits persist to `~/.local/share/room-display/settings.json`, which the agent
+owns and `update.sh` never touches. They do **not** go into
+`/etc/room-display/config.toml` — it holds the bearer token and is deliberately
+`root:<user> 640`, so the agent cannot write it. The token, `browser.kind`,
+`profile_dir`, `upload.dir` and `debug_port` stay file-only for the same reason:
+they are install-time facts that need a browser relaunch, not a config reload.
 
 **`roomctl`** — the CLI, and the same functions eve imports.
 
@@ -78,6 +91,8 @@ before it keeps working unchanged.
 | `POST /v1/scroll` | `{"screen"?, "dy"?, "to"?}` | `to` is `"top"`\|`"bottom"`; else `dy` pixels |
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
+| `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
+| `PUT /v1/settings` | `{"screens": [{"name", "home_url", "position"?, "size"?}]}` | saves, then moves the windows live |
 | `GET /v1/status` | — | as before, plus `"screens": [...]` |
 
 `GET /home` is the idle screen the kiosk sits on, and `GET /home-status` feeds
