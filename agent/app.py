@@ -426,8 +426,8 @@ def put_settings(body: SettingsIn) -> SettingsOut:
                         for n, s in zip(names, body.screens)]}
     try:
         settings.save(data)
-    except OSError as e:
-        raise HTTPException(500, f"cannot write {settings.path()}: {e}")
+    except (OSError, RuntimeError) as e:      # unwritable dir, or no resolvable home
+        raise HTTPException(500, f"cannot save settings: {e}")
 
     # Reload through load_config() rather than patching cfg field by field, so a
     # save lands exactly where a restart would — one code path, no second

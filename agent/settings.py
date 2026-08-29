@@ -37,7 +37,11 @@ def load() -> dict:
     """
     try:
         data = json.loads(path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
+        # RuntimeError: Path.home() raises it when it cannot resolve a home dir.
+        # display-agent.service is a *user* unit so systemd always exports HOME,
+        # but this runs on load_config()'s path — the one that decides whether
+        # the agent boots at all — and it is not worth being clever about.
         return {}
     return data if isinstance(data, dict) else {}
 
