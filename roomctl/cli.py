@@ -36,6 +36,15 @@ def main(argv: list[str] | None = None) -> int:
     auto.add_argument("action", choices=["start", "stop"])
     auto.add_argument("--speed", type=int, default=40, help="pixels per tick")
 
+    # Kept in step with agent/browser.py MEDIA_ACTIONS by hand: roomctl talks to a
+    # remote Pi and must not import the agent to run.
+    med = sub.add_parser("media", help="control the video or audio on the page")
+    med.add_argument("action", nargs="?", default="state",
+                     choices=["state", "play", "pause", "toggle",
+                              "mute", "unmute", "seek", "volume"])
+    med.add_argument("value", nargs="?", type=int, default=0,
+                     help="seek: seconds, may be negative. volume: 0-100.")
+
     a = p.parse_args(argv)
 
     def do_scroll():
@@ -53,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             "upload": lambda: roomctl.upload(a.path, a.target, a.screen),
             "scroll": do_scroll,
             "autoscroll": lambda: roomctl.autoscroll(a.action, a.target, a.screen, a.speed),
+            "media": lambda: roomctl.media(a.action, a.target, a.screen, a.value),
         }[a.cmd]()
     except (RuntimeError, OSError) as e:
         print(f"roomctl: {e}", file=sys.stderr)

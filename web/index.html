@@ -38,8 +38,9 @@
   #saved button { max-width: 16rem; overflow: hidden; text-overflow: ellipsis;
                   white-space: nowrap; }
   #saved .x { padding: .5rem; }
-  #auto[aria-pressed=true] { background: color-mix(in srgb, currentColor 20%, transparent);
-                             font-weight: 600; }
+  #auto[aria-pressed=true], #mute[aria-pressed=true] {
+    background: color-mix(in srgb, currentColor 20%, transparent); font-weight: 600; }
+  #pos { font: .85rem ui-monospace, monospace; opacity: .7; }
   #status { opacity: .7; word-break: break-all; min-height: 1.5em; }
   kbd { font: .8em ui-monospace, monospace; border: 1px solid var(--line);
         border-bottom-width: 2px; border-radius: .3rem; padding: 0 .3em; }
@@ -71,7 +72,8 @@
   Drop or paste a link or file here, or
   <!-- drag-and-drop is mouse-only; the picker is the keyboard path -->
   <label>
-    <input type="file" id="pick" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt">
+    <input type="file" id="pick"
+           accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.mp4,.webm,.mp3,.m4a,.wav">
     choose a file
   </label>
 </div>
@@ -84,6 +86,20 @@
 </form>
 
 <ul id="saved"></ul>
+
+<!-- Hidden until the screen actually has a video or audio element on it, so the
+     controls appear by themselves the moment someone puts a video on the wall. -->
+<fieldset id="media" hidden>
+  <legend id="media-legend">Playing</legend>
+  <div class="row tight">
+    <button type="button" id="back" title="Back 10 seconds (←)">⏪</button>
+    <button type="button" id="playpause" title="Play / pause (Space)">▶</button>
+    <button type="button" id="fwd" title="Forward 10 seconds (→)">⏩</button>
+    <button type="button" id="mute" aria-pressed="false" title="Mute">🔇</button>
+    <label>volume <input id="vol" type="range" min="0" max="100" value="100"></label>
+    <span id="pos"></span>
+  </div>
+</fieldset>
 
 <fieldset>
   <legend id="scroll-legend">Scroll</legend>
@@ -147,6 +163,7 @@ const store = { // ponytail: saved links live in this browser only; move to the 
 let screens = [];
 let target = localStorage.screen || "";
 let awake = true;
+let media = null;                  // last known playback state, or null: nothing playing
 
 // No prompt(): a popup you can't paste into comfortably, can't correct without
 // clearing site data, and which says nothing useful when the token is wrong.
@@ -245,11 +262,45 @@ async function refresh() {
         : "browser down";
     }
     $("#auto").setAttribute("aria-pressed", String(!!(me && me.autoscroll)));
+    probeMedia();                    // not awaited: the rest of the page is ready
+
     $("#ver").textContent = s.version;
     $("#host").textContent = location.host;
     drawScreens();
   } catch (e) { $("#status").textContent = "✗ " + e.message; }
 }
+
+// --- playback ---------------------------------------------------------------
+
+const clock = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+
+function drawMedia(m) {
+  media = m;
+  $("#media").hidden = !m;
+  if (!m) return;
+  $("#playpause").textContent = m.playing ? "⏸" : "▶";
+  $("#mute").setAttribute("aria-pressed", String(m.muted));
+  $("#vol").value = m.volume;
+  $("#pos").textContent = m.duration
+    ? `${clock(m.position)} / ${clock(m.duration)}` : clock(m.position);
+  $("#media-legend").textContent =
+    screens.length > 1 && target ? `Playing — ${target}` : "Playing";
+}
+
+// Any failure hides the controls: 404 is "no video on this page", and anything
+// else means we can't drive it either. Deliberately quiet — this runs on a timer.
+const probeMedia = () =>
+  api("/v1/media", { action: "state" }).then(drawMedia, () => drawMedia(null));
+
+const mediaAct = (action, value) =>
+  act(() => api("/v1/media", { action, value }).then(drawMedia));
+
+$("#playpause").onclick = () => mediaAct("toggle");
+$("#back").onclick = () => mediaAct("seek", -10);
+$("#fwd").onclick = () => mediaAct("seek", 10);
+$("#mute").onclick = () => mediaAct(media && media.muted ? "unmute" : "mute");
+// onchange, not oninput: a drag would otherwise fire a request per pixel.
+$("#vol").onchange = () => mediaAct("volume", Number($("#vol").value));
 
 function drawSaved() {
   $("#saved").replaceChildren(...store.get().map(url => {
@@ -301,6 +352,10 @@ const KEYS = {
   ArrowDown: () => scroll({ dy: 120 }), ArrowUp: () => scroll({ dy: -120 }),
   PageDown: () => scroll({ dy: page() }), PageUp: () => scroll({ dy: -page() }),
   Home: () => scroll({ to: "top" }), End: () => scroll({ to: "bottom" }),
+  // The transport keys, and no-ops when nothing is playing.
+  " ": () => media && mediaAct("toggle"),
+  ArrowLeft: () => media && mediaAct("seek", -10),
+  ArrowRight: () => media && mediaAct("seek", 10),
 };
 document.onkeydown = e => {
   if (e.target.matches("input, textarea") || e.ctrlKey || e.altKey || e.metaKey) return;

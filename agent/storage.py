@@ -19,6 +19,14 @@ TYPES = {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".txt": "text/plain; charset=utf-8",
+    # Clips, not films: this directory is tmpfs, so an upload is RAM the Pi does
+    # not get back until the sweep. upload.max_mb is the guard — raise it
+    # knowing what it costs, and push long video as a URL instead.
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".wav": "audio/wav",
 }
 
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,}\.[a-z0-9]{1,5}$")

@@ -94,6 +94,11 @@ def launch(cfg: dict) -> subprocess.Popen:
                 # cannot get back. Uncapped, Chromium sizes it from free space
                 # and eventually fills /run/user/<uid>, taking the kiosk with it.
                 f"--disk-cache-size={b['disk_cache_mb'] * 1024 * 1024}",
+                # A pushed video should start playing. Chromium's default blocks
+                # autoplay with sound until someone clicks, and nobody can click
+                # this box. /v1/media sends userGesture anyway, so this only
+                # covers the case of arriving on a page that autoplays.
+                "--autoplay-policy=no-user-gesture-required",
                 "--no-first-run", "--no-default-browser-check"]
         # Wayland gives the compositor final say on window position and Chromium
         # ignores --window-position there. Under XWayland the move is an X11
@@ -302,6 +307,64 @@ def scroll(cfg: dict, screen: str | None = None, dy: int = 0,
         call("Input.dispatchMouseEvent",
              {"type": "mouseWheel", "x": x, "y": y,
               "deltaX": 0, "deltaY": _JUMP[to] if to else dy})
+
+
+MEDIA_ACTIONS = ("state", "play", "pause", "toggle", "mute", "unmute", "seek", "volume")
+
+# Whatever the page is playing, driven through the element itself — there is no
+# CDP "media" domain to ask, and every player worth showing on a wall is an
+# HTML5 <video>/<audio> underneath its own controls.
+#
+# ponytail: top frame, main world, no shadow DOM. A site that embeds its player
+# in a cross-origin <iframe> (an embedded YouTube, not youtube.com itself) has no
+# media element here and reports nothing playing. Reaching those needs a per-frame
+# execution context, i.e. Runtime.enable and event handling in _connect().
+_MEDIA_JS = """(() => {
+  const els = [...document.querySelectorAll('video, audio')];
+  // Biggest first: a page with an autoplaying banner clip beside the real video
+  // must not hand back the banner. Audio elements have no box, hence the || 1.
+  const m = els.sort((a, b) => (b.clientWidth * b.clientHeight || 1)
+                             - (a.clientWidth * a.clientHeight || 1))[0];
+  if (!m) return null;
+  const a = %(action)s, v = %(value)s;
+  if (a === 'play') m.play();
+  else if (a === 'pause') m.pause();
+  else if (a === 'toggle') m.paused ? m.play() : m.pause();
+  else if (a === 'mute' || a === 'unmute') m.muted = a === 'mute';
+  else if (a === 'seek') m.currentTime = Math.max(0, (m.currentTime || 0) + v);
+  // Unmute on a volume change: nudging the slider on a muted video and hearing
+  // nothing is indistinguishable from the whole feature being broken.
+  else if (a === 'volume') { m.volume = Math.min(1, Math.max(0, v / 100)); m.muted = false; }
+  return {playing: !m.paused, muted: !!m.muted, volume: Math.round(m.volume * 100),
+          position: Math.round(m.currentTime || 0),
+          duration: Math.round(isFinite(m.duration) ? m.duration : 0)};
+})()"""
+
+
+def media(cfg: dict, screen: str | None = None, action: str = "state",
+          value: float = 0) -> dict | None:
+    """Drive the <video>/<audio> on one screen. None if the page has none.
+
+    `state` only reports. `seek` takes seconds (negative rewinds), `volume` 0-100.
+    """
+    if cfg["browser"]["kind"] == "firefox":
+        raise NotImplementedError(
+            "media control needs CDP; use kind = \"chromium\" or \"edge\"")
+    if action not in MEDIA_ACTIONS:
+        raise ValueError(f"action must be one of {', '.join(MEDIA_ACTIONS)}")
+    page = _cdp_page(cfg, screen)
+    with _rpc(page["webSocketDebuggerUrl"]) as call:
+        r = call("Runtime.evaluate", {
+            "expression": _MEDIA_JS % {"action": json.dumps(action),
+                                       "value": json.dumps(float(value))},
+            "returnByValue": True,
+            # Chromium refuses play() on a page nobody has interacted with, and
+            # nobody ever interacts with a kiosk. This is what a real click gives.
+            "userGesture": True})
+    if r.get("exceptionDetails"):
+        raise RuntimeError(f"media {action} failed: "
+                           f"{r['exceptionDetails'].get('text', 'script error')}")
+    return r.get("result", {}).get("value")
 
 
 def _viewport_centre(call) -> tuple[int, int]:

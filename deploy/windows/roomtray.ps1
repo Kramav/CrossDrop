@@ -228,6 +228,11 @@ $menu.Add_Opening({
         New-Object Drawing.Font $menu.Font, ([Drawing.FontStyle]::Bold)
     Add-Item $menu 'Send file...' { Choose-File } | Out-Null
     $menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator)) | Out-Null
+    # The one media verb that earns a menu slot; volume and seek are the web UI's
+    # job. Toggles server-side, so the tray never has to know what is playing.
+    Add-Item $menu 'Play/pause' {
+        Act 'Media' { Api '/v1/media' @{ screen = $script:screen; action = 'toggle' } }
+    } | Out-Null
     Add-Item $menu 'Home' { Act 'Home' { Api '/v1/home' @{ screen = $script:screen } } } | Out-Null
     Add-Item $menu 'Reload' { Act 'Reload' { Api '/v1/reload' @{ screen = $script:screen } } } | Out-Null
     # No screen on /v1/display: X11 powers both monitors together (agent/display.py).
@@ -243,7 +248,8 @@ $menu.Add_Opening({
 
 function Choose-File {
     $d = New-Object Windows.Forms.OpenFileDialog
-    $d.Filter = 'Showable files|*.pdf;*.png;*.jpg;*.jpeg;*.gif;*.webp;*.txt|All files|*.*'
+    $d.Filter = 'Showable files|*.pdf;*.png;*.jpg;*.jpeg;*.gif;*.webp;*.txt;' +
+                '*.mp4;*.webm;*.mp3;*.m4a;*.wav|All files|*.*'
     if ($d.ShowDialog() -eq 'OK') { Act 'Upload' { Send-File $d.FileName } }
 }
 

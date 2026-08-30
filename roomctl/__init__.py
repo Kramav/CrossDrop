@@ -102,3 +102,11 @@ def autoscroll(action: str, target: str | None = None, screen: str | None = None
                speed: int = 40) -> dict:
     return _call(target, "POST", "/v1/autoscroll",
                  json={"screen": screen, "action": action, "speed": speed})
+
+
+def media(action: str = "state", target: str | None = None, screen: str | None = None,
+          value: int = 0) -> dict:
+    """play / pause / toggle / mute / unmute / seek (seconds) / volume (0-100),
+    or "state" to just ask. 404s when the page has no video or audio."""
+    return _call(target, "POST", "/v1/media",
+                 json={"screen": screen, "action": action, "value": value})

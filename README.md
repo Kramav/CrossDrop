@@ -30,7 +30,8 @@ controls and saved links. Open it as its own window:
 msedge.exe --app=http://<pi-tailnet-ip>:8080/
 ```
 
-Paste a link or drag a file (`.pdf .png .jpg .jpeg .gif .webp .txt`, 25 MB cap)
+Paste a link or drag a file (`.pdf .png .jpg .jpeg .gif .webp .txt`, plus
+`.mp4 .webm .mp3 .m4a .wav`, 25 MB cap)
 and the display follows. Paste the agent token into **Settings** on first run;
 it stays in that browser.
 
@@ -64,6 +65,13 @@ roomctl navigate https://example.com -s right     # one monitor
 roomctl navigate https://example.com -s all       # both
 roomctl scroll --down | --up | --top | --bottom
 roomctl autoscroll start -s right --speed 60
+
+roomctl navigate https://youtube.com/watch?v=...  # then drive it:
+roomctl media                                     # what is playing
+roomctl media toggle                              # play / pause
+roomctl media seek -30                            # seconds, negative rewinds
+roomctl media volume 40                           # 0-100
+roomctl media mute
 ```
 
 A **target** is a Pi; a **screen** is one monitor on it. Omit `-s` and you get
@@ -73,6 +81,29 @@ Every command prints the agent's JSON reply, so it pipes into `jq`; errors go to
 stderr with exit 1. `targets.toml` holds bearer tokens and is git-ignored.
 `ROOMCTL_TARGETS` overrides its location. No install needed on a box that just
 has the checkout: `python -m roomctl status`.
+
+## Video and audio
+
+Put a video on the wall the usual way — a URL, or a dropped file — and the
+controller grows transport controls for it: play/pause, ±10 s, mute, volume,
+and the position. The web UI shows them only while the screen actually has a
+`<video>` or `<audio>` on it, so they appear and disappear on their own.
+<kbd>Space</kbd>, <kbd>←</kbd> and <kbd>→</kbd> work there too. The tray's
+right-click menu has **Play/pause**; the CLI has `roomctl media`.
+
+Everything acts on the media element itself, which means:
+
+- **It needs Chromium or Edge.** Firefox has no CDP and returns `501`, exactly
+  as scroll does.
+- **A player inside a cross-origin `<iframe>` is invisible to it** — a YouTube
+  *watch page* is fine, a site embedding a YouTube player is not.
+- **Volume is the page's, not the Pi's.** If HDMI audio is muted in
+  `alsamixer` on the Pi, nothing here will make a sound; set that once at
+  install.
+- **Uploads are RAM** (the store is tmpfs), so a long film belongs at a URL.
+  Raising `upload.max_mb` raises what a single drop costs the Pi.
+- A film longer than `display.content_off_minutes` (default 2 h) still blanks
+  the screen mid-playback; raise it in `config.toml` for a cinema room.
 
 ## The `/v1` contract
 
@@ -90,6 +121,7 @@ before it keeps working unchanged.
 | `POST /v1/home` | `{"screen"?}` | `{"ok": true, "current_url": "..."}` |
 | `POST /v1/scroll` | `{"screen"?, "dy"?, "to"?}` | `to` is `"top"`\|`"bottom"`; else `dy` pixels |
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
+| `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
 | `PUT /v1/settings` | `{"screens": [{"name", "home_url", "position"?, "size"?}]}` | saves, then moves the windows live |

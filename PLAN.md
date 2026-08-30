@@ -114,6 +114,11 @@ room-display-control/
 - `POST /v1/display` `{ "action": "on"|"off" }` → `{ "ok": true, "awake": bool }`.
   No `screen`: X11 powers every monitor together. Every other route wakes the
   display as a side effect, so this exists for turning it **off** on the way out.
+- `POST /v1/media` `{ "screen"?, "action", "value"? }` → `{ "ok", "playing", "muted", "volume", "position", "duration" }`.
+  `action` is `state|play|pause|toggle|mute|unmute|seek|volume`; `value` is
+  seconds for `seek` (negative rewinds) and 0-100 for `volume`. `404` when the
+  page has no `<video>`/`<audio>`, `501` on Firefox. Additive — no existing
+  route or field changed.
 - Auth: `Authorization: Bearer <token>` on all `/v1` routes.
 
 Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once the native app targets it.
@@ -161,6 +166,8 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 **Deliberately still out of scope after v1.1.0.** Display sleep timeouts (`idle_off_minutes`, `content_off_minutes`) and upload caps (`max_mb`, `keep`) are runtime-safe and would drop into the same file in ~10 lines each; they were considered and left file-only. Add them when editing a config file over `ssh` is actually what stands in the way.
 
 **v1.0.1 — agent-owned display power.** Done. The Pi has no keyboard, so anything that blanks the screen and wakes only on *input* can only be cured by unplugging the box. The agent claims DPMS at startup (timeouts zeroed, DPMS kept enabled) and drives power itself: idle on its home page → off after 10 min, showing a site → off after 2 h without a request, and **any `/v1` call wakes it**. `POST /v1/display` and a UI button cover leaving the room. Both monitors sleep together — X11 has no per-output power. Same commit made screens self-detecting (`xrandr --listmonitors`), so a fresh install needs no `[[screen]]` blocks written by hand. See `agent/display.py`, `deploy/pi/README.md` §8.
+
+**v1.1.1 — playback control.** Done. A room display that can show a video could not pause one: the box has no keyboard, so whatever was pushed at it played to the end or not at all. `POST /v1/media` drives the page's own `<video>`/`<audio>` through one `Runtime.evaluate` — play, pause, ±10 s, mute, volume — with CDP's `userGesture`, which is what gets past Chromium's autoplay block on a page nobody can click. The web UI reveals its transport bar only when the screen really has a media element, the tray gets Play/pause, and `roomctl media` is the CLI. Uploads accept `.mp4 .webm .mp3 .m4a .wav` under the same tmpfs cap. Not covered: players inside cross-origin iframes (no execution context there) and the Pi's own ALSA volume. See `agent/browser.py` `media()`, `tests/test_media.py`.
 
 **Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**
 

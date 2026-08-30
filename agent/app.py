@@ -175,6 +175,12 @@ class AutoScrollIn(BaseModel):
     speed: int = 40                 # pixels per tick, ~10 ticks a second
 
 
+class MediaIn(BaseModel):
+    screen: str | None = None
+    action: str = "state"           # see browser.MEDIA_ACTIONS
+    value: int = 0                  # seek: seconds, +/-. volume: 0-100.
+
+
 class DisplayIn(BaseModel):
     action: str                     # "on" | "off". No screen: X11 powers all
                                     # monitors together (agent/display.py).
@@ -188,6 +194,15 @@ class NavigateOut(BaseModel):
 class DisplayOut(BaseModel):
     ok: bool
     awake: bool
+
+
+class MediaOut(BaseModel):
+    ok: bool
+    playing: bool
+    muted: bool
+    volume: int                     # 0-100, the element's own volume
+    position: int                   # seconds
+    duration: int                   # seconds; 0 for a live stream
 
 
 class UploadOut(BaseModel):
@@ -344,6 +359,34 @@ def autoscroll(body: AutoScrollIn) -> NavigateOut:
         else:
             _autoscroll_stop(s["name"])
         out = NavigateOut(ok=True, current_url=s["name"])
+    return out
+
+
+@app.post("/v1/media", response_model=MediaOut, dependencies=[Depends(auth)])
+def media(body: MediaIn) -> MediaOut:
+    """Play, pause, seek, mute or set the volume of whatever the screen is
+    showing. `action: "state"` just reports, so a controller can poll it."""
+    cfg = app.state.cfg
+    out = None
+    for s in targets(cfg, body.screen):
+        # Not on "state": a controller left open polling this would keep the room
+        # lit all night, which is exactly what the idle timer exists to prevent.
+        if body.action != "state":
+            display.touch(s)
+        try:
+            state = browser.media(cfg, s["name"], body.action, body.value)
+        except NotImplementedError as e:
+            raise HTTPException(501, str(e))
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        except (OSError, RuntimeError) as e:
+            raise HTTPException(503, f"browser unreachable: {e}")
+        if state is not None:
+            out = MediaOut(ok=True, **state)
+    # "all" over a wall where only one screen has a video is a success, not a
+    # 404 — the request did what it could. Nothing anywhere is the error.
+    if out is None:
+        raise HTTPException(404, f"nothing playing on {body.screen or 'the display'}")
     return out
 
 
