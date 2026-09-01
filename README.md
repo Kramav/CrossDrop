@@ -8,6 +8,58 @@ point it at a URL, or drop a file on it and have it render.
   [deploy/pi/setup.sh](deploy/pi/setup.sh).
 - **Build plan and phases** — [PLAN.md](PLAN.md).
 
+## Architecture
+
+One server, many clients. The Pi runs **one FastAPI process** that owns a kiosk
+browser and the monitors; everything else in this repo is a client of its frozen
+`/v1` HTTP API (contract table near the bottom of this file). Adding a control
+surface never touches the server.
+
+```
+tray app  ─┐
+web UI    ─┼─ HTTP /v1 (bearer token, over tailnet) ─→  agent/app.py
+roomctl   ─┘                                              │
+eve (imports roomctl as a library) ──────────────────┘    │
+                                    ┌─────────────────────┼─────────────────┐
+                              browser.py             display.py        storage.py
+                          CDP / WebDriver BiDi      xrandr + DPMS     tmpfs uploads
+                          over a websocket          (monitor power)   (RAM, capped)
+                                    ↓                    ↓
+                            kiosk browser window    the physical monitors
+```
+
+Two facts explain most of the code. **The Pi has no keyboard**, so anything that
+blanks the screen and wakes only on input is unrecoverable — hence explicit
+power control in `display.py` and the self-rolling-back updater. **The browser is
+driven remotely**, over CDP for Chromium/Edge and WebDriver BiDi for Firefox;
+scroll and media need CDP, so Firefox gets `501` on those.
+
+A **target** is a Pi. A **screen** is one monitor on it.
+
+### Where things live
+
+Each file's own docstring is the detailed version — the point of this table is
+that you only have to open one.
+
+| Path | What it is |
+|---|---|
+| [agent/app.py](agent/app.py) | The whole HTTP surface: routes, pydantic models, auth, config loading. The only file that defines the API. |
+| [agent/browser.py](agent/browser.py) | Launches the kiosk browser, drives the tab. CDP *and* BiDi over one JSON-RPC helper. Navigate, scroll, media, window placement. |
+| [agent/display.py](agent/display.py) | Monitor power only, via `xrandr`/DPMS. Idle watcher; every screen-touching route wakes the display first. X11 only. |
+| [agent/storage.py](agent/storage.py) | Upload store. Extension allowlist, size cap, keep-newest-N sweep. It's tmpfs, so it's RAM. |
+| [agent/settings.py](agent/settings.py) | The subset of config the agent may rewrite at runtime (screen names, home URLs, geometry) → `settings.json`. Everything else stays file-only in `config.toml`. |
+| [agent/selfcheck.py](agent/selfcheck.py) | `python -m agent selfcheck` — in-process boot check that gates a release swap. |
+| [agent/config.example.toml](agent/config.example.toml) | Install-time config: token, browser kind, ports, paths. Real one is git-ignored. |
+| [roomctl/__init__.py](roomctl/__init__.py) | The client library — one function per route. `eve` imports this. |
+| [roomctl/cli.py](roomctl/cli.py) | argparse shell over the above; prints the agent's JSON verbatim. |
+| [web/index.html](web/index.html) | The controller UI the agent serves at `/`. Single file, no build step, no framework. |
+| [web/home.html](web/home.html) | The idle screen the kiosk sits on. Also single-file. |
+| [deploy/pi/](deploy/pi/) | Provisioning (`setup.sh`), systemd units, tmpfs profile snapshots, and `update.sh` — the release-gated auto-updater with rollback. |
+| [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1) | The tray client. Pure PowerShell + WinForms so it runs on a box with no checkout and no Python. |
+| [tests/](tests/) | pytest, one file per surface. No browser needed unless `ROOM_SMOKE=1`. |
+| [PLAN.md](PLAN.md) | Why it's built this way, phase by phase. Section numbers referenced from code comments. |
+| [HANDOFF.md](HANDOFF.md) | Session-to-session state. Point-in-time; trust the code over it. |
+
 ## Controlling a display
 
 Three ways, same frozen API underneath.
