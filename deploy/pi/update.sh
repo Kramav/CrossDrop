@@ -37,6 +37,14 @@ if [ "$TAG" = "$RUNNING" ]; then
   echo "up to date ($TAG)"
   exit 0
 fi
+# A tag that failed the live verify will fail it again: same code, same box.
+# Without this latch the timer redeploys it every 30 min forever, restarting the
+# kiosk twice a cycle on a box with no keyboard -- the exact failure this file
+# exists to prevent. Delete the marker to retry a tag after fixing the cause.
+if [ -f "$RELEASES/.failed-$TAG" ]; then
+  echo "$TAG failed verify before - skipping (rm $RELEASES/.failed-$TAG to retry)"
+  exit 0
+fi
 echo "new release $TAG (running: $RUNNING)"
 
 # --- 2. fetch the tag into its own release dir -----------------------------
@@ -90,6 +98,7 @@ done
 # --- 7. rollback ------------------------------------------------------------
 if [ "$healthy" != 1 ]; then
   echo "ROLLBACK: $TAG did not answer $URL within ${VERIFY_SECS}s" >&2
+  touch "$RELEASES/.failed-$TAG"      # latch, so the timer stops re-trying it
   if [ -n "$PREV" ] && [ -e "$PREV" ]; then
     ln -sfn "$PREV" "$CURRENT"
     systemctl --user restart "$UNIT"
