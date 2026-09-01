@@ -59,4 +59,11 @@ disk_cache_mb = 100          # On the Pi the profile is tmpfs, so this is RAM.
 dir = ""                     # empty = ./uploads next to this config.
                              # On the Pi point this at tmpfs — i.e. RAM, hence the caps.
 max_mb = 25                  # rejected with 413 past this
-keep = 20                    # newest N kept; older uploads are swept on each new one
+keep = 5                     # newest N kept; older uploads are swept on each new one.
+                             # keep * max_mb is the worst-case RAM this costs, and it
+                             # shares /run/user with the browser profile + its disk
+                             # cache. logind sizes that at 10% of RAM — ~400 MB on a
+                             # 4 GB Pi — so the old keep = 20 could ask for 500 MB of
+                             # uploads alone. Below 1 is treated as 1: the file just
+                             # uploaded has to outlive the sweep for the kiosk to
+                             # fetch it.

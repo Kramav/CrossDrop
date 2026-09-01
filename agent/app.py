@@ -21,7 +21,7 @@ DEFAULTS = {
     "kind": "firefox", "path": "", "profile_dir": "", "autolaunch": True,
     "debug_port": 9222, "disk_cache_mb": 100,
 }
-UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 20}
+UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 5}
 SCREEN_DEFAULTS = {"name": "", "position": "", "size": "", "home_url": ""}
 
 
@@ -477,8 +477,14 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     # implementation of the ?screen= stamping. Mutated in place, *not*
     # reassigned: display.watch() closed over this dict at startup and would
     # otherwise read a stale config forever.
+    #
+    # Built first, then swapped in back to back. Every browser route is `def`,
+    # so it runs on the threadpool: clearing before load_config() left cfg empty
+    # across a file read and an xrandr subprocess, and any concurrent request
+    # reading cfg["screens"] in that window got a KeyError.
+    fresh = load_config()
     cfg.clear()
-    cfg.update(load_config())
+    cfg.update(fresh)
 
     # The live half, and the only reason this beats editing a file: the window
     # moves while you watch. It must not fail the request -- the settings are
@@ -529,8 +535,12 @@ def serve_file(file_id: str) -> FileResponse:
         p = storage.path(app.state.cfg, file_id)
     except KeyError:
         raise HTTPException(404, "no such file")
+    # nosniff: we serve the type the extension claims, never the client's. This
+    # route is unauthenticated and same-origin with the web UI that holds the
+    # token, so a .txt talked into rendering as HTML would run there.
     return FileResponse(p, media_type=storage.media_type(file_id),
-                        content_disposition_type="inline")
+                        content_disposition_type="inline",
+                        headers={"X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/v1/status", response_model=Status, dependencies=[Depends(auth)])

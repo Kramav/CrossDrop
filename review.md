@@ -19,16 +19,23 @@ that will be enabled.
 | # | Finding | Where | Severity | Status |
 |---|---|---|---|---|
 | 1 | Updater redeploys a failed tag every 30 min, forever | [update.sh](deploy/pi/update.sh) | high | **fixed** |
-| 2 | `--remote-allow-origins=*` disables a defense the client doesn't need | [browser.py:82](agent/browser.py#L82) | high | open |
-| 3 | tmpfs budget over-subscribed; ENOSPC wedges uploads permanently | [storage.py:57](agent/storage.py#L57), [setup.sh:152](deploy/pi/setup.sh#L152) | medium | open |
-| 4 | `keep = 0` deletes the file just uploaded | [storage.py:90](agent/storage.py#L90) | medium | open |
+| 2 | `--remote-allow-origins=*` disables a defense the client doesn't need | [browser.py:79](agent/browser.py#L79) | high | **fixed**, needs Pi verify |
+| 3 | tmpfs budget over-subscribed; ENOSPC wedges uploads permanently | [storage.py:57](agent/storage.py#L57), [setup.sh:152](deploy/pi/setup.sh#L152) | medium | **fixed** |
+| 4 | `keep = 0` deletes the file just uploaded | [storage.py:92](agent/storage.py#L92) | medium | **fixed** |
 | 5 | Autoscroll opens a WebSocket 10×/sec | [app.py:269](agent/app.py#L269), [browser.py:302](agent/browser.py#L302) | medium | open, unverified |
-| 6 | `cfg.clear()`/`update()` torn read → 500 | [app.py:480](agent/app.py#L480) | low | open |
-| 7 | `/files/{id}` lacks `nosniff` | [app.py:526](agent/app.py#L526) | low | open |
-| 8 | Bearer token on `update.sh` curl command line | [update.sh:83](deploy/pi/update.sh#L83) | low | open |
-| 9 | `tailscale up --ssh` enabled silently by the installer | [setup.sh:62](deploy/pi/setup.sh#L62) | low | open |
-| 10 | Auto-update deploys unsigned tags | [update.sh:32](deploy/pi/update.sh#L32) | low | open, opt-in |
-| 11 | `request.url_for` reflects the `Host` header | [app.py:520](agent/app.py#L520) | low | open |
+| 6 | `cfg.clear()`/`update()` torn read → 500 | [app.py:480](agent/app.py#L480) | low | **fixed** |
+| 7 | `/files/{id}` lacks `nosniff` | [app.py:526](agent/app.py#L526) | low | **fixed** |
+| 8 | Bearer token on `update.sh` curl command line | [update.sh:83](deploy/pi/update.sh#L83) | low | won't fix |
+| 9 | `tailscale up --ssh` enabled silently by the installer | [setup.sh:62](deploy/pi/setup.sh#L62) | low | open, docs |
+| 10 | Auto-update deploys unsigned tags | [update.sh:32](deploy/pi/update.sh#L32) | low | won't fix, opt-in |
+| 11 | `request.url_for` reflects the `Host` header | [app.py:520](agent/app.py#L520) | low | won't fix |
+
+**8, 10 and 11 are deliberately not fixed.** 8's threat is another local user on
+a Pi that has exactly one; 10 trades a permanent release-signing burden against
+an opt-in path that ships disabled; 11 needs a proxy or a hand-crafted `Host` on
+an already-authenticated route. Each costs more than the risk it removes. 9 is a
+line of README, not code. **5 is the one real open item** — it needs a Pi to
+confirm before the rewrite is worth doing.
 
 ### 1. Rollback loop — fixed
 
@@ -45,7 +52,7 @@ and written on rollback. The marker is a dotfile, so the step-8 prune loop's
 for inspection" is now true — previously the next run's `rm -rf "$DEST"`
 destroyed it.
 
-### 2. `--remote-allow-origins=*` — open, recommend deleting
+### 2. `--remote-allow-origins=*` — fixed, unverified on hardware
 
 The tailnet boundary does not cover this one. The threat is not a device on the
 tailnet; it is the arbitrary web page pushed to the display, which runs inside
@@ -58,9 +65,14 @@ Still gated behind guessing a target UUID (`/json` is not CORS-readable), so
 hardening rather than a live hole. But it buys nothing:
 [browser.py:400](agent/browser.py#L400) already passes `suppress_origin=True`
 unconditionally on every CDP connection. The flag's own comment says as much.
-Delete it; if CDP then fails, that is itself a finding.
 
-### 3. tmpfs budget
+Deleted, and PLAN.md §6's gotcha entry rewritten so nobody re-adds it as the
+"fix" for a CDP failure. **No test covers this and none can** — the flag's
+absence only matters against a real Chromium. Next deploy, confirm
+`/v1/status` still returns a `current_url` rather than a browser error; if CDP
+fails there, that is itself a finding.
+
+### 3. tmpfs budget — fixed
 
 Profile and uploads share `/run/user/$UID`, which logind sizes at 10% of RAM —
 ~400 MB on this Pi. Against it: `keep = 20 × max_mb = 25` is up to 500 MB of
@@ -71,14 +83,29 @@ The failure mode is worse than the arithmetic. [storage.py:57](agent/storage.py#
 does not catch `OSError`, so ENOSPC is an uncaught 500 rather than the 413 a
 caller expects, and `sweep()` runs *after* the write
 ([storage.py:68](agent/storage.py#L68)) — so a full tmpfs never self-clears and
-uploads stay wedged. `keep = 5` closes the gap; sweeping before the write, or
-catching `OSError` and sweep-then-retry, fixes the wedge.
+uploads stay wedged.
 
-### 4. `keep = 0`
+Fixed both halves: `keep` defaults to 5 (`UPLOAD_DEFAULTS` and
+`config.example.toml`, with the arithmetic written down), and `save()` now
+sweeps *before* the write as well as after. The pre-sweep is what breaks the
+wedge — a failed write no longer leaves the directory full with nothing to
+clear it. `test_failed_upload_still_frees_room` drives an ENOSPC mid-write and
+asserts the directory came back under `keep`. The existing exactly-N assertion
+in `test_storage_caps_and_sweeps` still passes, so the documented semantics did
+not drift.
+
+### 4. `keep = 0` — fixed
 
 `files[: -keep or None]` — `-0` is falsy, so the slice becomes `files[:None]`,
 i.e. every file including the one just written. The config documents `keep` as
-"newest N kept", which reads like `0` means "keep none of the *old* ones".
+"newest N kept", which reads like `0` means "keep none of the *old* ones" —
+and on a box explicitly built as a temporary display rather than a filestore,
+that is exactly the value someone reaches for. The upload would then 404 on the
+display it was just sent to.
+
+Floored at 1 in `sweep()` rather than rejected at config load: this box has no
+keyboard, so coercing a meaningless value beats refusing to boot on one.
+`test_keep_zero_still_serves_the_file_just_uploaded` pins it.
 
 ### 5. Autoscroll — open, needs a real Pi to confirm
 
@@ -111,14 +138,18 @@ connection setup.
 
 ### 6–11, briefly
 
-- **6** — `cfg.clear()` then `cfg.update()` leaves a window where a concurrent
-  threadpool request reading `cfg["screens"]` gets a `KeyError`. The
-  mutate-in-place choice is correct and well-explained (`display.watch()` closed
-  over the dict); build the new dict first, then clear and update back to back.
-- **7** — `/files/{id}` is unauthenticated and same-origin with the web UI that
-  holds the token in `localStorage`. The `TYPES` allowlist is a good mitigation
-  and correctly excludes SVG; modern Chrome will not upgrade `text/plain` to
-  HTML, and uploading needs the token anyway. One header removes the class.
+- **6 — fixed.** `cfg.clear()` then `cfg.update()` left a window where a
+  concurrent threadpool request reading `cfg["screens"]` got a `KeyError` — and
+  the window was the whole of `load_config()`, which reads a file *and* shells
+  out to `xrandr`. The mutate-in-place choice is correct and well-explained
+  (`display.watch()` closed over the dict), so the fix keeps it and just builds
+  the new dict first: `fresh = load_config()`, then clear and update back to
+  back.
+- **7 — fixed.** `/files/{id}` is unauthenticated and same-origin with the web UI
+  that holds the token in `localStorage`. The `TYPES` allowlist is a good
+  mitigation and correctly excludes SVG; modern Chrome will not upgrade
+  `text/plain` to HTML, and uploading needs the token anyway. `nosniff` now on
+  the response, asserted by `test_files_route_sends_nosniff`.
 - **8** — `curl -H "Authorization: Bearer $TOKEN"` puts the token in
   `/proc/<pid>/cmdline` for any local user, up to 30 times per verify. `-H @-`
   with the header on stdin costs nothing.

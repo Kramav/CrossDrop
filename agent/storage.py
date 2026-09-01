@@ -54,6 +54,13 @@ def save(cfg: dict, filename: str, chunks) -> str:
     file_id = secrets.token_urlsafe(12) + ext
     dest, cap, written = d / file_id, up["max_mb"] * 1024 * 1024, 0
 
+    # Sweep *before* the write as well as after. This directory is tmpfs, so a
+    # full one makes the write raise ENOSPC — and if the only sweep ran after a
+    # successful write, nothing would ever free that space again and every
+    # future upload would 500. Making room first is what stops one full tmpfs
+    # from wedging uploads until someone SSHes in.
+    sweep(cfg)
+
     try:
         with dest.open("wb") as f:
             for chunk in chunks:
@@ -86,6 +93,12 @@ def media_type(file_id: str) -> str:
 def sweep(cfg: dict) -> None:
     # ponytail: keep the newest N, drop the rest. Crude, but this is RAM on a
     # box nobody logs into — an age- or byte-budget policy if that ever bites.
+    #
+    # Floored at 1. `keep = 0` reads like "this is a display, not a filestore,
+    # hold nothing" — but the file just uploaded has to survive long enough for
+    # the kiosk to GET it, and `files[:-0 or None]` is `files[:None]`, i.e.
+    # every file including that one. Uploads would 404 on the display instead.
+    keep = max(1, cfg["upload"]["keep"])
     files = sorted(Path(cfg["upload"]["dir"]).glob("*"), key=lambda p: p.stat().st_mtime)
-    for old in files[: -cfg["upload"]["keep"] or None]:
+    for old in files[:-keep]:
         old.unlink(missing_ok=True)

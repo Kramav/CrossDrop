@@ -102,6 +102,14 @@ def test_files_route_rejects_traversal(client):
         storage.path(cfg, "../config.toml")
 
 
+def test_files_route_sends_nosniff(client):
+    """/files is unauthenticated and same-origin with the web UI holding the
+    token, so a .txt sniffed into HTML would run there."""
+    file_id = storage.save(client.app.state.cfg, "ok.txt", [b"hi"])
+    r = client.get(f"/files/{file_id}")
+    assert r.headers["x-content-type-options"] == "nosniff"
+
+
 def test_storage_caps_and_sweeps(tmp_path):
     cfg = {"upload": {"dir": str(tmp_path), "max_mb": 1, "keep": 2}}
     ids = [storage.save(cfg, f"f{i}.txt", [b"hi"]) for i in range(4)]
@@ -112,6 +120,36 @@ def test_storage_caps_and_sweeps(tmp_path):
     with pytest.raises(storage.TooBig):
         storage.save(cfg, "big.txt", [b"x" * (2 << 20)])
     assert len(list(tmp_path.glob("*"))) == 2   # partial file cleaned up
+
+
+def test_keep_zero_still_serves_the_file_just_uploaded(tmp_path):
+    """`keep = 0` reads like "a display, not a filestore — hold nothing", and
+    `files[:-0 or None]` would delete every file including the one just written.
+    The kiosk then 404s on the link it was just sent."""
+    cfg = {"upload": {"dir": str(tmp_path), "max_mb": 1, "keep": 0}}
+    file_id = storage.save(cfg, "a.txt", [b"hi"])
+    assert storage.path(cfg, file_id).read_bytes() == b"hi"   # KeyError if swept
+
+
+def test_failed_upload_still_frees_room(tmp_path):
+    """Uploads live on tmpfs, so a full one makes the write raise ENOSPC. With
+    the sweep only after a successful write, nothing would ever free that space
+    again and every later upload would fail the same way — wedged until someone
+    SSHes into a box that has no keyboard."""
+    cfg = {"upload": {"dir": str(tmp_path), "max_mb": 1, "keep": 1}}
+    for i in range(4):
+        storage.save(cfg, f"old{i}.txt", [b"hi"])
+    for i in range(3):
+        (tmp_path / f"stale{i}.txt").write_bytes(b"x")
+
+    def enospc():
+        yield b"hi"
+        raise OSError(28, "No space left on device")
+
+    with pytest.raises(OSError):
+        storage.save(cfg, "new.txt", enospc())
+    # Swept anyway, and no partial left behind.
+    assert len(list(tmp_path.glob("*"))) == 1
 
 
 def test_chromium_kiosk_flags(tmp_path, monkeypatch):

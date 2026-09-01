@@ -76,10 +76,12 @@ def launch(cfg: dict) -> subprocess.Popen:
                 "--profile", str(profile), "--no-remote", "--kiosk", home]
     else:
         argv = [_exe(kind, b["path"]), f"--remote-debugging-port={port}",
-                # Chrome >= 111 rejects CDP websockets carrying an Origin header.
-                # We also suppress Origin client-side, but keep this for parity
-                # with the Pi's Chromium.
-                "--remote-allow-origins=*",
+                # No --remote-allow-origins=*. Chrome >= 111 blocks CDP
+                # websockets carrying an Origin header specifically to stop page
+                # content reaching the debug port — and the page here is
+                # arbitrary, by design. We send no Origin at all (_rpc passes
+                # suppress_origin=True unconditionally), so the flag bought
+                # nothing and disabled that defense for every rendered page.
                 f"--user-data-dir={profile}", "--kiosk",
                 # Never touch the system keyring. Chromium's default on Linux is
                 # libsecret, and under desktop autologin the login keyring is

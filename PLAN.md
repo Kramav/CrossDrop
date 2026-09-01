@@ -126,7 +126,7 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 ---
 
 ## 6. Known gotchas / correctness flags
-- **CDP origin check** — launch browser with `--remote-allow-origins=*` or CDP silently fails (Chrome ≥ 111). *Verify vs your Chromium version.*
+- **CDP origin check** — Chrome ≥ 111 rejects CDP websockets carrying an `Origin` header. Do **not** fix this with `--remote-allow-origins=*`: the check exists to stop the arbitrary page we render from reaching `:9222`, and the whole shared cookie jar is behind that port. `browser._rpc` sends no `Origin` at all (`suppress_origin=True`), which satisfies the check without disabling it.
 - **Kiosk needs a desktop session** — the agent launches the browser into the logged-in graphical session (its `DISPLAY`/Wayland socket); the service runs **as that user**, not as a detached system daemon.
 - **Keep `:9222` on 127.0.0.1** — debug port = full browser control. Only the FastAPI port is exposed (tailnet).
 - **SSO expiry** — persisted cookies reduce, not eliminate, school re-logins.
