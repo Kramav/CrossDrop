@@ -1,11 +1,14 @@
 # CrossDrop
 
-Drive a keyboard-less Raspberry Pi room display from any box on the tailnet:
-point it at a URL, or drop a file on it and have it render.
+Drive a keyboard-less room display from any box on the tailnet: point it at a
+URL, or drop a file on it and have it render. The display is a Raspberry Pi or
+any Debian box with monitors on it — a Proxmox host, say.
 
 - **Pi setup** — [deploy/pi/pi-setup.md](deploy/pi/pi-setup.md) (OS) then
   [deploy/pi/README.md](deploy/pi/README.md) (agent). One script does both:
   [deploy/pi/setup.sh](deploy/pi/setup.sh).
+- **Debian / Proxmox host setup** — [deploy/linux.md](deploy/linux.md). Same
+  script, other branch.
 - **Build plan and phases** — [PLAN.md](PLAN.md).
 
 ## Architecture
@@ -54,7 +57,8 @@ that you only have to open one.
 | [roomctl/cli.py](roomctl/cli.py) | argparse shell over the above; prints the agent's JSON verbatim. |
 | [web/index.html](web/index.html) | The controller UI the agent serves at `/`. Single file, no build step, no framework. |
 | [web/home.html](web/home.html) | The idle screen the kiosk sits on. Also single-file. |
-| [deploy/pi/](deploy/pi/) | Provisioning (`setup.sh`), systemd units, tmpfs profile snapshots, and `update.sh` — the release-gated auto-updater with rollback. |
+| [deploy/pi/](deploy/pi/) | Provisioning (`setup.sh` — Pi *and* plain Debian), systemd units, tmpfs profile snapshots, and `update.sh` — the release-gated auto-updater with rollback. |
+| [deploy/linux.md](deploy/linux.md) | Running the display on a Debian box instead of a Pi, and why it goes on the Proxmox host rather than in a guest. |
 | [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1) | The tray client. Pure PowerShell + WinForms so it runs on a box with no checkout and no Python. |
 | [tests/](tests/) | pytest, one file per surface. No browser needed unless `ROOM_SMOKE=1`. |
 | [PLAN.md](PLAN.md) | Why it's built this way, phase by phase. Section numbers referenced from code comments. |

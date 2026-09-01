@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Provisions a display Pi from a freshly-imaged card to a running agent.
-# Covers pi-setup.md §2-§7 and README.md §2-§5. Re-runnable.
+# Provisions a display box from a fresh install to a running agent. Two kinds:
+# a Raspberry Pi (pi-setup.md §2-§7 and README.md §2-§5), or a plain Debian box
+# with monitors on it — a Proxmox host is the case this was written for, see
+# deploy/linux.md. Re-runnable.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | bash
+#
+# The two differ in exactly two places: the Pi has a graphical session already
+# and needs raspi-config plus a boot-config edit; the Debian box has no session
+# at all and needs one built. Everything after "== code" is identical.
 #
 # NOT covered — they need a human or a Windows box:
 #   - imaging the card with Pi Imager (hostname, wifi, SSH key)  [pi-setup.md §1]
@@ -15,12 +21,35 @@ VIDEO="${VIDEO:-}"   # empty = auto-detect (default). Override only for a Pi tha
                      # boots with no monitor attached: VIDEO=HDMI-A-1:1920x1080@60D
 PORT="${PORT:-8080}"
 
-[ "$(id -u)" -ne 0 ] || { echo "run as your normal user, not root — the agent runs as you"; exit 1; }
+IS_PI=0
+if command -v raspi-config >/dev/null 2>&1; then IS_PI=1; fi
+
+# Ask the kernel, don't trust the environment: `su room` without the `-` leaves
+# $USER pointing at the previous account, and this name is baked into an
+# autologin unit that only fails at the next boot, with no keyboard to fix it.
+USER="$(id -un)"
+
+if [ "$(id -u)" -eq 0 ]; then
+  cat >&2 <<'EOF'
+run as your normal user, not root — the agent runs as you, and Chromium refuses
+to start as root. A Proxmox host usually only has root, so make one:
+
+  adduser --gecos "" room && usermod -aG sudo,video,render,input room
+  su - room
+
+EOF
+  exit 1
+fi
 sudo -v
 
 echo "== packages"
-sudo apt update
-sudo apt full-upgrade -y
+# Non-fatal on purpose: a Proxmox host without a subscription 401s on the
+# enterprise repo, and that must not abort an install whose packages all come
+# from Debian main.
+sudo apt update || true
+# Pi only. Upgrading every package on a hypervisor — kernel included, under the
+# VMs — is the admin's decision, not a side effect of installing a kiosk.
+if [ "$IS_PI" = 1 ]; then sudo apt full-upgrade -y; fi
 sudo apt install -y python3-venv git
 # Trixie Pi OS ships Debian's `chromium`, which installs /usr/bin/chromium and
 # NO /usr/bin/chromium-browser. Bookworm and earlier shipped Raspberry Pi's own
@@ -34,6 +63,7 @@ tailscale ip -4 >/dev/null 2>&1 || sudo tailscale up --ssh   # prints a URL; ope
 TS_IP="$(tailscale ip -4 | head -1)"
 echo "   $TS_IP"
 
+if [ "$IS_PI" = 1 ]; then
 echo "== raspi-config"
 sudo raspi-config nonint do_boot_behaviour B4   # desktop autologin
 # 1 = disable blanking. Belt and braces only: this covers the window between
@@ -45,7 +75,38 @@ sudo raspi-config nonint do_blanking 1
 # Compositor left alone. The unit exports both DISPLAY and WAYLAND_DISPLAY, so
 # either session works -- but display power is X11-only.
 
+else
+echo "== X session"
+# The Pi ships a desktop; a server has nothing to draw on. Build the smallest
+# session that satisfies the agent: Xorg, and a window manager because placing
+# and fullscreening one window per monitor needs one. No display manager and no
+# desktop environment -- the login shell on tty1 starts X, which is also why
+# this is X11 and not Wayland: display power (agent/display.py) is X11-only, and
+# a keyboard-less box that blanks with nothing able to wake it is the exact bug
+# this project exists to avoid.
+sudo apt install -y xserver-xorg xinit x11-xserver-utils openbox
+sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin %s --noclear %%I $TERM\n' "$USER" \
+  | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null
+sudo systemctl daemon-reload
+[ -f "$HOME/.xinitrc" ] || echo 'exec openbox-session' > "$HOME/.xinitrc"
+# bash reads .bash_profile when it exists and .profile only when it does not, so
+# appending to the wrong one is a silent no-op.
+PROF="$HOME/.bash_profile"; [ -f "$PROF" ] || PROF="$HOME/.profile"
+if ! grep -q CrossDrop "$PROF" 2>/dev/null; then
+  cat >> "$PROF" <<'EOF'
+
+# CrossDrop kiosk session. -nocursor because there is no mouse to park the
+# pointer out of the way. The agent is a systemd *user* unit, so logging in here
+# is also what starts it; it may lose the race with X and retry, which is what
+# Restart=always in display-agent.service is for.
+[ "$(tty)" = /dev/tty1 ] && [ -z "${DISPLAY:-}" ] && exec startx -- -nocursor
+EOF
+fi
+fi
+
 echo "== display mode"
+if [ "$IS_PI" = 1 ]; then
 CMDLINE=/boot/firmware/cmdline.txt
 # ponytail: no pinning by default. The kernel reads EDID and brings every
 # connected output up at its own preferred mode, which is the dynamic behaviour
@@ -59,6 +120,9 @@ elif grep -q 'video=' "$CMDLINE"; then
   sudo sed -i '1s| video=[^ ]*||g' "$CMDLINE"              # single line, edit in place
   echo "   removed a previous pin — outputs auto-detect again (reboot to apply)"
 fi
+fi
+# Not gated: /sys/class/drm is kernel-generic, so this reports connected outputs
+# on a PC's iGPU exactly as it does on the Pi.
 for s in /sys/class/drm/card*-HDMI-A-*/status; do
   [ -e "$s" ] || continue
   n="${s%/status}"; n="${n##*/}"
@@ -93,11 +157,16 @@ sudo chown root:"$USER" "$CFG"
 sudo chmod 640 "$CFG"                      # it holds the bearer token
 mkdir -p "$HOME/.local/share/room-display"
 
+# Pi only: this trades persistent logs for SD card life. A server logs to an SSD
+# that does not care, and taking a hypervisor's journal away to save writes it
+# can afford is a bad trade.
+if [ "$IS_PI" = 1 ]; then
 echo "== logs in RAM"
 # See journald-volatile.conf for why this rather than log2ram, and what it costs.
 sudo mkdir -p /etc/systemd/journald.conf.d
 sudo cp deploy/pi/journald-volatile.conf /etc/systemd/journald.conf.d/room-display.conf
 sudo systemctl restart systemd-journald
+fi
 
 echo "== service"
 chmod +x deploy/pi/profile-snapshot.sh deploy/pi/update.sh
