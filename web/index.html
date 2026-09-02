@@ -101,7 +101,7 @@
   </div>
 </fieldset>
 
-<fieldset>
+<fieldset id="scroll-box">
   <legend id="scroll-legend">Scroll</legend>
   <div class="row tight">
     <button type="button" id="top" title="Jump to top">⤒</button>
@@ -126,6 +126,10 @@
 </div>
 
 <p id="status" role="status" aria-live="polite">…</p>
+
+<!-- Why a control you expected isn't here. Hidden unless the agent's browser
+     actually withholds something — see `supports` in /v1/status. -->
+<p id="cap" hidden style="opacity:.65;font-size:.85rem"></p>
 
 <details id="setup">
   <summary>Settings</summary>
@@ -164,6 +168,13 @@ let screens = [];
 let target = localStorage.screen || "";
 let awake = true;
 let media = null;                  // last known playback state, or null: nothing playing
+
+// What this agent's browser can actually do, from /v1/status. Firefox does
+// navigate and nothing else, so offering it a Scroll button is offering a 501.
+// null = an agent too old to say, in which case assume everything: that is
+// exactly how this page behaved before `supports` existed.
+let supports = null;
+const can = f => !supports || supports.has(f);
 
 // No prompt(): a popup you can't paste into comfortably, can't correct without
 // clearing site data, and which says nothing useful when the token is wrong.
@@ -216,9 +227,27 @@ function send(file) {
   });
 }
 
+// Hide what this browser will only 501 on, and say so once rather than letting
+// the controls just be mysteriously absent.
+function drawCapabilities(kind) {
+  for (const id of ["#top", "#up", "#down", "#bottom"]) $(id).hidden = !can("scroll");
+  $("#auto").hidden = !can("autoscroll");
+  // #speed is not hidden with it: page() reads that slider for the scroll step
+  // size too, so it belongs to whichever of the two survives.
+  $("#scroll-box").hidden = !can("scroll") && !can("autoscroll");
+
+  const missing = ["scroll", "autoscroll", "media", "screens"].filter(f => !can(f));
+  $("#cap").hidden = !missing.length;
+  $("#cap").textContent = missing.length
+    ? `this display runs ${kind}, so ${missing.join(", ")} are unavailable `
+      + "— they need chromium or edge"
+    : "";
+}
+
 function drawScreens() {
-  // One monitor: the picker is noise. Hide the whole fieldset.
-  $("#screens").closest("fieldset").hidden = screens.length < 2;
+  // One monitor: the picker is noise. Hide the whole fieldset. So is a picker
+  // on a browser that can only ever drive the first screen.
+  $("#screens").closest("fieldset").hidden = screens.length < 2 || !can("screens");
   // Name the armed screen on the controls too, so it is never a guess.
   $("#scroll-legend").textContent =
     screens.length > 1 && target ? `Scroll — ${target}` : "Scroll";
@@ -242,10 +271,17 @@ function drawScreens() {
 async function refresh() {
   try {
     const s = await req("/v1/status", { headers: auth() });
+    supports = s.supports ? new Set(s.supports) : null;
+    drawCapabilities(s.kind || "this browser");
     screens = s.screens || [];
     // Pin the selection to a real screen: first run, or a screen that has since
     // been renamed out of the config.
-    if (target !== "all" && !screens.some(x => x.name === target)) {
+    // A browser that can't address screens gets pinned to the first one too: a
+    // "right" left in localStorage would aim every click at a 501.
+    const stale = can("screens")
+      ? target !== "all" && !screens.some(x => x.name === target)
+      : target !== (screens[0] || {}).name;
+    if (stale) {
       target = screens.length ? screens[0].name : "";
       if (target) localStorage.screen = target;
     }
@@ -289,8 +325,12 @@ function drawMedia(m) {
 
 // Any failure hides the controls: 404 is "no video on this page", and anything
 // else means we can't drive it either. Deliberately quiet — this runs on a timer.
-const probeMedia = () =>
-  api("/v1/media", { action: "state" }).then(drawMedia, () => drawMedia(null));
+// Not even asked for on a browser that can't answer: a 501 every 15s reads as
+// "nothing playing", which is indistinguishable from the truth and costs a
+// round-trip to learn nothing.
+const probeMedia = () => can("media")
+  ? api("/v1/media", { action: "state" }).then(drawMedia, () => drawMedia(null))
+  : drawMedia(null);
 
 const mediaAct = (action, value) =>
   act(() => api("/v1/media", { action, value }).then(drawMedia));
@@ -333,7 +373,9 @@ $("#power").onclick = () => act(() => req("/v1/display", {
   body: JSON.stringify({ action: awake ? "off" : "on" }),
 }));
 
-const scroll = body => act(() => api("/v1/scroll", body));
+// Guarded here rather than at each caller: this covers the four buttons and the
+// six keyboard bindings, and a key still works while the buttons are hidden.
+const scroll = body => can("scroll") && act(() => api("/v1/scroll", body));
 const page = () => Number($("#speed").value) * 15;   // a screenful-ish per press
 $("#up").onclick = () => scroll({ dy: -page() });
 $("#down").onclick = () => scroll({ dy: page() });

@@ -40,6 +40,11 @@ Environment=WAYLAND_DISPLAY=wayland-0
 # --host binds the tailnet interface only, never 0.0.0.0 (PLAN.md §10). Asking
 # tailscaled beats hardcoding the IP, which changes if the node is re-authed.
 # If `tailscale ip` is not permitted for your user, substitute the literal IP.
+#
+# Anywhere that is not the Pi, `.venv/bin/python -m agent serve` reads host and
+# port from [server] in config.toml instead — that is the way to start an agent
+# without systemd. The Pi keeps the line below because a re-auth changes the IP
+# and asking tailscaled at boot beats rewriting a config file.
 ExecStart=/bin/sh -c 'exec .venv/bin/uvicorn agent.app:app --host "$(tailscale ip -4)" --port 8080'
 
 # The compositor and tailscaled may not be up when we are. Rather than race them

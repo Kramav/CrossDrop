@@ -38,8 +38,19 @@ home_url = "/home"           # page the kiosk opens on launch. "/home" is the
 # position = "1366,0"
 # size = "2560x1440"
 
+# Where `python -m agent serve` binds. Optional -- these are the defaults. The
+# Pi does not use this: its systemd unit passes --host "$(tailscale ip -4)"
+# because a re-auth changes the address. Never 0.0.0.0 (PLAN.md §10).
+#
+# [server]
+# host = "127.0.0.1"
+# port = 8080
+
 [browser]
 kind = "firefox"             # "firefox" (WebDriver BiDi) | "edge" | "chromium" (CDP)
+                             # firefox drives ONE window and supports navigate
+                             # only -- scroll, autoscroll, media and screens 2+
+                             # all 501. /v1/status reports this as `supports`.
 path = ""                    # optional absolute path; empty = auto-detect
 profile_dir = ""             # empty = ./profile next to this config
 autolaunch = true            # false = drive a browser you started yourself

@@ -13,6 +13,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -37,6 +38,30 @@ CANDIDATES = {
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     ],
 }
+
+
+# What each backend can actually do, reported by /v1/status as `supports`. A
+# program checks this once instead of discovering the shape of the API by
+# collecting 501s -- and the dev box ships firefox while the Pi ships chromium,
+# so the two really do expose different APIs.
+#
+# Every name absent here has a matching NotImplementedError below; keep the two
+# in step. Routes that never touch the browser (display, upload) are not listed:
+# they work on every backend, so there is nothing to check.
+_CDP_ONLY = ("scroll", "autoscroll", "media", "screens")
+SUPPORTS = {
+    "chromium": ("navigate", *_CDP_ONLY),
+    "edge": ("navigate", *_CDP_ONLY),
+    # Firefox: BiDi gives us navigation, and one session for the whole browser
+    # (see _bidi_conns), so there is no second window to address.
+    "firefox": ("navigate",),
+}
+
+
+def supports(cfg: dict) -> list[str]:
+    # Unknown kinds take the CDP path everywhere else in this file, so they get
+    # the CDP answer here too rather than a conservative lie.
+    return list(SUPPORTS.get(cfg["browser"]["kind"], SUPPORTS["chromium"]))
 
 
 def _exe(kind: str, path: str = "") -> str:
@@ -192,6 +217,21 @@ def _require_cdp(cfg: dict) -> None:
             "multiple screens need CDP; use kind = \"chromium\" or \"edge\"")
 
 
+def _require_addressable(cfg: dict, screen: str | None) -> None:
+    """Refuse a screen Firefox cannot actually reach.
+
+    One BiDi session per browser means one addressable window, so the `screen`
+    argument has nowhere to go on this backend. Silently driving the first
+    monitor instead is the worst available answer: a caller asking for `all`
+    gets two successes and one changed monitor, and nothing anywhere says so.
+    Fail, and let it surface as a 501 the same way scroll and media do.
+    """
+    first = screens(cfg)[0]["name"]
+    if screen and screen != first:
+        raise NotImplementedError(
+            f"screen {screen!r} needs CDP; firefox drives only {first!r}")
+
+
 def stop(cfg: dict, proc: subprocess.Popen) -> None:
     """Shut the browser down *and its children*. Both Firefox and Chromium fork a
     process tree; terminating the launcher alone leaves a fullscreen kiosk on
@@ -259,6 +299,7 @@ def navigate(cfg: dict, url: str, screen: str | None = None) -> str:
     """Point one screen's window at `url`. Returns the url we sent it to."""
     b = cfg["browser"]
     if b["kind"] == "firefox":
+        _require_addressable(cfg, screen)
         port = b["debug_port"]
         # "interactive", not "none": we want /v1/navigate to mean the page really
         # committed, and it matches CDP's Page.navigate, which returns after commit.
@@ -276,6 +317,7 @@ def navigate(cfg: dict, url: str, screen: str | None = None) -> str:
 def current_url(cfg: dict, screen: str | None = None) -> str:
     b = cfg["browser"]
     if b["kind"] == "firefox":
+        _require_addressable(cfg, screen)
         return _top_context(b["debug_port"])["url"]
     # CDP reports a blank tab as "", BiDi as "about:blank". Normalise, or the two
     # backends disagree and /v1/reload tries to navigate to the empty string.
@@ -309,6 +351,39 @@ def scroll(cfg: dict, screen: str | None = None, dy: int = 0,
         call("Input.dispatchMouseEvent",
              {"type": "mouseWheel", "x": x, "y": y,
               "deltaX": 0, "deltaY": _JUMP[to] if to else dy})
+
+
+AUTOSCROLL_TICK = 0.1
+
+
+def autoscroll(cfg: dict, screen: str | None, speed: int,
+               stop: threading.Event) -> None:
+    """Scroll one screen `speed` pixels a tick until `stop` is set.
+
+    One connection for the whole run, not one per tick. Calling scroll() in a
+    loop meant an HTTP GET /json, a websocket handshake, two CDP round-trips and
+    a socket close ten times a second — on a Pi that was simultaneously
+    rendering the page being scrolled. Everything else here is two orders of
+    magnitude cheaper: display.py ticks once a minute, the web UI polls at 15s.
+
+    The viewport centre is read once for the same reason: a fullscreen kiosk
+    window does not resize.
+
+    A window that closes under us kills the socket and ends the run, where the
+    old shape would have reconnected to whatever target replaced it. That is the
+    better answer — the only things that change a target are a navigation, which
+    already stops autoscroll deliberately, and the window going away.
+    """
+    if cfg["browser"]["kind"] == "firefox":
+        raise NotImplementedError(
+            "autoscroll needs CDP; use kind = \"chromium\" or \"edge\"")
+    page = _cdp_page(cfg, screen)
+    with _rpc(page["webSocketDebuggerUrl"]) as call:
+        x, y = _viewport_centre(call)
+        while not stop.wait(AUTOSCROLL_TICK):
+            call("Input.dispatchMouseEvent",
+                 {"type": "mouseWheel", "x": x, "y": y,
+                  "deltaX": 0, "deltaY": speed})
 
 
 MEDIA_ACTIONS = ("state", "play", "pause", "toggle", "mute", "unmute", "seek", "volume")

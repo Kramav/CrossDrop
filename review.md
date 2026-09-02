@@ -107,7 +107,7 @@ Floored at 1 in `sweep()` rather than rejected at config load: this box has no
 keyboard, so coercing a meaningless value beats refusing to boot on one.
 `test_keep_zero_still_serves_the_file_just_uploaded` pins it.
 
-### 5. Autoscroll — open, needs a real Pi to confirm
+### 5. Autoscroll — fixed
 
 Each tick does an HTTP `GET /json`, a fresh WebSocket handshake,
 `Page.getLayoutMetrics`, `Input.dispatchMouseEvent`, then closes the socket. At
@@ -129,12 +129,25 @@ def run() -> None:
                                               "deltaX": 0, "deltaY": speed})
 ```
 
-**Not yet verified.** Autoscroll has been used, but never for a minute straight,
-and the cost degrades gradually rather than showing up in a ten-second test. To
-confirm: run `roomctl autoscroll start --speed 40` on a long page, leave it two
-minutes, watch `%CPU` in `top` for the agent's `python` and for `chromium`. The
-prediction is the agent process sits at a steady few percent doing nothing but
-connection setup.
+**Fixed**, as `browser.autoscroll()` rather than inline in `app.py` — the loop
+needs `_cdp_page`, `_rpc` and `_viewport_centre`, and those are `browser.py`
+plumbing that the route layer should not be reaching into. `app.py` now just
+runs it on a thread with the same stop `Event`.
+
+`test_autoscroll_holds_one_connection_for_the_whole_run` in
+`tests/test_screens.py` counts websocket opens against wheel events: one open,
+many wheels. Measured against the old shape over the same window, at a tick
+sped up 10x for the test: **9 connections before, 1 after.**
+
+One behaviour change, deliberate: a window that closes mid-run now ends the
+scroll instead of reconnecting to whatever target replaced it. The only things
+that change a target are a navigation — which already stops autoscroll on
+purpose — and the window going away, so stopping is the better answer.
+
+**Still unverified on hardware.** The connection count is proven; the CPU claim
+is not. To confirm the original prediction: run `roomctl autoscroll start
+--speed 40` on a long page, leave it two minutes, watch `%CPU` in `top` for the
+agent's `python` and for `chromium`.
 
 ### 6–11, briefly
 

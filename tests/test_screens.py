@@ -6,6 +6,8 @@ the right protocol call — and none of that needs a browser to check.
 """
 
 import contextlib
+import threading
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -121,6 +123,53 @@ def test_firefox_says_so_instead_of_crashing(cdp):
         browser.scroll(make_cfg(kind="firefox"), "left", dy=100)
     with pytest.raises(NotImplementedError, match="chromium"):
         browser.open_window(make_cfg(kind="firefox"), {"name": "right"})
+
+
+# --- autoscroll -------------------------------------------------------------
+
+def test_autoscroll_holds_one_connection_for_the_whole_run(monkeypatch):
+    """review.md finding 5. Calling scroll() in a loop meant a TCP connect, an
+    HTTP GET, a websocket handshake and two CDP round-trips *per tick*, ten
+    times a second, on a Pi already busy rendering the page being scrolled."""
+    opened, wheels = [], []
+
+    @contextlib.contextmanager
+    def rpc(ws_url):
+        opened.append(ws_url)
+
+        def call(method, params=None):
+            if method == "Input.dispatchMouseEvent":
+                wheels.append(params)
+            return {}
+        yield call
+
+    monkeypatch.setattr(browser, "_get",
+                        lambda port, path: PAGES if path == "/json" else {})
+    monkeypatch.setattr(browser, "_rpc", rpc)
+    monkeypatch.setattr(browser, "AUTOSCROLL_TICK", 0.01)
+    browser._targets.clear()
+
+    stop = threading.Event()
+    t = threading.Thread(target=browser.autoscroll,
+                         args=(make_cfg(), "left", 40, stop), daemon=True)
+    t.start()
+    time.sleep(0.15)
+    stop.set()
+    t.join(2)
+
+    assert not t.is_alive()
+    assert len(wheels) >= 3, wheels             # it really scrolled, repeatedly
+    assert opened == ["ws://one"]               # ...down one connection
+    assert all(w["deltaY"] == 40 for w in wheels)
+
+
+def test_autoscroll_stops_when_the_event_is_set(monkeypatch):
+    """The stop path is the one that leaks a thread and a socket if it breaks."""
+    monkeypatch.setattr(browser, "AUTOSCROLL_TICK", 0.01)
+    stop = threading.Event()
+    stop.set()                                   # already stopped before we start
+    with pytest.raises(NotImplementedError):     # firefox: refused before connecting
+        browser.autoscroll(make_cfg(kind="firefox"), "left", 40, stop)
 
 
 # --- window placement -------------------------------------------------------

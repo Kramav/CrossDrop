@@ -91,6 +91,12 @@ Paste a link or drag a file (`.pdf .png .jpg .jpeg .gif .webp .txt`, plus
 and the display follows. Paste the agent token into **Settings** on first run;
 it stays in that browser.
 
+Both the web UI and the tray hide what the agent's browser can't do, from
+`supports` in `/v1/status` — on a Firefox agent the scroll controls, the
+playback bar and the screen picker are simply absent, with one line saying why,
+rather than present and returning 501. An agent too old to report `supports`
+gets the old behaviour: everything shown.
+
 **Settings** also holds the screens editor — each monitor's name, home URL,
 position and size, applied live with no restart, so moving a window between
 monitors happens while you watch. Leave position or size blank and the agent
@@ -138,6 +144,43 @@ stderr with exit 1. `targets.toml` holds bearer tokens and is git-ignored.
 `ROOMCTL_TARGETS` overrides its location. No install needed on a box that just
 has the checkout: `python -m roomctl status`.
 
+**From another program** — a script, a scheduler, eve. Use `roomctl.Client`: it
+takes the url and token directly, so nothing has to write a `targets.toml` to
+disk, and it holds one connection open instead of dialling per call.
+
+```python
+import os, roomctl
+
+with roomctl.Client(os.environ["ROOM_URL"], os.environ["ROOM_TOKEN"]) as c:
+    s = c.status()
+    c.navigate("https://example.com", screen="all")
+
+    if "autoscroll" in s["supports"]:          # ask, don't collect 501s
+        c.autoscroll("start", speed=60)
+
+    staged = c.upload("slides.pdf", navigate=False)   # prepare, show later
+    c.navigate(os.environ["ROOM_URL"] + staged["url"])
+```
+
+Failures are typed. `AgentError` subclasses `RuntimeError` — so anything written
+against the old client still works — and carries `.status` and `.detail`:
+
+```python
+try:
+    c.scroll()
+except roomctl.Unreachable:   # the box is off, or the tailnet is down
+    ...
+except roomctl.Unsupported:   # 501: this browser can't. Check status()["supports"]
+    ...
+except roomctl.Unavailable:   # 503: agent is up, its browser isn't
+    ...
+except roomctl.NotFound:      # 404: no such screen or file, nothing playing
+    ...
+```
+
+`roomctl.client("study")` builds one from a named target if you do want
+`targets.toml`. The by-name functions (`roomctl.status()`, …) are unchanged.
+
 ## Video and audio
 
 Put a video on the wall the usual way — a URL, or a dropped file — and the
@@ -171,17 +214,37 @@ before it keeps working unchanged.
 
 | Route | Body | Returns |
 |---|---|---|
-| `POST /v1/navigate` | `{"url": "...", "screen"?}` | `{"ok": true, "current_url": "..."}` |
-| `POST /v1/upload` | multipart `file`, `screen`? | `{"id": "...", "url": "/files/<id>"}`, then auto-navigates |
-| `POST /v1/reload` | `{"screen"?}` | `{"ok": true, "current_url": "..."}` |
-| `POST /v1/home` | `{"screen"?}` | `{"ok": true, "current_url": "..."}` |
+| `POST /v1/navigate` | `{"url": "...", "screen"?}` | `{"ok": true, "current_url": "...", "screens": [...]}` |
+| `POST /v1/upload` | multipart `file`, `screen`?, `navigate`? | `{"id": "...", "url": "/files/<id>"}`, then auto-navigates unless `navigate=false` |
+| `POST /v1/reload` | `{"screen"?}` | as `navigate` |
+| `POST /v1/home` | `{"screen"?}` | as `navigate` |
 | `POST /v1/scroll` | `{"screen"?, "dy"?, "to"?}` | `to` is `"top"`\|`"bottom"`; else `dy` pixels |
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
 | `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
 | `PUT /v1/settings` | `{"screens": [{"name", "home_url", "position"?, "size"?}]}` | saves, then moves the windows live |
-| `GET /v1/status` | — | as before, plus `"screens": [...]` |
+| `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"` |
+
+Three things to know if the caller is a program rather than a person:
+
+- **Check `supports` before you call.** `/v1/status` reports the browser `kind`
+  and the list of things it can do. Chromium and Edge do everything; Firefox
+  does `navigate` and nothing else — `scroll`, `autoscroll`, `media` and any
+  screen but the first all return **501**. The dev default is Firefox and the Pi
+  runs Chromium, so this genuinely differs between boxes.
+- **`screen: "all"` reports per screen.** The fan-out is not atomic, so
+  `screens` carries `{"name", "ok", "current_url", "error"}` for each one and
+  top-level `ok` is `false` if any of them failed. Every screen failing is still
+  a 503; one *named* screen failing is still a 503. `current_url` is the last
+  screen that worked, unchanged.
+- **`current_url` in a navigate reply is what we sent, not what loaded.** A
+  redirect or a login wall still reports the URL you asked for. `GET /v1/screens`
+  is the read-back that tells you what is actually up.
+
+`started_at` changes when the agent restarts. That matters because the nightly
+restart timer drops any running autoscroll, and a poller has no other way to
+notice.
 
 `GET /home` is the idle screen the kiosk sits on, and `GET /home-status` feeds
 it. Both are unauthenticated for the same reason `/files` is — the kiosk browser

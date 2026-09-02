@@ -22,6 +22,11 @@ DEFAULTS = {
     "debug_port": 9222, "disk_cache_mb": 100,
 }
 UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 5}
+# Where to bind. Empty host = loopback, which is the safe default anywhere that
+# is not the Pi; the Pi's config sets its tailnet address (PLAN.md §10 — never
+# 0.0.0.0). This lives here rather than only in the systemd unit so that
+# something other than systemd can start the agent.
+SERVER_DEFAULTS = {"host": "127.0.0.1", "port": 8080}
 SCREEN_DEFAULTS = {"name": "", "position": "", "size": "", "home_url": ""}
 
 
@@ -31,6 +36,7 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     cfg = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     cfg["browser"] = DEFAULTS | cfg.get("browser", {})
     cfg["upload"] = UPLOAD_DEFAULTS | cfg.get("upload", {})
+    cfg["server"] = SERVER_DEFAULTS | cfg.get("server", {})
     cfg["display"] = display.DEFAULTS | cfg.get("display", {})
     if not cfg["browser"]["profile_dir"]:
         cfg["browser"]["profile_dir"] = str(path.parent / "profile")
@@ -93,6 +99,10 @@ def targets(cfg: dict, name: str | None) -> list[dict]:
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.cfg = cfg = load_config()
+    # Reported by /v1/status. A controller polling us cannot otherwise tell "your
+    # autoscroll is still running" from "the 04:00 restart timer fired and threw
+    # it away" — autoscroll state is deliberately not persisted.
+    app.state.started_at = time.time()
     # We own the kiosk only if we started it — a no-input box must not be left
     # with an orphaned fullscreen window after the agent stops.
     # ROOM_SELFCHECK: `python -m agent selfcheck` boots this app in-process to
@@ -237,9 +247,17 @@ class DisplayIn(BaseModel):
                                     # monitors together (agent/display.py).
 
 
-class NavigateOut(BaseModel):
+class ScreenResult(BaseModel):
+    name: str
     ok: bool
-    current_url: str
+    current_url: str | None = None
+    error: str | None = None        # the same message the single-screen call 503s with
+
+
+class NavigateOut(BaseModel):
+    ok: bool                        # false = some screens took it and some did not
+    current_url: str                # unchanged: the last screen that succeeded
+    screens: list[ScreenResult] = []
 
 
 class DisplayOut(BaseModel):
@@ -297,6 +315,13 @@ class Status(BaseModel):
     version: str
     awake: bool                     # whole display, not per screen
     screens: list[ScreenOut]
+    # For a program rather than a person. `kind` and `supports` say which half of
+    # this API exists on this box before you call it and collect a 501;
+    # `started_at` changes when the agent restarts, which is how a poller learns
+    # its autoscroll was dropped by the nightly restart timer.
+    kind: str = ""
+    supports: list[str] = []
+    started_at: float = 0.0         # unix seconds
 
 
 # --- autoscroll -------------------------------------------------------------
@@ -317,11 +342,10 @@ def _autoscroll_start(cfg: dict, name: str, speed: int) -> None:
     stop = _autoscroll[name] = threading.Event()
 
     def run() -> None:
-        while not stop.wait(0.1):
-            try:
-                browser.scroll(cfg, name, dy=speed)
-            except Exception:       # browser gone, screen closed: just stop
-                break
+        # The loop itself lives in browser.py so it can hold one CDP connection
+        # for the whole run rather than opening one per tick.
+        with contextlib.suppress(Exception):    # browser gone, screen closed
+            browser.autoscroll(cfg, name, speed, stop)
         _autoscroll.pop(name, None)
 
     threading.Thread(target=run, daemon=True).start()
@@ -330,23 +354,61 @@ def _autoscroll_start(cfg: dict, name: str, speed: int) -> None:
 # Every route that touches the browser is `def`, not `async def`: browser.py is
 # blocking websocket I/O, and on the event loop it starves uvicorn hard enough
 # that the BiDi handshake fails. Sync routes get FastAPI's threadpool.
+def _http(e: Exception) -> HTTPException:
+    """The one place browser failures become status codes. Was repeated inline in
+    every route; a fan-out has to raise the same codes from a helper."""
+    if isinstance(e, NotImplementedError):
+        return HTTPException(501, str(e))
+    if isinstance(e, ValueError):
+        return HTTPException(422, str(e))
+    return HTTPException(503, f"browser unreachable: {e}")
+
+
+_BROWSER_ERRORS = (NotImplementedError, ValueError, OSError, RuntimeError)
+
+
+def _fanout(screen: str | None, do) -> NavigateOut:
+    """Run `do(s)` per targeted screen and report what each one did.
+
+    One named screen keeps raising: one screen, one verdict, and every client
+    written before this already handles that. `screen: "all"` must not — the loop
+    is not atomic, so raising partway leaves some monitors changed and tells the
+    caller nothing about which ones. Collect instead, and let `screens` carry the
+    per-screen truth that a single `current_url` cannot.
+
+    Every screen failing is still a 503: the request accomplished nothing, and
+    that is what it has always meant.
+    """
+    picked = targets(app.state.cfg, screen)
+    results: list[ScreenResult] = []
+    last = None
+    for s in picked:
+        try:
+            last = do(s)
+            results.append(ScreenResult(name=s["name"], ok=True, current_url=last))
+        except _BROWSER_ERRORS as e:
+            if len(picked) == 1:
+                raise _http(e)
+            results.append(ScreenResult(name=s["name"], ok=False, error=str(e)))
+    if last is None:
+        raise _http(RuntimeError("; ".join(r.error or "" for r in results)))
+    return NavigateOut(ok=all(r.ok for r in results), current_url=last,
+                       screens=results)
+
+
+def _navigate_one(s: dict, url: str) -> str:
+    # Wake before navigating: pushing something to a sleeping display is how you
+    # turn it back on. This covers navigate, home, reload and upload.
+    display.touch(s, url)
+    # Any navigation ends an autoscroll on that screen. Without this the loop
+    # keeps scrolling whatever page lands next, which looks like a haunted
+    # display and is impossible to guess from the UI.
+    _autoscroll_stop(s["name"])
+    return browser.navigate(app.state.cfg, url, s["name"])
+
+
 def _go(url: str, screen: str | None = None) -> NavigateOut:
-    cfg = app.state.cfg
-    last = url
-    try:
-        for s in targets(cfg, screen):
-            # Wake before navigating: pushing something to a sleeping display is
-            # how you turn it back on. This one line covers navigate, home,
-            # reload and upload.
-            display.touch(s, url)
-            # Any navigation ends an autoscroll on that screen. Without this the
-            # loop keeps scrolling whatever page lands next, which looks like a
-            # haunted display and is impossible to guess from the UI.
-            _autoscroll_stop(s["name"])
-            last = browser.navigate(cfg, url, s["name"])
-    except (OSError, RuntimeError) as e:
-        raise HTTPException(503, f"browser unreachable: {e}")
-    return NavigateOut(ok=True, current_url=last)
+    return _fanout(screen, lambda s: _navigate_one(s, url))
 
 
 @app.post("/v1/navigate", response_model=NavigateOut, dependencies=[Depends(auth)])
@@ -356,11 +418,9 @@ def navigate(body: NavigateIn) -> NavigateOut:
 
 @app.post("/v1/home", response_model=NavigateOut, dependencies=[Depends(auth)])
 def home(body: ScreenIn | None = None) -> NavigateOut:
-    cfg = app.state.cfg
-    out = None
-    for s in targets(cfg, body.screen if body else None):
-        out = _go(s["home_url"], s["name"])   # each screen has its own home
-    return out
+    # Each screen has its own home, so the url is per screen, not per request.
+    return _fanout(body.screen if body else None,
+                   lambda s: _navigate_one(s, s["home_url"]))
 
 
 @app.post("/v1/reload", response_model=NavigateOut, dependencies=[Depends(auth)])
@@ -368,32 +428,20 @@ def reload(body: ScreenIn | None = None) -> NavigateOut:
     # ponytail: re-navigate rather than a real reload — same result for a display,
     # and one code path. Use BiDi browsingContext.reload / CDP Page.reload if a
     # page ever needs its POST state kept.
-    cfg = app.state.cfg
-    out = None
-    try:
-        for s in targets(cfg, body.screen if body else None):
-            out = _go(browser.current_url(cfg, s["name"]), s["name"])
-    except (OSError, RuntimeError) as e:
-        raise HTTPException(503, f"browser unreachable: {e}")
-    return out
+    def one(s: dict) -> str:
+        return _navigate_one(s, browser.current_url(app.state.cfg, s["name"]))
+
+    return _fanout(body.screen if body else None, one)
 
 
 @app.post("/v1/scroll", response_model=NavigateOut, dependencies=[Depends(auth)])
 def scroll(body: ScrollIn) -> NavigateOut:
-    cfg = app.state.cfg
-    out = None
-    for s in targets(cfg, body.screen):
-        display.touch(s)     # reading a long PDF is activity, even without a navigate
-        try:
-            browser.scroll(cfg, s["name"], dy=body.dy, to=body.to)
-        except NotImplementedError as e:
-            raise HTTPException(501, str(e))
-        except ValueError as e:
-            raise HTTPException(422, str(e))
-        except (OSError, RuntimeError) as e:
-            raise HTTPException(503, f"browser unreachable: {e}")
-        out = NavigateOut(ok=True, current_url=browser.current_url(cfg, s["name"]))
-    return out
+    def one(s: dict) -> str:
+        display.touch(s)  # reading a long PDF is activity, even without a navigate
+        browser.scroll(app.state.cfg, s["name"], dy=body.dy, to=body.to)
+        return browser.current_url(app.state.cfg, s["name"])
+
+    return _fanout(body.screen, one)
 
 
 @app.post("/v1/autoscroll", response_model=NavigateOut, dependencies=[Depends(auth)])
@@ -426,12 +474,13 @@ def media(body: MediaIn) -> MediaOut:
             display.touch(s)
         try:
             state = browser.media(cfg, s["name"], body.action, body.value)
-        except NotImplementedError as e:
-            raise HTTPException(501, str(e))
-        except ValueError as e:
-            raise HTTPException(422, str(e))
-        except (OSError, RuntimeError) as e:
-            raise HTTPException(503, f"browser unreachable: {e}")
+        except _BROWSER_ERRORS as e:
+            # ponytail: media keeps raising on the first bad screen rather than
+            # collecting like _fanout. Its "all" already means "whichever screen
+            # had media", and MediaOut carries a player state, not a url, so
+            # per-screen results need a second result model. Add one when a wall
+            # really does play different things on different monitors.
+            raise _http(e)
         if state is not None:
             out = MediaOut(ok=True, **state)
     # "all" over a wall where only one screen has a video is a success, not a
@@ -554,7 +603,7 @@ def put_settings(body: SettingsIn) -> SettingsOut:
 def _screen_out(s: dict) -> ScreenOut:
     try:
         url = browser.current_url(app.state.cfg, s["name"])
-    except (OSError, RuntimeError):
+    except _BROWSER_ERRORS:     # NotImplementedError: firefox, screens 2 and up
         url = None
     return ScreenOut(name=s["name"], position=s["position"], current_url=url,
                      autoscroll=s["name"] in _autoscroll)
@@ -562,7 +611,11 @@ def _screen_out(s: dict) -> ScreenOut:
 
 @app.post("/v1/upload", response_model=UploadOut, dependencies=[Depends(auth)])
 def upload(request: Request, file: UploadFile,
-           screen: str | None = Form(None)) -> UploadOut:
+           screen: str | None = Form(None),
+           navigate: bool = Form(True)) -> UploadOut:
+    """Store a file and show it. `navigate=false` stages it instead: you get the
+    url back without anything appearing on the wall, so a program can prepare
+    content and choose when it goes up."""
     try:
         file_id = storage.save(app.state.cfg, file.filename,
                                iter(lambda: file.file.read(1 << 20), b""))
@@ -574,7 +627,8 @@ def upload(request: Request, file: UploadFile,
     # Send the kiosk to the same address the uploader used. Not loopback: on the
     # Pi we bind the tailnet interface only (PLAN.md §10), so 127.0.0.1 is not
     # listening and every dropped file would 404 on the display.
-    _go(str(request.url_for("serve_file", file_id=file_id)), screen)
+    if navigate:
+        _go(str(request.url_for("serve_file", file_id=file_id)), screen)
     return UploadOut(id=file_id, url=f"/files/{file_id}")
 
 
@@ -596,15 +650,18 @@ def serve_file(file_id: str) -> FileResponse:
 
 @app.get("/v1/status", response_model=Status, dependencies=[Depends(auth)])
 def status() -> Status:
+    cfg = app.state.cfg
     try:
-        url, state = browser.current_url(app.state.cfg), "ok"
-    except (OSError, RuntimeError):
+        url, state = browser.current_url(cfg), "ok"
+    except _BROWSER_ERRORS:
         url, state = None, "down"
     # current_url stays the first screen's, so a pre-multi-monitor client that
     # reads it keeps working unchanged.
     return Status(up=True, current_url=url, browser=state,
                   version=os.getenv("ROOM_VERSION", "dev"), awake=display.awake(),
-                  screens=[_screen_out(s) for s in app.state.cfg["screens"]])
+                  screens=[_screen_out(s) for s in cfg["screens"]],
+                  kind=cfg["browser"]["kind"], supports=browser.supports(cfg),
+                  started_at=getattr(app.state, "started_at", 0.0))
 
 
 # Unauthenticated on purpose: you need the page before you can type the token.
@@ -633,7 +690,7 @@ def home_status() -> dict:
     for s in app.state.cfg["screens"]:
         try:
             url = browser.current_url(app.state.cfg, s["name"])
-        except (OSError, RuntimeError):
+        except _BROWSER_ERRORS:
             url = None
         host = urlparse(url).hostname if url else None
         # Sitting on its own home page is idle, not "showing" something. Without

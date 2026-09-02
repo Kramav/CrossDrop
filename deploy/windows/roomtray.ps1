@@ -160,6 +160,7 @@ $script:screen = if (Test-Path -LiteralPath $StateFile) {
 } else { '' }
 $script:screens = @()
 $script:awake = $true
+$script:supports = $null      # until Poll asks; $null means "assume everything"
 
 function Save-Screen($s) {
     $script:screen = $s
@@ -172,12 +173,21 @@ function Poll {
         $s = Invoke-RestMethod -Uri "$Base/v1/status" -Headers $Headers -TimeoutSec 10
         $script:screens = @($s.screens)
         $script:awake = $s.awake -ne $false
+        # What the Pi's browser can actually do. Firefox does navigate and
+        # nothing else, so a Play/pause item there is a menu entry that 501s.
+        # $null = an agent too old to say: assume everything, as we always did.
+        $script:supports = if ($s.PSObject.Properties['supports']) { @($s.supports) } else { $null }
         # Pin the selection to a screen that exists: first run, or one renamed
         # out of the Pi's config since we last saved it.
-        if ($script:screen -ne 'all' -and
-            -not ($script:screens | Where-Object { $_.name -eq $script:screen })) {
-            if ($script:screens) { Save-Screen $script:screens[0].name }
+        # A browser that can't address screens gets pinned to the first one too,
+        # or a saved 'right' aims every click at a 501.
+        $stale = if (Can 'screens') {
+            $script:screen -ne 'all' -and
+                -not ($script:screens | Where-Object { $_.name -eq $script:screen })
+        } else {
+            $script:screens -and $script:screen -ne $script:screens[0].name
         }
+        if ($stale -and $script:screens) { Save-Screen $script:screens[0].name }
         $me = $script:screens | Where-Object { $_.name -eq $script:screen } | Select-Object -First 1
         $where = if (-not $script:awake) { 'asleep' }
                  elseif ($s.browser -ne 'ok') { 'browser down' }
@@ -211,12 +221,16 @@ function Add-Item($menu, $text, $block) {
     $i
 }
 
+function Can($feature) {
+    $null -eq $script:supports -or $script:supports -contains $feature
+}
+
 # Rebuilt every time it opens rather than kept in sync: the menu is the only
 # thing that reads this state, and it can't be stale if it doesn't outlive the click.
 $menu.Add_Opening({
     Poll
     $menu.Items.Clear()
-    if ($script:screens.Count -gt 1) {
+    if ($script:screens.Count -gt 1 -and (Can 'screens')) {
         foreach ($s in @($script:screens) + @([pscustomobject]@{ name = 'all' })) {
             $n = $s.name
             $i = Add-Item $menu $n ([scriptblock]::Create("Save-Screen '$n'")).GetNewClosure()
@@ -230,9 +244,12 @@ $menu.Add_Opening({
     $menu.Items.Add((New-Object Windows.Forms.ToolStripSeparator)) | Out-Null
     # The one media verb that earns a menu slot; volume and seek are the web UI's
     # job. Toggles server-side, so the tray never has to know what is playing.
-    Add-Item $menu 'Play/pause' {
-        Act 'Media' { Api '/v1/media' @{ screen = $script:screen; action = 'toggle' } }
-    } | Out-Null
+    # Absent entirely on a browser that can't do it, rather than present and 501.
+    if (Can 'media') {
+        Add-Item $menu 'Play/pause' {
+            Act 'Media' { Api '/v1/media' @{ screen = $script:screen; action = 'toggle' } }
+        } | Out-Null
+    }
     Add-Item $menu 'Home' { Act 'Home' { Api '/v1/home' @{ screen = $script:screen } } } | Out-Null
     Add-Item $menu 'Reload' { Act 'Reload' { Api '/v1/reload' @{ screen = $script:screen } } } | Out-Null
     # No screen on /v1/display: X11 powers both monitors together (agent/display.py).
