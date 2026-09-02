@@ -115,6 +115,7 @@ async def lifespan(app: FastAPI):
     if watching:
         watching.set()
     if proc:
+        _save_shown(cfg)         # while the browser can still be asked
         browser.stop(cfg, proc)  # ours: take the whole tree down with us
     else:
         browser.close()  # not ours: just release the session and leave it running
@@ -140,9 +141,59 @@ def _home_when_ready(cfg: dict) -> None:
             time.sleep(1)
     else:
         return
+    shown = {}
+    with contextlib.suppress(Exception):    # a mangled last.json costs the
+        shown = _restorable(cfg)            # restore, never the boot
     for s in cfg["screens"]:
         with contextlib.suppress(OSError, RuntimeError):
-            browser.navigate(cfg, s["home_url"], s["name"])
+            browser.navigate(cfg, shown.get(s["name"]) or s["home_url"], s["name"])
+
+
+def _save_shown(cfg: dict) -> None:
+    """Record what each screen is showing, for the next start to put back.
+
+    Once, at shutdown, rather than on every navigate: on the Pi this file is on
+    the SD card, and not writing to that is most of what Phase 6 is about.
+    """
+    out = {}
+    for s in cfg["screens"]:
+        with contextlib.suppress(Exception):
+            url = browser.current_url(cfg, s["name"])
+            if url and url != s["home_url"]:
+                out[s["name"]] = {"url": url, "at": display.last_active(s["name"])}
+    with contextlib.suppress(OSError):
+        settings.save({"screens": out}, settings.last_path())
+
+
+def _restorable(cfg: dict) -> dict[str, str]:
+    """Screen name -> the url it was showing, for screens still worth restoring.
+
+    The nightly restart (deploy/pi/room-display-restart.timer) is there to stop
+    Chromium running the Pi out of memory, but it must not quietly clear the
+    wall: something put up at 5pm should still be up in the morning. Something
+    from last week should not — that is what the window is for.
+    """
+    minutes = cfg["display"]["restore_within_minutes"]
+    if not minutes:
+        return {}
+    cutoff = time.time() - minutes * 60
+    saved = settings.load(settings.last_path()).get("screens") or {}
+    return {name: rec["url"] for name, rec in saved.items()
+            if rec.get("url") and rec.get("at", 0) > cutoff and _still_there(cfg, rec["url"])}
+
+
+def _still_there(cfg: dict, url: str) -> bool:
+    """Uploads are tmpfs, so a reboot empties the store while last.json goes on
+    pointing into it. Restoring a dead /files url puts a 404 on the wall, which
+    is worse than the home page it replaced."""
+    _, sep, file_id = url.partition("/files/")
+    if not sep:
+        return True                         # not ours; the site can answer for itself
+    try:
+        storage.path(cfg, file_id)
+    except KeyError:
+        return False
+    return True
 
 
 app = FastAPI(title="room-display agent", version="1", lifespan=lifespan)

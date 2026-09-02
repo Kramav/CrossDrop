@@ -27,7 +27,14 @@ def path() -> Path:
                 or Path.home() / ".local/share/room-display/settings.json")
 
 
-def load() -> dict:
+def last_path() -> Path:
+    """Sibling file holding what each screen was showing when the agent last
+    stopped. Its own file, not a key in settings.json: `PUT /v1/settings`
+    rewrites that one whole, and would drop it on every edit."""
+    return path().with_name("last.json")
+
+
+def load(p: Path | None = None) -> dict:
     """Saved overrides, or `{}`.
 
     Never raises. A missing or corrupt settings file must cost you your
@@ -36,7 +43,7 @@ def load() -> dict:
     a drive home.
     """
     try:
-        data = json.loads(path().read_text(encoding="utf-8"))
+        data = json.loads((p or path()).read_text(encoding="utf-8"))
     except (OSError, ValueError, RuntimeError):
         # RuntimeError: Path.home() raises it when it cannot resolve a home dir.
         # display-agent.service is a *user* unit so systemd always exports HOME,
@@ -46,8 +53,8 @@ def load() -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def save(data: dict) -> None:
-    p = path()
+def save(data: dict, p: Path | None = None) -> None:
+    p = p or path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")

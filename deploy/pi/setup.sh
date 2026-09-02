@@ -180,8 +180,12 @@ cp deploy/pi/room-display-snapshot.service deploy/pi/room-display-snapshot.timer
 # effect of running a setup script:
 #   systemctl --user enable --now room-display-update.timer
 cp deploy/pi/room-display-update.service deploy/pi/room-display-update.timer ~/.config/systemd/user/
+# This one *is* enabled: Chromium left on one page for days grows until it OOMs,
+# and the 04:00 restart is the only thing standing between that and a wall
+# showing "Aw, Snap!" until somebody carries a keyboard to it.
+cp deploy/pi/room-display-restart.service deploy/pi/room-display-restart.timer ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now display-agent
+systemctl --user enable --now display-agent room-display-restart.timer
 
 # An existing config is never rewritten, so a Pi provisioned before Phase 6 still
 # points its profile at the SD card and silently keeps grinding it.

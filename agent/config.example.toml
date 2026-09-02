@@ -54,6 +54,12 @@ disk_cache_mb = 100          # On the Pi the profile is tmpfs, so this is RAM.
 # [display]
 # idle_off_minutes = 10        # sitting on its home page
 # content_off_minutes = 120    # showing a site, no navigate/scroll/upload since
+# restore_within_minutes = 720 # on start, put back what each screen was showing
+                               # if it was last used inside this window; older
+                               # than that and it comes up on home_url instead.
+                               # 0 = always home. This is what makes the nightly
+                               # restart (deploy/pi/room-display-restart.timer)
+                               # invisible: the chart you left up is still up.
 
 [upload]
 dir = ""                     # empty = ./uploads next to this config.

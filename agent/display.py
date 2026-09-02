@@ -21,7 +21,11 @@ import time
 # Overridable per deployment via a [display] block, but the defaults are the
 # point: nobody should have to edit a config file to stop a display sleeping.
 # 0 disables that timer.
-DEFAULTS = {"idle_off_minutes": 10, "content_off_minutes": 120}
+DEFAULTS = {"idle_off_minutes": 10, "content_off_minutes": 120,
+            # Not a power timeout, but the same kind of knob and the same block:
+            # how long after its last activity a screen is still worth restoring
+            # on the next start (app.py `_restorable`). 0 = always come up on home.
+            "restore_within_minutes": 720}
 
 TICK = 60.0                                     # seconds between idle checks
 
@@ -119,6 +123,13 @@ def touch(screen: dict, url: str | None = None) -> None:
     if url is not None:
         _content[screen["name"]] = url != screen["home_url"]
     power(True)
+
+
+def last_active(name: str) -> float:
+    """Last activity on `name` as a unix timestamp. `_last` is monotonic, which
+    means nothing to the *next* process — this is the form that survives a
+    restart, which is what the restore-on-start check compares against."""
+    return time.time() - (time.monotonic() - _last.get(name, time.monotonic()))
 
 
 def watch(cfg: dict) -> threading.Event:

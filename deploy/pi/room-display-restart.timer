@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightly room display restart
+
+[Timer]
+# Wall-clock, not OnUnitActiveSec: a restart has to land when nobody is looking
+# at the wall, and "24h after the last one" drifts into the working day.
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=15m
+# A Pi that was off at 04:00 does not need to catch up the moment it boots —
+# it just restarted.
+Persistent=false
+
+[Install]
+WantedBy=timers.target

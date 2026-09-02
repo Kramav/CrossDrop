@@ -1,0 +1,14 @@
+# Nightly kiosk restart. Chromium leaks on a page left up for days, and on a Pi
+# with the profile on tmpfs that RAM is the same RAM the browser needs, so it
+# eventually renders "Aw, Snap!" and sits there — on a box with no keyboard,
+# forever. Restarting the agent relaunches the browser (agent/app.py lifespan),
+# which is the whole fix.
+#
+#   systemctl --user enable --now room-display-restart.timer
+
+[Unit]
+Description=Restart the room display agent (and its kiosk browser) nightly
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --user restart display-agent.service

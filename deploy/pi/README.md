@@ -142,6 +142,31 @@ caps it. Uncapped, Chromium sizes its cache from free space and fills
 `/run/user/1000`. Watch the headroom with `df -h /run/user/1000` — uploads share
 it, and the shipped `max_mb` × `keep` can reach 500 MB on its own.
 
+### Nightly restart
+
+Chromium on one page for days grows until it can't allocate, and puts up "Aw,
+Snap! — restart Chromium, restart your computer, or close tabs" on a display
+with no keyboard to do any of that. [room-display-restart.timer](room-display-restart.timer)
+restarts the agent at 04:00, which relaunches the browser; `setup.sh` enables
+it.
+
+Each screen comes back on **whatever it was showing**, provided it was last used
+within `display.restore_within_minutes` (default 720, i.e. 12 h) — so a chart put
+up at 5 pm is still there in the morning, and one from last week isn't. Set it to
+`0` to always come up on `home_url`. The urls are written to
+`~/.local/share/room-display/last.json` when the agent stops, not on every
+navigate, because that path is the SD card. A dropped file whose upload has since
+been swept off tmpfs is skipped rather than restored as a 404.
+
+```sh
+systemctl --user list-timers room-display-restart.timer   # when it next fires
+systemctl --user disable --now room-display-restart.timer # opt out
+```
+
+Change the hour by editing `OnCalendar` in
+`~/.config/systemd/user/room-display-restart.timer`, then
+`systemctl --user daemon-reload`.
+
 ## 7. Two monitors
 
 **The agent detects them itself.** With no `[[screen]]` blocks in the config it
@@ -340,6 +365,12 @@ msedge.exe --app=http://<pi-tailnet-ip>:8080/
 - **Agent starts but the screen never changes** — something else already holds
   9222 and the agent is driving *that* browser. `pgrep -a chromium`; kill the
   strays and restart. (This is why PLAN.md §6 wants the profile dir dedicated.)
+- **"Aw, Snap!" / out of memory after days of uptime** — Chromium ran the Pi
+  out of RAM. `systemctl --user restart display-agent` clears it now; the
+  nightly restart timer above keeps it from coming back. If it still happens
+  inside a day, `free -m` and `df -h /run/user/1000` while it's up: drop
+  `disk_cache_mb` and `upload.max_mb` × `keep`, since on tmpfs both are RAM the
+  browser can't have.
 - **Dropped files 404 on the display** — the browser is fetching a hostname the
   Pi itself cannot resolve. Reach the agent by tailnet IP or MagicDNS name.
 - **"Unlock your login keyring" dialog over the kiosk** — Chromium's default

@@ -7,12 +7,13 @@ through to the idle page's ?screen=.
 """
 
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from agent import app as appmod
-from agent import browser, settings
+from agent import browser, display, settings
 from agent.app import app
 
 TOKEN = "test-token"
@@ -178,6 +179,35 @@ def test_settings_survive_a_reload(client, store):
     """The v1.1.0 acceptance: an edit has to come back after a restart."""
     put(client, ok_screens(name="Acer"))
     assert appmod.load_config()["screens"][1]["name"] == "Acer"
+
+
+def _last(tmp_path, url, age_s):
+    settings.save({"screens": {"left": {"url": url, "at": time.time() - age_s}}},
+                  settings.last_path())
+    return {"display": display.DEFAULTS | {"restore_within_minutes": 60},
+            "upload": {"dir": str(tmp_path)}}
+
+
+def test_restore_only_what_is_recent(tmp_path):
+    """The nightly restart puts yesterday evening's page back; it must not
+    resurrect last week's."""
+    cfg = _last(tmp_path, "http://x/chart", 30 * 60)
+    assert appmod._restorable(cfg) == {"left": "http://x/chart"}
+
+    cfg = _last(tmp_path, "http://x/chart", 8 * 3600)
+    assert appmod._restorable(cfg) == {}
+
+    cfg = _last(tmp_path, "http://x/chart", 30 * 60)
+    cfg["display"]["restore_within_minutes"] = 0        # opted out entirely
+    assert appmod._restorable(cfg) == {}
+
+
+def test_restore_skips_an_upload_that_is_gone(tmp_path):
+    """Uploads are tmpfs: after a reboot the id in last.json is a 404."""
+    cfg = _last(tmp_path, "http://pi:8080/files/abcdefghijkl.pdf", 60)
+    assert appmod._restorable(cfg) == {}
+    (tmp_path / "abcdefghijkl.pdf").write_bytes(b"%PDF")
+    assert appmod._restorable(cfg) != {}
 
 
 def test_pair_still_backs_the_validation():
