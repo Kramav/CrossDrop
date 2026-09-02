@@ -61,8 +61,7 @@ that you only have to open one.
 | [deploy/linux.md](deploy/linux.md) | Running the display on a Debian box instead of a Pi, and why it goes on the Proxmox host rather than in a guest. |
 | [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1) | The tray client. Pure PowerShell + WinForms so it runs on a box with no checkout and no Python. |
 | [tests/](tests/) | pytest, one file per surface. No browser needed unless `ROOM_SMOKE=1`. |
-| [PLAN.md](PLAN.md) | Why it's built this way, phase by phase. Section numbers referenced from code comments. |
-| [HANDOFF.md](HANDOFF.md) | Session-to-session state. Point-in-time; trust the code over it. |
+| [PLAN.md](PLAN.md) | Why it's built this way, phase by phase. Section numbers referenced from code comments. §11 holds the adversarial review's standing decisions and what is still unverified on hardware. |
 
 ## Controlling a display
 

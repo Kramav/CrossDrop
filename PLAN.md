@@ -72,34 +72,47 @@
 
 ## 4. Repo layout
 
+As built. Where this differs from the original sketch, the sketch was wrong:
+there is no `kiosk-launch.sh` (the agent launches the browser itself), no
+`cookie-*.sh` (one `profile-snapshot.sh` takes the whole profile minus caches),
+no `web/app.js` (the page is one self-contained file), and CI lives at
+`.github/workflows/` because that is where GitHub looks.
+
 ```
-room-display-control/
+CrossDrop/
 ├── agent/
-│   ├── app.py                # FastAPI: /v1/navigate /v1/upload /v1/status, GET /, /files
-│   ├── browser.py            # launch kiosk + raw-CDP navigate
+│   ├── app.py                # FastAPI: every /v1 route, GET /, /home, /files
+│   ├── browser.py            # launch the kiosk; CDP (chromium/edge) or BiDi (firefox)
+│   ├── display.py            # DPMS power + idle blanking via xset/xrandr
+│   ├── settings.py           # the runtime-editable subset, in settings.json
 │   ├── storage.py            # tmpfs upload store (size/type caps, id map)
-│   ├── selfcheck.py          # `python -m agent selfcheck` -> boot sanity (Phase 8)
+│   ├── selfcheck.py          # boot sanity for update.sh
+│   ├── __main__.py           # `python -m agent selfcheck | serve`
 │   ├── config.example.toml
 │   └── requirements.txt      # fastapi, uvicorn, websocket-client, python-multipart
-├── roomctl/                  # shared client lib (CLI + eve import this)
-│   ├── __init__.py           # navigate(target,url), upload(target,path), status()
+├── roomctl/                  # client lib (the CLI and eve import this)
+│   ├── __init__.py           # Client(url, token) + typed errors + by-name functions
 │   ├── cli.py                # `roomctl navigate <url>`
 │   └── targets.example.toml
 ├── web/
-│   ├── index.html            # drop-zone + paste + saved refs
-│   └── app.js                # fetch() to /v1/*
+│   ├── index.html            # drop-zone, paste, saved refs, screens editor
+│   └── home.html             # the idle screen the kiosk sits on
 ├── deploy/
 │   ├── pi/
+│   │   ├── setup.sh                    # one re-runnable installer, Pi and plain Debian
+│   │   ├── update.sh                   # release-gated pull + health-check + rollback
+│   │   ├── profile-snapshot.sh         # profile minus caches, so auth survives a reboot
 │   │   ├── display-agent.service
-│   │   ├── kiosk-launch.sh
-│   │   ├── cookie-restore.sh
-│   │   ├── cookie-snapshot.sh
-│   │   ├── update.sh                  # release-gated pull + health-check + rollback
-│   │   ├── room-display-update.service
-│   │   ├── room-display-update.timer  # ~every 30 min
-│   │   └── tmpfs-setup.md
-│   └── github/
-│       └── ci.yml            # Actions: lint + tests on push/PR to main
+│   │   ├── room-display-update.{service,timer}    # ~30 min, ships disabled
+│   │   ├── room-display-snapshot.{service,timer}  # hourly, ships disabled
+│   │   ├── room-display-restart.{service,timer}   # 04:00 ±15m, ships ENABLED
+│   │   ├── journald-volatile.conf
+│   │   ├── pi-setup.md
+│   │   └── README.md
+│   ├── windows/              # tray app: roomtray.ps1, selfcheck.ps1, README
+│   └── linux.md
+├── .github/workflows/ci.yml  # lint + tests on push/PR to main
+├── tests/                    # pytest; no browser needed unless ROOM_SMOKE=1
 └── README.md                 # documents the frozen /v1 contract
 ```
 
@@ -199,7 +212,7 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 **Model:** the Pi **pulls**; GitHub never reaches in (no open ports, works behind Tailscale/NAT). A systemd **timer** checks for a new **release tag** ~every 30 min and deploys only tags you cut.
 
 **Two halves:**
-- **CI (GitHub):** `deploy/github/ci.yml` runs on push/PR to main — lint + tests for `agent/` and `roomctl/`. A green run is your signal it's safe to tag. *(Starts as import/smoke tests; grows with your suite.)*
+- **CI (GitHub):** `.github/workflows/ci.yml` runs on push/PR to main — lint + tests for `agent/` and `roomctl/`. A green run is your signal it's safe to tag. *(Starts as import/smoke tests; grows with your suite.)*
 - **CD (Pi):** `update.sh`, driven by `room-display-update.timer` → `.service`.
 
 **`update.sh` flow** (writes only when there's genuinely a new tag → SD-friendly):
@@ -246,9 +259,50 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 ---
 
-## 11. Kickoff prompt for Claude Code
+## 11. Adversarial review — standing decisions and what is still open
 
-> Scaffold the repo per PLAN.md §4 (FastAPI + uvicorn + websocket-client + python-multipart; `.example` configs; `.gitignore` for real configs, snapshots, uploads, releases). Then implement **Phase 1 only**: `browser.py` (launch local kiosk Chromium/Edge with `--remote-debugging-port=9222 --remote-allow-origins=* --kiosk --user-data-dir=<dedicated> --no-first-run`, then navigate the existing tab via raw CDP — GET `/json` for the WebSocket URL, send `Page.navigate`) and `app.py` (FastAPI `POST /v1/navigate` with bearer auth + http/https URL-scheme validation, plus `GET /v1/status`). Freeze the `/v1` request/response models per PLAN.md §5. Add a localhost smoke test that launches the browser, POSTs a URL, and asserts navigation. Do NOT build the client, web UI, upload, Pi deploy, or auto-update yet. Flag any place the CDP origin flag differs for my installed Chromium version.
+Full review of `agent/`, `roomctl/`, `web/`, `deploy/` on 2026-09-01, against a
+stated trust boundary of **the tailnet only** (no hostile device on it) on a
+**4 GB Pi**, with the auto-update timer treated as something that will be
+enabled. Eleven findings. The fixes are in the code and their tests; what
+follows is only what a reader still needs — the decisions not to fix, and the
+things nobody has confirmed on hardware.
+
+**Fixed:** updater redeploy loop (`.failed-$TAG` marker in `update.sh`);
+`--remote-allow-origins=*` deleted; tmpfs budget (`keep` 20 → 5, and `save()`
+sweeps before the write, which is what unwedges a full tmpfs); `keep = 0`
+floored at 1; `cfg.clear()` torn read; `nosniff` on `/files/{id}`; autoscroll's
+per-tick websocket (see Phase 7a).
+
+**Deliberately not fixed.** Each costs more than the risk it removes — do not
+"fix" these without a new reason:
+
+| # | Finding | Why it stands |
+|---|---|---|
+| 8 | Bearer token on `update.sh`'s `curl` command line, visible in `/proc/<pid>/cmdline` | The threat is another local user on a Pi that has exactly one. `-H @-` if that ever changes. |
+| 10 | Auto-update deploys unsigned tags — push access to the repo is code execution on every Pi within 30 min | Trades a permanent release-signing burden against a path that ships **disabled** and is opt-in. `git verify-tag` if this runs on a box that matters. |
+| 11 | `request.url_for` builds the post-upload URL from the client's `Host` header | Needs a proxy or a hand-crafted `Host` on an already-authenticated route. Bites a program harder than a person; build it from the configured bind address if it ever does. |
+
+**Still open.**
+
+- **9 — `tailscale up --ssh` is enabled silently by the installer**
+  (`setup.sh:62`), making every install SSH-reachable under tailnet ACLs the
+  script never mentions. Defensible, but it should be a stated decision rather
+  than a silent one inside a `curl | bash`. This is a line of README, not code.
+- **Two things unverified on hardware.** Removing `--remote-allow-origins=*`
+  only matters against a real Chromium — no test covers it and none can; on the
+  next deploy confirm `/v1/status` still returns a `current_url` rather than a
+  browser error. And autoscroll's connection count is proven but its CPU cost is
+  not: run `roomctl autoscroll start --speed 40` on a long page, leave it two
+  minutes, watch `%CPU` in `top`.
+- **Minor install gaps.** `apt full-upgrade -y` (`setup.sh:52`) can turn a
+  3-minute install into 30 with a reboot; nothing checks `pip install` succeeded
+  before enabling the service, so you learn from the `journalctl` dump; the final
+  banner prints the token into terminal scrollback.
+- **Naming.** The repo is named CrossDrop but every path, unit and config says
+  `room-display`, and `setup.sh:19` hardcodes `github.com/Kramav/CrossDrop`. If
+  that repo is private, both the README's `curl | bash` line and `setup.sh`'s
+  clone fail on a git credential prompt in a pipeline with no tty. Not checked.
 
 ## 12. Open items for you
 1. Confirm A2 (SD boot), A4 (64-bit OS), A5 (desktop auto-login), A6 (private repo).

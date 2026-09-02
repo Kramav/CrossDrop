@@ -128,7 +128,7 @@ def test_firefox_says_so_instead_of_crashing(cdp):
 # --- autoscroll -------------------------------------------------------------
 
 def test_autoscroll_holds_one_connection_for_the_whole_run(monkeypatch):
-    """review.md finding 5. Calling scroll() in a loop meant a TCP connect, an
+    """PLAN.md §11 finding 5. Calling scroll() in a loop meant a TCP connect, an
     HTTP GET, a websocket handshake and two CDP round-trips *per tick*, ten
     times a second, on a Pi already busy rendering the page being scrolled."""
     opened, wheels = [], []
