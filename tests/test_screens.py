@@ -367,6 +367,51 @@ def test_home_page_served_without_token(client):
     assert "/home-status" in r.text
 
 
+# --- window state -----------------------------------------------------------
+# The escape hatch from --kiosk. Getting the order wrong here strands the window:
+# Chromium will not leave minimized directly, so a botched restore leaves the Pi
+# showing nothing until someone stops the service -- the thing this route exists
+# to avoid.
+
+def bounds(cdp):
+    return [p["bounds"]["windowState"] for _, m, p in cdp if m == "Browser.setWindowBounds"]
+
+
+@pytest.fixture(autouse=True)
+def _no_settle(monkeypatch):
+    monkeypatch.setattr(browser, "PLACE_SETTLE", 0)
+
+
+def test_minimize_is_one_setwindowbounds(cdp):
+    browser.window(make_cfg(), {"name": "right", "position": ""}, "minimized")
+    assert bounds(cdp) == ["minimized"]
+
+
+def test_fullscreen_goes_via_normal(cdp):
+    """Straight to fullscreen from minimized is refused; normal first is the fix."""
+    browser.window(make_cfg(), {"name": "left", "position": ""}, "fullscreen")
+    assert bounds(cdp) == ["normal", "fullscreen"]
+
+
+def test_positioned_screen_is_restored_to_its_own_monitor(cdp):
+    """With a position we reuse place(), or the window comes back fullscreen on
+    whichever monitor it happened to be minimized from."""
+    browser.window(make_cfg(), {"name": "right", "position": "1366,0"}, "fullscreen")
+    moves = [p["bounds"] for _, m, p in cdp if m == "Browser.setWindowBounds"]
+    assert moves[0]["left"] == 1366 and moves[0]["windowState"] == "normal"
+    assert moves[-1]["windowState"] == "fullscreen"
+
+
+def test_firefox_window_says_so(cdp):
+    with pytest.raises(NotImplementedError, match="chromium"):
+        browser.window(make_cfg(kind="firefox"), {"name": "left"}, "minimized")
+
+
+def test_bad_window_state_is_422(client):
+    r = client.post("/v1/window", json={"state": "sideways"}, headers=AUTH)
+    assert r.status_code == 422
+
+
 # --- roomctl ----------------------------------------------------------------
 
 @pytest.fixture

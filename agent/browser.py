@@ -48,7 +48,7 @@ CANDIDATES = {
 # Every name absent here has a matching NotImplementedError below; keep the two
 # in step. Routes that never touch the browser (display, upload) are not listed:
 # they work on every backend, so there is nothing to check.
-_CDP_ONLY = ("scroll", "autoscroll", "media", "screens")
+_CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window")
 SUPPORTS = {
     "chromium": ("navigate", *_CDP_ONLY),
     "edge": ("navigate", *_CDP_ONLY),
@@ -197,6 +197,47 @@ def place(cfg: dict, screen: dict) -> str:
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
         _place(call, page["id"], screen["position"], screen.get("size", ""))
     return page["id"]
+
+
+WINDOW_STATES = ("normal", "minimized", "fullscreen")
+
+
+def window(cfg: dict, screen: dict, state: str) -> str:
+    """Put one screen's kiosk window aside, or back.
+
+    The escape hatch from --kiosk: with the window minimized the Pi's own
+    desktop is reachable without stopping the agent, which is otherwise the
+    only way in and costs you the session.
+
+    "fullscreen" goes via "normal" for the same reason _place() does --
+    Chromium will not transition straight out of minimized, and a --kiosk
+    window has to be un-fullscreened before its bounds can change.
+
+    ponytail: fire-and-forget, the agent does not track where the window went.
+    So a navigate to a minimized window renders offscreen until someone asks
+    for fullscreen again (or the nightly restart does). Read windowState back
+    out of Browser.getWindowForTarget and carry it in ScreenOut if that ever
+    needs to be visible -- it costs a CDP roundtrip on every status poll.
+    """
+    _require_cdp(cfg)
+    if state not in WINDOW_STATES:
+        raise ValueError(f"state must be one of {', '.join(WINDOW_STATES)}")
+    page = _cdp_page(cfg, screen["name"])
+    # A screen with a position has a placement to go back to, and place()
+    # already does normal -> move -> fullscreen. Restoring without it would
+    # fullscreen against whichever monitor the window happens to be on.
+    if state == "fullscreen" and screen.get("position"):
+        place(cfg, screen)
+        return page["url"] or "about:blank"
+    port = cfg["browser"]["debug_port"]
+    with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
+        win = call("Browser.getWindowForTarget", {"targetId": page["id"]})["windowId"]
+        if state == "fullscreen":
+            call("Browser.setWindowBounds",
+                 {"windowId": win, "bounds": {"windowState": "normal"}})
+            time.sleep(PLACE_SETTLE)
+        call("Browser.setWindowBounds", {"windowId": win, "bounds": {"windowState": state}})
+    return page["url"] or "about:blank"
 
 
 def open_window(cfg: dict, screen: dict) -> str:

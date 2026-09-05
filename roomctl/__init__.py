@@ -157,6 +157,11 @@ class Client:
     def home(self, screen: str | None = None) -> dict:
         return self._call("POST", "/v1/home", json={"screen": screen})
 
+    def window(self, state: str, screen: str | None = None) -> dict:
+        """normal / minimized / fullscreen. Minimized frees the Pi's desktop
+        without stopping the agent; fullscreen puts the kiosk back."""
+        return self._call("POST", "/v1/window", json={"screen": screen, "state": state})
+
     def scroll(self, screen: str | None = None, dy: int = 600,
                to: str | None = None) -> dict:
         return self._call("POST", "/v1/scroll",
@@ -212,6 +217,13 @@ def reload(target: str | None = None, screen: str | None = None) -> dict:
 def home(target: str | None = None, screen: str | None = None) -> dict:
     with client(target) as c:
         return c.home(screen)
+
+
+def window(state: str, target: str | None = None, screen: str | None = None) -> dict:
+    """normal / minimized / fullscreen. Minimized frees the Pi's desktop without
+    stopping the agent; fullscreen puts the kiosk back."""
+    with client(target) as c:
+        return c.window(state, screen)
 
 
 def scroll(target: str | None = None, screen: str | None = None,

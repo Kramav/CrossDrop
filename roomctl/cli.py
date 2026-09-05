@@ -24,6 +24,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("navigate", help="point the display at a url").add_argument("url")
     sub.add_parser("upload", help="send a file and show it").add_argument("path")
 
+    # Kept in step with agent/browser.py WINDOW_STATES by hand, same as media below.
+    win = sub.add_parser("window", help="set the kiosk window aside, or put it back")
+    win.add_argument("state", choices=["normal", "minimized", "fullscreen"])
+
     scroll = sub.add_parser("scroll", help="scroll the page")
     where = scroll.add_mutually_exclusive_group()
     where.add_argument("--down", action="store_true", help="down a screenful (default)")
@@ -60,6 +64,7 @@ def main(argv: list[str] | None = None) -> int:
             "home": lambda: roomctl.home(a.target, a.screen),
             "navigate": lambda: roomctl.navigate(a.url, a.target, a.screen),
             "upload": lambda: roomctl.upload(a.path, a.target, a.screen),
+            "window": lambda: roomctl.window(a.state, a.target, a.screen),
             "scroll": do_scroll,
             "autoscroll": lambda: roomctl.autoscroll(a.action, a.target, a.screen, a.speed),
             "media": lambda: roomctl.media(a.action, a.target, a.screen, a.value),

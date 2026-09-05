@@ -269,7 +269,50 @@ idle_off_minutes = 10
 content_off_minutes = 120
 ```
 
-## 9. Auto-update (Phase 8)
+## 9. Getting at the desktop without stopping the agent
+
+`--kiosk` covers the taskbar and everything else, so the obvious way in — stop
+the service — kills the browser, drops any autoscroll, and costs a restart to
+undo. Two ways to put the window aside instead. They are independent: each is a
+plain "make it so", neither knows about the other.
+
+**From another machine** (or the Pi's own phone-sized web UI): the **Set aside**
+and **Fullscreen** buttons next to Display off, or
+
+```sh
+roomctl window minimized      # desktop is yours
+roomctl window fullscreen     # kiosk back on its own monitor
+```
+
+`fullscreen` re-runs the placement from §7, so on two monitors each window
+returns to the panel its `position` names — not to whichever one it was on.
+Chromium or Edge only; the Firefox dev box 501s, same as scroll and media.
+
+**Sat at the Pi**, which is when you have no second device: bind a key in the
+window manager. That path needs no token and keeps working if the agent is
+wedged. Check which one is running first —
+
+```sh
+pgrep -l 'labwc|wayfire|openbox'
+```
+
+— then add these inside `<keyboard>` in its `rc.xml` (`~/.config/labwc/rc.xml`
+on Wayland, `~/.config/openbox/lxde-pi-rc.xml` on the X11 session this Pi runs;
+copy the one from `/etc/xdg/` if you have no user copy yet):
+
+```xml
+<keybind key="W-F11"><action name="ToggleFullscreen"/></keybind>
+<keybind key="W-h"><action name="Iconify"/></keybind>
+```
+
+Apply with `labwc --reconfigure` / `openbox --reconfigure`. Minimized windows
+come back from the taskbar.
+
+The agent does not track where the window went, so a `navigate` sent to a
+minimized window renders offscreen — ask for `fullscreen` again. If you walk
+away having forgotten, the nightly restart (§6) puts the kiosk back at 04:00.
+
+## 10. Auto-update (Phase 8)
 
 The Pi pulls; GitHub never reaches in. Every ~30 min
 [update.sh](update.sh) asks GitHub for the highest `v*` tag and does nothing at
@@ -330,7 +373,7 @@ list-units --failed`) while the display keeps running the old release.
 `REPO` and a **read-only deploy key** on the Pi (PLAN.md §8), never a personal
 token.
 
-## 10. Acceptance (PLAN.md §7 Phase 5)
+## 11. Acceptance (PLAN.md §7 Phase 5)
 
 ```sh
 sudo reboot

@@ -86,9 +86,10 @@ def test_every_cdp_only_capability_has_a_guard():
                        {"name": "right", "position": "", "home_url": "about:blank"}]}
     withheld = set(browser.supports({"browser": {"kind": "chromium"}})) - \
         set(browser.supports(cfg))
-    assert withheld == {"scroll", "autoscroll", "media", "screens"}
+    assert withheld == {"scroll", "autoscroll", "media", "screens", "window"}
     for call in (lambda: browser.scroll(cfg, "left", dy=1),
                  lambda: browser.media(cfg, "left"),
+                 lambda: browser.window(cfg, cfg["screens"][0], "minimized"),
                  lambda: browser.navigate(cfg, "https://x/", "right")):
         with pytest.raises(NotImplementedError):
             call()

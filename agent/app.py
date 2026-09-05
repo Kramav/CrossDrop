@@ -247,6 +247,11 @@ class DisplayIn(BaseModel):
                                     # monitors together (agent/display.py).
 
 
+class WindowIn(BaseModel):
+    state: str                      # see browser.WINDOW_STATES
+    screen: str | None = None
+
+
 class ScreenResult(BaseModel):
     name: str
     ok: bool
@@ -432,6 +437,14 @@ def reload(body: ScreenIn | None = None) -> NavigateOut:
         return _navigate_one(s, browser.current_url(app.state.cfg, s["name"]))
 
     return _fanout(body.screen if body else None, one)
+
+
+@app.post("/v1/window", response_model=NavigateOut, dependencies=[Depends(auth)])
+def window(body: WindowIn) -> NavigateOut:
+    # No display.touch(): setting a window aside is not "show me something", and
+    # waking the panel in order to minimize a window is backwards.
+    return _fanout(body.screen,
+                   lambda s: browser.window(app.state.cfg, s, body.state))
 
 
 @app.post("/v1/scroll", response_model=NavigateOut, dependencies=[Depends(auth)])

@@ -133,6 +133,9 @@ roomctl media toggle                              # play / pause
 roomctl media seek -30                            # seconds, negative rewinds
 roomctl media volume 40                           # 0-100
 roomctl media mute
+
+roomctl window minimized                          # kiosk aside, Pi's desktop free
+roomctl window fullscreen                         # and back on its own monitor
 ```
 
 A **target** is a Pi; a **screen** is one monitor on it. Omit `-s` and you get
@@ -220,6 +223,7 @@ before it keeps working unchanged.
 | `POST /v1/scroll` | `{"screen"?, "dy"?, "to"?}` | `to` is `"top"`\|`"bottom"`; else `dy` pixels |
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
 | `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
+| `POST /v1/window` | `{"screen"?, "state"}` | `"normal"`\|`"minimized"`\|`"fullscreen"` — the way out of `--kiosk` without stopping the agent |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
 | `PUT /v1/settings` | `{"screens": [{"name", "home_url", "position"?, "size"?}]}` | saves, then moves the windows live |

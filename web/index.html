@@ -123,6 +123,10 @@
   <button type="button" id="reload">Reload</button>
   <!-- Both monitors together: X11 has no per-output power. agent/display.py -->
   <button type="button" id="power">Display off</button>
+  <!-- The way out of --kiosk without stopping the agent: minimize frees the Pi's
+       own desktop, fullscreen puts the window back on its monitor. -->
+  <button type="button" id="aside" title="Minimize the kiosk window">Set aside</button>
+  <button type="button" id="full" title="Back to fullscreen on its monitor">Fullscreen</button>
 </div>
 
 <p id="status" role="status" aria-live="polite">…</p>
@@ -236,7 +240,9 @@ function drawCapabilities(kind) {
   // size too, so it belongs to whichever of the two survives.
   $("#scroll-box").hidden = !can("scroll") && !can("autoscroll");
 
-  const missing = ["scroll", "autoscroll", "media", "screens"].filter(f => !can(f));
+  for (const id of ["#aside", "#full"]) $(id).hidden = !can("window");
+
+  const missing = ["scroll", "autoscroll", "media", "screens", "window"].filter(f => !can(f));
   $("#cap").hidden = !missing.length;
   $("#cap").textContent = missing.length
     ? `this display runs ${kind}, so ${missing.join(", ")} are unavailable `
@@ -372,6 +378,11 @@ $("#power").onclick = () => act(() => req("/v1/display", {
   headers: { "Content-Type": "application/json", ...auth() },
   body: JSON.stringify({ action: awake ? "off" : "on" }),
 }));
+
+// Two commands, not a toggle: the page never learns that someone minimized the
+// window from the Pi's own keyboard, so a toggle would lie half the time.
+$("#aside").onclick = () => act(() => api("/v1/window", { state: "minimized" }));
+$("#full").onclick = () => act(() => api("/v1/window", { state: "fullscreen" }));
 
 // Guarded here rather than at each caller: this covers the four buttons and the
 // six keyboard bindings, and a key still works while the buttons are hidden.
