@@ -162,6 +162,17 @@ class Client:
         without stopping the agent; fullscreen puts the kiosk back."""
         return self._call("POST", "/v1/window", json={"screen": screen, "state": state})
 
+    def extensions(self, install: list[str] | None = None,
+                   remove: str | None = None) -> dict:
+        """List, install (Web Store ids) or remove a kiosk extension. Nothing is
+        live until the browser restarts -- the reply says so in
+        `pending_restart`."""
+        if remove:
+            return self._call("DELETE", f"/v1/extensions/{remove}")
+        if install:
+            return self._call("POST", "/v1/extensions", json={"ids": install})
+        return self._call("GET", "/v1/extensions")
+
     def scroll(self, screen: str | None = None, dy: int = 600,
                to: str | None = None) -> dict:
         return self._call("POST", "/v1/scroll",
@@ -224,6 +235,14 @@ def window(state: str, target: str | None = None, screen: str | None = None) -> 
     stopping the agent; fullscreen puts the kiosk back."""
     with client(target) as c:
         return c.window(state, screen)
+
+
+def extensions(target: str | None = None, install: list[str] | None = None,
+               remove: str | None = None) -> dict:
+    """List, install (Web Store ids) or remove a kiosk extension. Nothing is live
+    until the browser restarts -- the reply says so in `pending_restart`."""
+    with client(target) as c:
+        return c.extensions(install, remove)
 
 
 def scroll(target: str | None = None, screen: str | None = None,

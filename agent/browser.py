@@ -20,6 +20,8 @@ from pathlib import Path
 
 import websocket
 
+from . import extensions
+
 CANDIDATES = {
     "firefox": [
         r"C:\Program Files\Mozilla Firefox\firefox.exe",
@@ -48,7 +50,7 @@ CANDIDATES = {
 # Every name absent here has a matching NotImplementedError below; keep the two
 # in step. Routes that never touch the browser (display, upload) are not listed:
 # they work on every backend, so there is nothing to check.
-_CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window")
+_CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window", "extensions")
 SUPPORTS = {
     "chromium": ("navigate", *_CDP_ONLY),
     "edge": ("navigate", *_CDP_ONLY),
@@ -91,6 +93,7 @@ def launch(cfg: dict) -> subprocess.Popen:
     """
     b = cfg["browser"]
     kind, port = b["kind"], b["debug_port"]
+    _loaded.clear()             # firefox takes none; chromium fills this below
     profile = Path(b["profile_dir"])
     profile.mkdir(parents=True, exist_ok=True)
     scr = screens(cfg)
@@ -127,6 +130,22 @@ def launch(cfg: dict) -> subprocess.Popen:
                 # covers the case of arriving on a page that autoplays.
                 "--autoplay-policy=no-user-gesture-required",
                 "--no-first-run", "--no-default-browser-check"]
+        # Unpacked extensions, because the kiosk has no UI to install one through
+        # and Debian's Chromium ignores ExtensionInstallForcelist (deploy/pi/
+        # README.md §10). A directory, not a list of paths, so installing one is
+        # a file operation and never a config edit -- see install-extension.sh.
+        _loaded[:] = extensions.scan(b.get("extensions_dir", ""))
+        if _loaded:
+            print(f"browser: loading {len(_loaded)} extension(s): "
+                  f"{', '.join(extensions.display_name(e) for e in _loaded)}",
+                  flush=True)
+            argv += [f"--load-extension={','.join(_loaded)}",
+                     # Chromium 137 disabled --load-extension outside dev builds;
+                     # turning that feature off is the supported way back in. If a
+                     # future build renames the feature the flag becomes inert and
+                     # the extension silently stops loading -- check the argv
+                     # against `chromium --help` before assuming the path is wrong.
+                     "--disable-features=DisableLoadExtensionCommandLineSwitch"]
         # Wayland gives the compositor final say on window position and Chromium
         # ignores --window-position there. Under XWayland the move is an X11
         # configure request, which labwc honours. See deploy/pi/README.md.
@@ -547,6 +566,11 @@ PLACE_SETTLE = float(os.getenv("ROOM_PLACE_SETTLE", "0.3"))
 
 # screen name -> CDP target id, filled in by launch()/open_window().
 _targets: dict[str, str] = {}
+
+# Extension directories this browser was actually started with. Compared against
+# what is on disk to answer "does a restart have anything to pick up?" --
+# --load-extension is a launch flag, so installing one changes nothing until then.
+_loaded: list[str] = []
 
 
 def _cdp_page(cfg: dict, screen: str | None = None) -> dict:

@@ -24,6 +24,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("navigate", help="point the display at a url").add_argument("url")
     sub.add_parser("upload", help="send a file and show it").add_argument("path")
 
+    # Extensions are per-display, not per-screen: -s does not apply.
+    ext = sub.add_parser("extension", help="list, install or remove kiosk extensions")
+    ext.add_argument("action", nargs="?", default="list",
+                     choices=["list", "install", "remove"])
+    ext.add_argument("what", nargs="*",
+                     help="install: Web Store ids. remove: the id shown by list.")
+
     # Kept in step with agent/browser.py WINDOW_STATES by hand, same as media below.
     win = sub.add_parser("window", help="set the kiosk window aside, or put it back")
     win.add_argument("state", choices=["normal", "minimized", "fullscreen"])
@@ -51,6 +58,17 @@ def main(argv: list[str] | None = None) -> int:
 
     a = p.parse_args(argv)
 
+    def do_extension():
+        if a.action == "install":
+            if not a.what:
+                raise RuntimeError("extension install needs at least one id")
+            return roomctl.extensions(a.target, install=a.what)
+        if a.action == "remove":
+            if len(a.what) != 1:
+                raise RuntimeError("extension remove takes exactly one id")
+            return roomctl.extensions(a.target, remove=a.what[0])
+        return roomctl.extensions(a.target)
+
     def do_scroll():
         if a.top or a.bottom:
             return roomctl.scroll(a.target, a.screen, to="top" if a.top else "bottom")
@@ -64,6 +82,7 @@ def main(argv: list[str] | None = None) -> int:
             "home": lambda: roomctl.home(a.target, a.screen),
             "navigate": lambda: roomctl.navigate(a.url, a.target, a.screen),
             "upload": lambda: roomctl.upload(a.path, a.target, a.screen),
+            "extension": do_extension,
             "window": lambda: roomctl.window(a.state, a.target, a.screen),
             "scroll": do_scroll,
             "autoscroll": lambda: roomctl.autoscroll(a.action, a.target, a.screen, a.speed),

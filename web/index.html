@@ -57,6 +57,9 @@
           margin-bottom: .8rem; }
   .grid .wide { grid-column: 1 / -1; }
   .note { font-size: .8rem; opacity: .7; margin: .4rem 0 0; }
+  details textarea { width: 100%; padding: .4rem; font: inherit; resize: vertical; }
+  #extlist .row { justify-content: space-between; margin-bottom: .3rem; }
+  #extlist .row span { font-size: .85rem; }
   footer { margin-top: 2rem; font-size: .78rem; opacity: .5;
            display: flex; gap: .6rem; flex-wrap: wrap; }
 </style>
@@ -153,6 +156,18 @@
       Re-detect layout</button>
   </div>
   <p class="note" id="cfgnote"></p>
+
+  <div id="extbox">
+    <h2>Extensions</h2>
+    <div id="extlist"></div>
+    <label for="extids">Chrome Web Store ids, one per line</label>
+    <textarea id="extids" rows="2" spellcheck="false"
+              placeholder="ddkjiahejlhfcafbddmgiahcphecmpfh"></textarea>
+    <div class="row tight">
+      <button type="button" id="extadd">Install</button>
+    </div>
+    <p class="note" id="extnote"></p>
+  </div>
 </details>
 
 <footer><span id="ver"></span><span id="host"></span></footer>
@@ -242,7 +257,10 @@ function drawCapabilities(kind) {
 
   for (const id of ["#aside", "#full"]) $(id).hidden = !can("window");
 
-  const missing = ["scroll", "autoscroll", "media", "screens", "window"].filter(f => !can(f));
+  $("#extbox").hidden = !can("extensions");
+
+  const missing = ["scroll", "autoscroll", "media", "screens", "window",
+                   "extensions"].filter(f => !can(f));
   $("#cap").hidden = !missing.length;
   $("#cap").textContent = missing.length
     ? `this display runs ${kind}, so ${missing.join(", ")} are unavailable `
@@ -472,10 +490,71 @@ async function saveSettings(screens) {
   } catch (e) { $("#cfgnote").textContent = "✗ " + e.message; }
 }
 
+// --- extensions -------------------------------------------------------------
+// Installing writes to disk; --load-extension is a launch flag, so nothing is
+// live until the browser restarts. The agent reports that as pending_restart and
+// this says so rather than letting it look like the install failed.
+function drawExtensions(body) {
+  $("#extlist").replaceChildren(...body.installed.map(e => {
+    const row = document.createElement("div");
+    row.className = "row tight";
+    const label = document.createElement("span");
+    label.textContent = e.name;
+    label.title = e.id;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.textContent = "Remove";
+    rm.onclick = () => removeExtension(e.id);
+    row.append(label, rm);
+    return row;
+  }));
+  if (!body.installed.length) $("#extlist").textContent = "None installed.";
+  $("#extnote").textContent = body.pending_restart
+    ? "Restart to apply: it happens nightly at 04:00, or run "
+      + "`systemctl --user restart display-agent` on the Pi."
+    : "";
+}
+
+async function loadExtensions() {
+  if (!can("extensions")) { $("#extbox").hidden = true; return; }
+  try { drawExtensions(await req("/v1/extensions", { headers: auth() })); }
+  catch (e) { $("#extnote").textContent = "✗ " + e.message; }
+}
+
+async function removeExtension(id) {
+  try {
+    drawExtensions(await req("/v1/extensions/" + encodeURIComponent(id),
+                             { method: "DELETE", headers: auth() }));
+  } catch (e) { $("#extnote").textContent = "✗ " + e.message; }
+}
+
+$("#extadd").onclick = async () => {
+  const ids = $("#extids").value.split(/[\s,]+/).filter(Boolean);
+  if (!ids.length) return;
+  $("#extnote").textContent = "installing…";
+  try {
+    const body = await req("/v1/extensions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth() },
+      body: JSON.stringify({ ids }),
+    });
+    drawExtensions(body);
+    $("#extids").value = "";
+    // ok is false when some ids installed and some did not, so name the ones
+    // that failed -- "installed" alone would be a lie about half the request.
+    const bad = body.results.filter(r => !r.ok);
+    if (bad.length) {
+      $("#extnote").textContent =
+        bad.map(r => `✗ ${r.id}: ${r.error}`).join(" · ");
+    }
+  } catch (e) { $("#extnote").textContent = "✗ " + e.message; }
+};
+
 $("#savetok").onclick = () => {
   localStorage.token = $("#tok").value.trim();
   $("#status").textContent = "";
   loadSettings();
+  loadExtensions();
   refresh();
 };
 $("#tok").onkeydown = e => { if (e.key === "Enter") $("#savetok").click(); };
@@ -489,6 +568,7 @@ $("#setup").addEventListener("toggle", function once() {
   if (!$("#setup").open) return;
   $("#setup").removeEventListener("toggle", once);
   loadSettings();
+  loadExtensions();
 });
 
 const drop = $("#drop");

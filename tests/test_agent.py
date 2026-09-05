@@ -169,6 +169,39 @@ def test_chromium_kiosk_flags(tmp_path, monkeypatch):
     assert "--disable-session-crashed-bubble" in seen[0], seen[0]
     # Phase 6: the profile is tmpfs, so an uncapped cache is RAM the Pi loses.
     assert "--disk-cache-size=104857600" in seen[0], seen[0]
+    # No extensions configured: neither flag appears at all.
+    assert not [a for a in seen[0] if "extension" in a.lower()], seen[0]
+
+
+def make_ext(root, name, manifest=True):
+    d = root / name
+    d.mkdir(parents=True)
+    if manifest:
+        (d / "manifest.json").write_text('{"name": "x", "manifest_version": 3}')
+    return d
+
+
+def test_chromium_loads_configured_extensions(tmp_path, monkeypatch):
+    """--load-extension alone is not enough: Chromium 137 disabled the switch
+    outside dev builds, so without the feature flag the extension silently never
+    loads and the only symptom is ads coming back."""
+    seen = []
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda argv, **kw: seen.append(argv))
+    monkeypatch.setattr(browser, "wait_ready", lambda *a, **kw: None)
+    monkeypatch.setattr(browser, "_exe", lambda kind, path="": "/usr/bin/chromium")
+    ext = tmp_path / "extensions"
+    a, b = make_ext(ext, "a-blocker"), make_ext(ext, "b-other")
+
+    browser.launch({"home_url": "about:blank",
+                    "browser": {"kind": "chromium", "path": "", "debug_port": 9222,
+                                "disk_cache_mb": 100, "extensions_dir": str(ext),
+                                "profile_dir": str(tmp_path / "profile")}})
+    assert f"--load-extension={a},{b}" in seen[0], seen[0]
+    assert "--disable-features=DisableLoadExtensionCommandLineSwitch" in seen[0], seen[0]
+
+
+# The scan itself (torn unpacks, missing directory) is tested in
+# test_extensions.py, next to the code that writes those directories.
 
 
 @pytest.fixture

@@ -105,7 +105,7 @@ Edits persist to `~/.local/share/room-display/settings.json`, which the agent
 owns and `update.sh` never touches. They do **not** go into
 `/etc/room-display/config.toml` — it holds the bearer token and is deliberately
 `root:<user> 640`, so the agent cannot write it. The token, `browser.kind`,
-`profile_dir`, `upload.dir` and `debug_port` stay file-only for the same reason:
+`profile_dir`, `upload.dir`, `extensions_dir` and `debug_port` stay file-only for the same reason:
 they are install-time facts that need a browser relaunch, not a config reload.
 
 **`roomctl`** — the CLI, and the same functions eve imports.

@@ -15,11 +15,11 @@ from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import AnyHttpUrl, BaseModel
 
-from . import browser, display, settings, storage
+from . import browser, display, extensions, settings, storage
 
 DEFAULTS = {
     "kind": "firefox", "path": "", "profile_dir": "", "autolaunch": True,
-    "debug_port": 9222, "disk_cache_mb": 100,
+    "debug_port": 9222, "disk_cache_mb": 100, "extensions_dir": "",
 }
 UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 5}
 # Where to bind. Empty host = loopback, which is the safe default anywhere that
@@ -250,6 +250,29 @@ class DisplayIn(BaseModel):
 class WindowIn(BaseModel):
     state: str                      # see browser.WINDOW_STATES
     screen: str | None = None
+
+
+class ExtensionsIn(BaseModel):
+    ids: list[str]                  # Web Store ids, never urls. See extensions.py.
+
+
+class ExtensionOut(BaseModel):
+    id: str                         # also its directory name
+    name: str                       # from the manifest, for people
+
+
+class ExtensionResult(BaseModel):
+    id: str
+    ok: bool
+    name: str | None = None
+    error: str | None = None
+
+
+class ExtensionsOut(BaseModel):
+    ok: bool
+    pending_restart: bool           # installed, but not in the running browser
+    installed: list[ExtensionOut]
+    results: list[ExtensionResult] = []      # per-id, on install only
 
 
 class ScreenResult(BaseModel):
@@ -523,6 +546,70 @@ def display_power(body: DisplayIn) -> DisplayOut:
 @app.get("/v1/screens", response_model=list[ScreenOut], dependencies=[Depends(auth)])
 def screens() -> list[ScreenOut]:
     return [_screen_out(s) for s in app.state.cfg["screens"]]
+
+
+# --- extensions -------------------------------------------------------------
+# Ad blockers, mostly. The kiosk has no UI to install one through, and this
+# build's Chromium ignores ExtensionInstallForcelist (deploy/pi/README.md §10),
+# so the agent fetches the CRX and hands Chromium an unpacked directory.
+#
+# This is the only route that writes executable code onto the box, so it takes
+# *ids* and never a url — see agent/extensions.py and PLAN.md §11.
+
+def _ext_dir() -> str:
+    if "extensions" not in browser.supports(app.state.cfg):
+        raise HTTPException(501, "extensions need CDP; use chromium or edge")
+    return app.state.cfg["browser"].get("extensions_dir", "")
+
+
+def _extensions_out(results: list[ExtensionResult] | None = None) -> ExtensionsOut:
+    d = _ext_dir()
+    return ExtensionsOut(
+        ok=all(r.ok for r in results) if results else True,
+        # --load-extension is a launch flag: nothing here is live until the
+        # browser restarts, and saying so is the whole point of this field.
+        pending_restart=extensions.pending(d, browser._loaded),
+        installed=[ExtensionOut(id=Path(p).name, name=extensions.display_name(p))
+                   for p in extensions.scan(d)],
+        results=results or [])
+
+
+@app.get("/v1/extensions", response_model=ExtensionsOut, dependencies=[Depends(auth)])
+def get_extensions() -> ExtensionsOut:
+    return _extensions_out()
+
+
+@app.post("/v1/extensions", response_model=ExtensionsOut, dependencies=[Depends(auth)])
+def install_extensions(body: ExtensionsIn) -> ExtensionsOut:
+    d = _ext_dir()
+    # Every id is checked before anything is fetched: a malformed one is the
+    # caller's typo and total, so the whole request fails rather than half of it
+    # installing. Failures *after* that point are per-id — the loop is not
+    # atomic, and raising partway would install some and report none (_fanout).
+    for i in body.ids:
+        if not extensions.ID_RE.match(i or ""):
+            raise HTTPException(422, f"not an extension id: {i!r}")
+    if not d:
+        raise HTTPException(422, "no extensions_dir set in config.toml")
+
+    results = []
+    for i in body.ids:
+        try:
+            results.append(ExtensionResult(id=i, ok=True,
+                                           name=extensions.install(d, i)))
+        except (OSError, ValueError, extensions.TooBig) as e:
+            results.append(ExtensionResult(id=i, ok=False, error=str(e)))
+    return _extensions_out(results)
+
+
+@app.delete("/v1/extensions/{name}", response_model=ExtensionsOut,
+            dependencies=[Depends(auth)])
+def remove_extension(name: str) -> ExtensionsOut:
+    try:
+        extensions.remove(_ext_dir(), name)
+    except KeyError:
+        raise HTTPException(404, f"no extension {name!r} installed")
+    return _extensions_out()
 
 
 # --- settings ---------------------------------------------------------------

@@ -150,6 +150,7 @@ else
   sed -e "s|^token = .*|token = \"$(openssl rand -hex 32)\"|" \
       -e "s|^kind = .*|kind = \"chromium\"|" \
       -e "s|^profile_dir = .*|profile_dir = \"/run/user/$(id -u)/room-display/profile\"|" \
+      -e "s|^extensions_dir = .*|extensions_dir = \"/opt/room-display/extensions\"|" \
       -e "s|^dir = .*|dir = \"/run/user/$(id -u)/room-display/uploads\"|" \
       agent/config.example.toml | sudo tee "$CFG" >/dev/null
 fi
@@ -168,8 +169,12 @@ sudo cp deploy/pi/journald-volatile.conf /etc/systemd/journald.conf.d/room-displ
 sudo systemctl restart systemd-journald
 fi
 
+# Empty is fine and is the normal state: the agent loads whatever is in here at
+# launch, so this only has to exist for install-extension.sh to drop into.
+mkdir -p /opt/room-display/extensions
+
 echo "== service"
-chmod +x deploy/pi/profile-snapshot.sh deploy/pi/update.sh
+chmod +x deploy/pi/profile-snapshot.sh deploy/pi/update.sh deploy/pi/install-extension.sh
 mkdir -p ~/.config/systemd/user
 cp deploy/pi/display-agent.service ~/.config/systemd/user/
 # Timer stays installed-but-disabled: PLAN.md §9 default is snapshot-on-stop.

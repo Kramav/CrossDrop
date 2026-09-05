@@ -7,6 +7,7 @@ Paths match PLAN.md §8, so Phase 8 only has to repoint the `current` symlink �
 nothing here changes when auto-update lands.
 
     /opt/room-display/current               code + venv   (a plain dir now, a symlink in Phase 8)
+    /opt/room-display/extensions            unpacked browser extensions (§10)
     /etc/room-display/config.toml           token, paths  (never overwritten by updates)
     /run/user/1000/room-display/profile     browser profile — tmpfs, so RAM (Phase 6)
     /run/user/1000/room-display/uploads     uploads — tmpfs too
@@ -312,7 +313,109 @@ The agent does not track where the window went, so a `navigate` sent to a
 minimized window renders offscreen — ask for `fullscreen` again. If you walk
 away having forgotten, the nightly restart (§6) puts the kiosk back at 04:00.
 
-## 10. Auto-update (Phase 8)
+## 10. Adding extensions to the kiosk
+
+Not through the browser UI. `--kiosk` has no address bar, and pushing
+`chrome://extensions` at it fails anyway — `/v1/navigate` allows http and https
+only ([agent/app.py](../../agent/app.py), scheme allowlist, PLAN.md §10). Leave
+that allowlist alone.
+
+And not through `ExtensionInstallForcelist` either — see "Why not policy" below.
+What works on this box is an unpacked extension, which
+[install-extension.sh](install-extension.sh) does in one command:
+
+```sh
+/opt/room-display/current/deploy/pi/install-extension.sh \
+    ddkjiahejlhfcafbddmgiahcphecmpfh ublock-lite
+```
+
+That downloads the CRX, unpacks it into `/opt/room-display/extensions/ublock-lite`,
+restarts the agent and tells you what Chromium actually loaded. No sudo — `setup.sh`
+gives `$USER` `/opt/room-display` — and **no config edit**: the agent loads every
+child of `extensions_dir` that has a `manifest.json`, so installing one is a file
+operation. It takes a Web Store URL in place of the id if that's what you have.
+
+The id above is uBlock Origin **Lite** (Manifest V3). Plain uBlock Origin is V2
+and current Chromium will not load it at all; check `chromium --version` before
+assuming otherwise.
+
+Removing one is the other half of that bargain:
+
+```sh
+rm -rf /opt/room-display/extensions/ublock-lite
+systemctl --user restart display-agent
+```
+
+### What it's doing
+
+Worth knowing when it fails, because two of these steps are non-obvious:
+
+- The Web Store serves the CRX to plain `curl` even though this build's policy
+  path can't use it. A CRX3 is a short header followed by a zip, so `unzip`
+  opens it and warns about the leading bytes — expected, and why the script
+  decides on `manifest.json` existing rather than on unzip's exit code.
+- It unpacks to `$NAME.new` and swaps, because a half-replaced directory is one
+  Chromium refuses at the next launch — and that launch is the kiosk coming up.
+  For the same reason [agent/browser.py](../../agent/browser.py) `extensions()`
+  skips any child without a manifest instead of passing it to Chromium.
+- `launch()` emits `--load-extension` **plus**
+  `--disable-features=DisableLoadExtensionCommandLineSwitch`. Both are needed:
+  Chromium 137 disabled `--load-extension` outside dev builds, and without the
+  second flag the first is ignored silently — ads just come back, nothing is
+  logged. Chromium/Edge only; there is no Firefox equivalent.
+- The check at the end reads the CDP target list, since an extension's service
+  worker is a target — no display needed. It reports the **manifest** name: an
+  unpacked extension's id is derived from its path, not from the store id, so
+  neither the id nor the directory name appears there.
+
+If it reports nothing loaded, the agent logs which directories it passed:
+
+```sh
+journalctl --user -u display-agent | grep browser:
+grep extensions_dir /etc/room-display/config.toml   # set by setup.sh
+```
+
+An empty `extensions_dir` means the config predates this feature — add
+`extensions_dir = "/opt/room-display/extensions"` under `[browser]`.
+
+### Keeping it up to date
+
+Nothing updates an unpacked extension: no Web Store, no auto-update. uBlock
+Origin Lite refreshes its *filter lists* on its own, so this matters less than it
+sounds, but the extension itself is frozen at whatever you unpacked. Re-running
+the install command replaces it in place.
+
+### Why not policy
+
+`ExtensionInstallForcelist` in `/etc/chromium/policies/managed/` is the textbook
+answer and it does not work here. Debian's Chromium ships without Google API
+keys, and this build ignores the forcelist even though the Web Store itself is
+reachable — this returns `302`, so the CRX download in step 1 works fine:
+
+```sh
+curl -sI 'https://clients2.google.com/service/update2/crx?response=redirect&prodversion=130&acceptformat=crx3&x=id%3Dddkjiahejlhfcafbddmgiahcphecmpfh%26uc' | head -1
+```
+
+If you ever move to a build that does honour policy, that is the better route —
+it survives an SD reflash of the config and needs no code. Don't try to check
+`chrome://policy` over SSH to find out: `DISPLAY` is unset there and Chromium
+exits with "Missing X server or $DISPLAY" (§7). Do it at the Pi —
+`roomctl window minimized`, then
+`DISPLAY=:0 chromium --user-data-dir=/tmp/polcheck chrome://policy`. The
+throwaway `--user-data-dir` matters: the kiosk holds a lock on the real profile.
+
+### Ad blocking and YouTube
+
+General ads: either of the above, or DNS-level blocking (Pi-hole, NextDNS) which
+costs nothing per device and survives reflashes. DNS does nothing for YouTube —
+those ads come from the same hosts as the video.
+
+YouTube specifically is the weak case on a wall display. Manifest V3 blockers
+cannot do what V2 did, and YouTube's anti-adblock interstitial is a modal on a
+screen with nobody to dismiss it: a cosmetic problem becomes a blank wall. If
+YouTube matters here, expect to babysit it.
+
+## 11. Auto-update (Phase 8)
 
 The Pi pulls; GitHub never reaches in. Every ~30 min
 [update.sh](update.sh) asks GitHub for the highest `v*` tag and does nothing at
@@ -373,7 +476,7 @@ list-units --failed`) while the display keeps running the old release.
 `REPO` and a **read-only deploy key** on the Pi (PLAN.md §8), never a personal
 token.
 
-## 11. Acceptance (PLAN.md §7 Phase 5)
+## 12. Acceptance (PLAN.md §7 Phase 5)
 
 ```sh
 sudo reboot

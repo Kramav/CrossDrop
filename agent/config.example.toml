@@ -57,6 +57,11 @@ autolaunch = true            # false = drive a browser you started yourself
 debug_port = 9222            # 127.0.0.1 only. Debug port == full browser control.
 disk_cache_mb = 100          # On the Pi the profile is tmpfs, so this is RAM.
                              # Uncapped, Chromium fills /run/user/<uid>. Lower on a 2 GB Pi.
+extensions_dir = ""          # chromium/edge only. Every child directory of this
+                             # holding a manifest.json is loaded unpacked, so
+                             # installing one is a file copy, never a config edit
+                             # (deploy/pi/install-extension.sh). Keep it outside
+                             # profile_dir: that is tmpfs, empty every boot.
 
 # Display power. Both keys are optional -- these are the defaults, and the point
 # is that a working install needs none of this written down. X11 only; on Wayland
