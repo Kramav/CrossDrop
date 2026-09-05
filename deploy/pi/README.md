@@ -321,52 +321,67 @@ only ([agent/app.py](../../agent/app.py), scheme allowlist, PLAN.md §10). Leave
 that allowlist alone.
 
 And not through `ExtensionInstallForcelist` either — see "Why not policy" below.
-What works on this box is an unpacked extension, which
-[install-extension.sh](install-extension.sh) does in one command:
+What works is an unpacked extension, and the agent installs those itself:
+**Settings → Extensions** in the web UI, or
 
 ```sh
-/opt/room-display/current/deploy/pi/install-extension.sh \
-    ddkjiahejlhfcafbddmgiahcphecmpfh ublock-lite
+roomctl extension install ddkjiahejlhfcafbddmgiahcphecmpfh   # several ids at once
+roomctl extension list
+roomctl extension remove ddkjiahejlhfcafbddmgiahcphecmpfh
 ```
 
-That downloads the CRX, unpacks it into `/opt/room-display/extensions/ublock-lite`,
-restarts the agent and tells you what Chromium actually loaded. No sudo — `setup.sh`
-gives `$USER` `/opt/room-display` — and **no config edit**: the agent loads every
-child of `extensions_dir` that has a `manifest.json`, so installing one is a file
-operation. It takes a Web Store URL in place of the id if that's what you have.
+No SSH and no config edit. The id above is uBlock Origin **Lite** (Manifest V3);
+plain uBlock Origin is V2 and current Chromium will not load it at all — check
+`chromium --version` before assuming otherwise.
 
-The id above is uBlock Origin **Lite** (Manifest V3). Plain uBlock Origin is V2
-and current Chromium will not load it at all; check `chromium --version` before
-assuming otherwise.
+### It is not live until the browser restarts
 
-Removing one is the other half of that bargain:
+`--load-extension` is a launch flag, so installing writes to disk and nothing
+more. Both the web UI and `pending_restart` in the API reply say so. Apply it:
 
 ```sh
-rm -rf /opt/room-display/extensions/ublock-lite
 systemctl --user restart display-agent
 ```
 
+…or wait for the 04:00 restart timer (§6), which picks it up on its own.
+
 ### What it's doing
 
-Worth knowing when it fails, because two of these steps are non-obvious:
+Worth knowing when it fails, because several steps here are non-obvious:
 
-- The Web Store serves the CRX to plain `curl` even though this build's policy
-  path can't use it. A CRX3 is a short header followed by a zip, so `unzip`
-  opens it and warns about the leading bytes — expected, and why the script
-  decides on `manifest.json` existing rather than on unzip's exit code.
-- It unpacks to `$NAME.new` and swaps, because a half-replaced directory is one
+- The Web Store serves the CRX to a plain GET even though this build's policy
+  path can't use it. A CRX3 is a short header followed by a zip, and Python's
+  `zipfile` reads archives with junk in front of them — hence no `unzip`
+  dependency and no subprocess.
+- The request carries **ids, never a url**. This is the one route that writes
+  executable code onto the Pi, so the download URL is built from a fixed
+  template and the id is checked against `^[a-p]{32}$` before anything is
+  fetched (PLAN.md §11).
+- It unpacks to `<id>.new` and swaps, because a half-replaced directory is one
   Chromium refuses at the next launch — and that launch is the kiosk coming up.
-  For the same reason [agent/browser.py](../../agent/browser.py) `extensions()`
-  skips any child without a manifest instead of passing it to Chromium.
+  For the same reason `scan()` skips any child without a `manifest.json`
+  instead of passing it to Chromium.
+- The directory is named for the id, not the extension. The readable name in
+  the UI comes from the manifest, resolving `__MSG_extName__` out of `_locales`
+  — uBlock Origin Lite is one of the manifests that needs it.
 - `launch()` emits `--load-extension` **plus**
   `--disable-features=DisableLoadExtensionCommandLineSwitch`. Both are needed:
   Chromium 137 disabled `--load-extension` outside dev builds, and without the
   second flag the first is ignored silently — ads just come back, nothing is
-  logged. Chromium/Edge only; there is no Firefox equivalent.
-- The check at the end reads the CDP target list, since an extension's service
-  worker is a target — no display needed. It reports the **manifest** name: an
-  unpacked extension's id is derived from its path, not from the store id, so
-  neither the id nor the directory name appears there.
+  logged. Chromium/Edge only; there is no Firefox equivalent, so these routes
+  501 on a Firefox box rather than writing files that would never load.
+
+Confirm what Chromium actually loaded, with no display involved — an
+extension's service worker is a CDP target:
+
+```sh
+journalctl --user -u display-agent | grep browser:
+curl -s localhost:9222/json | python3 -c 'import json,sys; print([t["title"] for t in json.load(sys.stdin) if t.get("url","").startswith("chrome-extension://")])'
+```
+
+That reports the **manifest** name. An unpacked extension's id is derived from
+its path, not from the store id, so neither the id nor the directory name
+appears there.
 
 If it reports nothing loaded, the agent logs which directories it passed:
 

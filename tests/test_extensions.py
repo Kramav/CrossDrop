@@ -222,6 +222,20 @@ def test_needs_a_token(client):
     assert client.get("/v1/extensions").status_code == 401
 
 
+def test_cli_install_takes_several_ids(monkeypatch, capsys):
+    import roomctl
+    from roomctl import cli
+    seen = {}
+    monkeypatch.setattr(roomctl, "extensions",
+                        lambda target=None, **kw: seen.update(kw) or {"ok": True})
+    assert cli.main(["extension", "install", ID, ID2]) == 0
+    assert seen["install"] == [ID, ID2]
+    assert cli.main(["extension", "remove", ID]) == 0
+    assert seen["remove"] == ID
+    # `list` is the default, and takes neither
+    assert cli.main(["extension"]) == 0
+
+
 def test_firefox_says_so_instead_of_installing(tmp_path, monkeypatch):
     cfg = tmp_path / "config.toml"
     cfg.write_text('token = "t"\nhome_url = "about:blank"\n'

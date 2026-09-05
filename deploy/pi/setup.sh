@@ -174,7 +174,7 @@ fi
 mkdir -p /opt/room-display/extensions
 
 echo "== service"
-chmod +x deploy/pi/profile-snapshot.sh deploy/pi/update.sh deploy/pi/install-extension.sh
+chmod +x deploy/pi/profile-snapshot.sh deploy/pi/update.sh
 mkdir -p ~/.config/systemd/user
 cp deploy/pi/display-agent.service ~/.config/systemd/user/
 # Timer stays installed-but-disabled: PLAN.md §9 default is snapshot-on-stop.

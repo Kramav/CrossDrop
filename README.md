@@ -136,6 +136,10 @@ roomctl media mute
 
 roomctl window minimized                          # kiosk aside, Pi's desktop free
 roomctl window fullscreen                         # and back on its own monitor
+
+roomctl extension list                            # ad blockers etc.
+roomctl extension install <store-id> [<id>...]    # live at the next browser start
+roomctl extension remove <store-id>
 ```
 
 A **target** is a Pi; a **screen** is one monitor on it. Omit `-s` and you get
@@ -224,6 +228,9 @@ before it keeps working unchanged.
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
 | `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
 | `POST /v1/window` | `{"screen"?, "state"}` | `"normal"`\|`"minimized"`\|`"fullscreen"` — the way out of `--kiosk` without stopping the agent |
+| `GET /v1/extensions` | — | `{"installed": [{"id", "name"}], "pending_restart"}` |
+| `POST /v1/extensions` | `{"ids": ["…"]}` | Web Store ids, never urls. Installs unpacked; live at the next browser start |
+| `DELETE /v1/extensions/{id}` | — | as `GET` |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
 | `PUT /v1/settings` | `{"screens": [{"name", "home_url", "position"?, "size"?}]}` | saves, then moves the windows live |

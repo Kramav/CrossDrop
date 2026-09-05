@@ -253,6 +253,8 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 - [ ] `:9222` stays on `127.0.0.1`.
 - [ ] Upload: size cap, type allowlist, filename sanitize, dedicated dir.
 - [ ] `/v1/navigate` URL-scheme allowlist (`http`,`https`).
+- [ ] `/v1/extensions` takes Web Store **ids**, never urls; id regex + size cap
+      before the fetch. It installs executable code — see §11.
 - [ ] Snapshot archive perms `600` (session tokens).
 - [ ] Repo **private**; **read-only** deploy key; branch/tag protection + 2FA on the account.
 - [ ] Ship `.example` configs only.
@@ -282,6 +284,22 @@ per-tick websocket (see Phase 7a).
 | 8 | Bearer token on `update.sh`'s `curl` command line, visible in `/proc/<pid>/cmdline` | The threat is another local user on a Pi that has exactly one. `-H @-` if that ever changes. |
 | 10 | Auto-update deploys unsigned tags — push access to the repo is code execution on every Pi within 30 min | Trades a permanent release-signing burden against a path that ships **disabled** and is opt-in. `git verify-tag` if this runs on a box that matters. |
 | 11 | `request.url_for` builds the post-upload URL from the client's `Host` header | Needs a proxy or a hand-crafted `Host` on an already-authenticated route. Bites a program harder than a person; build it from the configured bind address if it ever does. |
+
+**Later, and decided on purpose.**
+
+- **`POST /v1/extensions` installs browser extensions** (v1.3). This is the only
+  route that puts **executable code** on the box, and an extension with broad
+  host permissions can read every page the kiosk shows — including the logged-in
+  pages whose session tokens `profile-snapshot.sh` exists to keep. Nothing else
+  in this API can do that. It ships anyway, inside the stated tailnet boundary
+  and behind the same bearer token, constrained so that it is an *installer* and
+  not a fetcher: the body carries **Web Store ids only, never a url**; the url
+  is a fixed template; ids are checked against `^[a-p]{32}$` before anything is
+  requested; the download is capped at 50 MB; and the archive is unpacked into a
+  staging directory that `extractall` cannot escape. Revisit if the trust
+  boundary ever widens beyond "the tailnet, no hostile device on it" — the
+  honest fix then is an allowlist of ids in `config.toml`, which the agent
+  cannot write.
 
 **Still open.**
 
