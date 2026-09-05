@@ -312,7 +312,10 @@ per-tick websocket (see Phase 7a).
   next deploy confirm `/v1/status` still returns a `current_url` rather than a
   browser error. And autoscroll's connection count is proven but its CPU cost is
   not: run `roomctl autoscroll start --speed 40` on a long page, leave it two
-  minutes, watch `%CPU` in `top`.
+  minutes, watch `%CPU` in `top`. It now issues two `synthesizeScrollGesture`
+  calls a second rather than ten wheel events, so the round-trip half of that
+  cost is five times smaller — but Chromium is doing the interpolation instead,
+  and nobody has measured which side that lands on. Same run answers it.
 - **Minor install gaps.** `apt full-upgrade -y` (`setup.sh:52`) can turn a
   3-minute install into 30 with a reboot; nothing checks `pip install` succeeded
   before enabling the service, so you learn from the `journalctl` dump; the final

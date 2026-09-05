@@ -415,17 +415,30 @@ def scroll(cfg: dict, screen: str | None = None, dy: int = 0,
 
 AUTOSCROLL_TICK = 0.1
 
+# Seconds of scrolling per synthesised gesture. The whole trade: longer means
+# fewer round-trips, shorter means `stop` bites sooner, because a gesture runs
+# to completion before we look at the event again. Override with
+# ROOM_GESTURE_SECS — how smooth this looks is a property of the panel and the
+# GPU, not of the code, so it is worth being able to tune without a deploy.
+GESTURE_SECS = float(os.getenv("ROOM_GESTURE_SECS", "0.5"))
+
 
 def autoscroll(cfg: dict, screen: str | None, speed: int,
                stop: threading.Event) -> None:
     """Scroll one screen `speed` pixels a tick until `stop` is set.
 
-    One connection for the whole run, not one per tick. Calling scroll() in a
-    loop meant an HTTP GET /json, a websocket handshake, two CDP round-trips and
-    a socket close ten times a second — on a Pi that was simultaneously
-    rendering the page being scrolled. Everything else here is two orders of
-    magnitude cheaper: display.py ticks once a minute, the web UI polls at 15s.
+    Smoothness is the point. Ten wheel events a second is ten visible steps a
+    second, and shrinking the step only trades stepping for ten times the
+    round-trips on a Pi that is already rendering the page being scrolled.
+    Input.synthesizeScrollGesture hands the whole movement to Chromium, which
+    interpolates it at the compositor's frame rate — smoother *and* cheaper, two
+    calls a second instead of ten.
 
+    `speed` still means pixels per AUTOSCROLL_TICK, so the CLI flag and the web
+    UI slider keep the values they always had; the gesture API is told pixels
+    per second.
+
+    One connection for the whole run, not one per tick (PLAN.md §11 finding 5).
     The viewport centre is read once for the same reason: a fullscreen kiosk
     window does not resize.
 
@@ -440,7 +453,42 @@ def autoscroll(cfg: dict, screen: str | None, speed: int,
     page = _cdp_page(cfg, screen)
     with _rpc(page["webSocketDebuggerUrl"]) as call:
         x, y = _viewport_centre(call)
-        while not stop.wait(AUTOSCROLL_TICK):
+        if not speed:
+            stop.wait()         # a 0 px/s autoscroll is a no-op, not a spin
+            return
+        px_s = abs(speed) / AUTOSCROLL_TICK
+        smooth = True
+        while not stop.is_set():
+            if smooth:
+                started = time.monotonic()
+                try:
+                    call("Input.synthesizeScrollGesture", {
+                        "x": x, "y": y,
+                        # yDistance is positive to scroll *up*, the opposite of
+                        # a wheel event's deltaY. Getting this backwards silently
+                        # scrolls the wrong way, so it is negated here once.
+                        "yDistance": -(speed / AUTOSCROLL_TICK) * GESTURE_SECS,
+                        "speed": px_s,
+                        # No momentum: a wall display should stop where it stops.
+                        "preventFling": True})
+                except RuntimeError as e:
+                    # The gesture API is experimental; an old build may not have
+                    # it. Drop to wheel ticks for the rest of the run rather
+                    # than ending an autoscroll someone asked for.
+                    print(f"autoscroll: no smooth gesture ({e}); "
+                          f"falling back to wheel ticks", flush=True)
+                    smooth = False
+                    continue
+                # The call returns when the gesture finishes, so normally there
+                # is nothing left to wait for. If a target ignored it and
+                # answered instantly, this is what stops the loop spinning at
+                # 100% CPU on the Pi.
+                left = GESTURE_SECS - (time.monotonic() - started)
+                if left > 0 and stop.wait(left):
+                    break
+                continue
+            if stop.wait(AUTOSCROLL_TICK):
+                break
             call("Input.dispatchMouseEvent",
                  {"type": "mouseWheel", "x": x, "y": y,
                   "deltaX": 0, "deltaY": speed})

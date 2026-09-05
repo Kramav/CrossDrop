@@ -127,40 +127,92 @@ def test_firefox_says_so_instead_of_crashing(cdp):
 
 # --- autoscroll -------------------------------------------------------------
 
-def test_autoscroll_holds_one_connection_for_the_whole_run(monkeypatch):
-    """PLAN.md §11 finding 5. Calling scroll() in a loop meant a TCP connect, an
-    HTTP GET, a websocket handshake and two CDP round-trips *per tick*, ten
-    times a second, on a Pi already busy rendering the page being scrolled."""
-    opened, wheels = [], []
+def run_autoscroll(monkeypatch, speed=40, fail=(), secs=0.15, tick=None):
+    """Drive autoscroll against a stubbed CDP for `secs`. Returns (opened, calls).
+
+    `fail` names methods the stub should reject, which is how the old-build
+    fallback gets exercised without an old build.
+    """
+    opened, calls = [], []
 
     @contextlib.contextmanager
     def rpc(ws_url):
         opened.append(ws_url)
 
         def call(method, params=None):
-            if method == "Input.dispatchMouseEvent":
-                wheels.append(params)
+            if method in fail:
+                raise RuntimeError(f"{method} failed: not supported")
+            calls.append((method, params))
             return {}
         yield call
 
     monkeypatch.setattr(browser, "_get",
                         lambda port, path: PAGES if path == "/json" else {})
     monkeypatch.setattr(browser, "_rpc", rpc)
-    monkeypatch.setattr(browser, "AUTOSCROLL_TICK", 0.01)
+    # AUTOSCROLL_TICK is left alone unless asked: the gesture speed is derived
+    # from it, so shrinking it here would make the px/s assertions meaningless.
+    # Only the wheel fallback actually paces itself by it.
+    if tick:
+        monkeypatch.setattr(browser, "AUTOSCROLL_TICK", tick)
+    monkeypatch.setattr(browser, "GESTURE_SECS", 0.01)
     browser._targets.clear()
 
     stop = threading.Event()
     t = threading.Thread(target=browser.autoscroll,
-                         args=(make_cfg(), "left", 40, stop), daemon=True)
+                         args=(make_cfg(), "left", speed, stop), daemon=True)
     t.start()
-    time.sleep(0.15)
+    time.sleep(secs)
     stop.set()
     t.join(2)
+    assert not t.is_alive(), "autoscroll ignored its stop event"
+    return opened, calls
 
-    assert not t.is_alive()
-    assert len(wheels) >= 3, wheels             # it really scrolled, repeatedly
+
+def test_autoscroll_holds_one_connection_for_the_whole_run(monkeypatch):
+    """PLAN.md §11 finding 5. Calling scroll() in a loop meant a TCP connect, an
+    HTTP GET, a websocket handshake and two CDP round-trips *per tick*, ten
+    times a second, on a Pi already busy rendering the page being scrolled."""
+    opened, calls = run_autoscroll(monkeypatch)
+    gestures = [p for m, p in calls if m == "Input.synthesizeScrollGesture"]
+    assert len(gestures) >= 3, calls            # it really scrolled, repeatedly
     assert opened == ["ws://one"]               # ...down one connection
+
+
+def test_autoscroll_is_one_smooth_gesture_not_a_stack_of_jumps(monkeypatch):
+    """The steppiness fix: Chromium interpolates the gesture at frame rate, so
+    the agent must not be posting discrete wheel deltas at all."""
+    _, calls = run_autoscroll(monkeypatch)
+    assert not [m for m, _ in calls if m == "Input.dispatchMouseEvent"]
+    g = [p for m, p in calls if m == "Input.synthesizeScrollGesture"][0]
+    # yDistance is positive to scroll UP, opposite to a wheel deltaY. Positive
+    # speed must still scroll down, and inverting this is silent.
+    assert g["yDistance"] < 0
+    assert g["preventFling"] is True
+    # speed 40/tick is 400 px/s, the rate the wheel loop used to give.
+    assert g["speed"] == 400
+
+
+def test_autoscroll_up_reverses_only_the_direction(monkeypatch):
+    _, calls = run_autoscroll(monkeypatch, speed=-40)
+    g = [p for m, p in calls if m == "Input.synthesizeScrollGesture"][0]
+    assert g["yDistance"] > 0
+    assert g["speed"] == 400        # a magnitude, never negative
+
+
+def test_autoscroll_falls_back_to_wheel_ticks_on_an_old_build(monkeypatch):
+    """The gesture API is experimental. A build without it must still scroll,
+    not leave someone looking at a display that quietly stopped."""
+    _, calls = run_autoscroll(monkeypatch, fail=("Input.synthesizeScrollGesture",),
+                              tick=0.01)
+    wheels = [p for m, p in calls if m == "Input.dispatchMouseEvent"]
+    assert len(wheels) >= 3, calls
     assert all(w["deltaY"] == 40 for w in wheels)
+
+
+def test_zero_speed_does_not_spin(monkeypatch):
+    """A 0 px/s gesture completes instantly; looping on it would peg a Pi core."""
+    _, calls = run_autoscroll(monkeypatch, speed=0)
+    assert not [m for m, _ in calls if m.startswith("Input.")]
 
 
 def test_autoscroll_stops_when_the_event_is_set(monkeypatch):
