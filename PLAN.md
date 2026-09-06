@@ -218,6 +218,14 @@ Two fixes rode along, both from the same review:
 - **`display.claim()` was fire-and-forget.** It runs while the agent is starting, which on a slow boot is before the session exists; a lost attempt was lost for good, leaving the session's own blanking timeouts to sleep the monitors with nothing able to wake them — the exact trap `display.py` exists to avoid. It now reports success and `watch()` retries until X takes it. The DPMS half is split from the power sync deliberately: re-claiming must not carry `power(True)` with it, or the tick after a deliberate `POST /v1/display off` would light the room back up.
 - **The config swap could be read empty.** `clear()` then `update()` in `PUT /v1/settings` left `app.state.cfg` momentarily blank, and every browser route is `def` and runs on the threadpool, so a reader landing there got a `KeyError` and a 500. Now `swap_config()`: overwrite, then drop stale keys, so nothing present on both sides is ever absent. The window is a couple of bytecodes wide and a racing test passed just as happily with the bug in — so the test watches every mutation instead, which is deterministic.
 
+The web UI got the **Look** button in the same work: one press, one picture, with an explicit *Clear*. `target === "all"` fans out **client-side** — the route stays one request, one picture, and a two-monitor wall still shows both. Anything sent to the display afterwards dims the pictures rather than removing them, because the comparison is usually what you wanted and a stale screenshot presented as current is worse than none. Captions are built with `createElement` + `textContent`: a page title comes off whatever arbitrary site is on the wall, and this page holds the agent token.
+
+Three checks keep the boundary from eroding by accident, since none of it is enforced by anything a reader would notice:
+
+- `tests/test_web.py` asserts the only recurring timers are the two status polls. A screenshot poller means a new timer, and a poller is a slow remote desktop.
+- The same file asserts no page ever builds DOM from a string.
+- `.github/workflows/ci.yml` greps for desktop-capture APIs and `Page.startScreencast` — the latter being the one route to video that never leaves CDP.
+
 *Accept (unrun on hardware):* `roomctl shot -o wall.png` against the Pi, and confirm the image matches what is on the monitor at the size reported. Nothing in the suite can prove a picture *looks* right — only that the clip, the clamp and the wake behaviour around it are correct.
 
 **Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**

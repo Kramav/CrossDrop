@@ -41,6 +41,20 @@
   #auto[aria-pressed=true], #mute[aria-pressed=true] {
     background: color-mix(in srgb, currentColor 20%, transparent); font-weight: 600; }
   #pos { font: .85rem ui-monospace, monospace; opacity: .7; }
+
+  /* screenshots. Side by side when "all" is armed, one per monitor. */
+  #shots { display: flex; flex-wrap: wrap; gap: .6rem; margin: .6rem 0 0; }
+  #shots figure { margin: 0; flex: 1 1 14rem; min-width: 0; }
+  #shots img { display: block; width: 100%; height: auto; border-radius: .4rem;
+               border: 1px solid var(--line);
+               background: color-mix(in srgb, currentColor 8%, transparent); }
+  #shots figcaption { font-size: .78rem; opacity: .7; margin-top: .3rem;
+                      overflow-wrap: anywhere; }
+  /* Something has been sent to the display since these were taken, so they are
+     pictures of the page before it. Shown dimmed rather than removed: the
+     comparison is usually the thing you wanted. */
+  #shots.stale img { opacity: .4; filter: grayscale(.5); }
+  #looknote { font-size: .8rem; opacity: .7; }
   #status { opacity: .7; word-break: break-all; min-height: 1.5em; }
   kbd { font: .8em ui-monospace, monospace; border: 1px solid var(--line);
         border-bottom-width: 2px; border-radius: .3rem; padding: 0 .3em; }
@@ -132,6 +146,20 @@
   <button type="button" id="full" title="Back to fullscreen on its monitor">Fullscreen</button>
 </div>
 
+<!-- On demand only. There is deliberately no timer in here: a screenshot happens
+     because someone asked for one, and a panel that re-fetched on an interval
+     would be a slow remote desktop, which is the one thing this is not. -->
+<fieldset id="look-box">
+  <legend id="look-legend">Screen</legend>
+  <div class="row tight">
+    <button type="button" id="look" title="Fetch what the display is showing now">
+      Look</button>
+    <button type="button" id="lookclear" hidden>Clear</button>
+    <span id="looknote"></span>
+  </div>
+  <div id="shots"></div>
+</fieldset>
+
 <p id="status" role="status" aria-live="polite">…</p>
 
 <!-- Why a control you expected isn't here. Hidden unless the agent's browser
@@ -207,7 +235,12 @@ function askToken(why) {
   $("#status").textContent = why;
 }
 
-async function req(path, opts) {
+async function req(path, opts = {}) {
+  // Any mutation may have changed what is on the wall, so a picture already on
+  // this page is now of the state before it. Here rather than at each button:
+  // upload and display build their own requests and would otherwise be missed,
+  // and so would any route added later.
+  if (opts.method && opts.method !== "GET" && path !== "/v1/screenshot") markStale();
   const r = await fetch(path, opts);
   if (r.status === 401) {
     delete localStorage.token;
@@ -246,6 +279,64 @@ function send(file) {
   });
 }
 
+// --- screenshots ------------------------------------------------------------
+// The read-back. /v1/navigate reports the url it was handed, so a redirect, an
+// expired login and a crashed tab all look like success from everywhere else on
+// this page; this is the one control that shows you.
+
+// createElement + textContent, never innerHTML: the title comes off an
+// arbitrary web page, and this page holds the agent token. A page titled
+// `<img onerror=…>` must be a caption, not script.
+function shotFigure(s) {
+  const fig = document.createElement("figure");
+  const img = document.createElement("img");
+  img.src = `data:image/${s.format};base64,${s.image}`;
+  img.alt = `${s.screen}: ${s.title || s.url}`;
+  img.loading = "lazy";
+  const save = document.createElement("a");
+  save.href = img.src;
+  save.download = `${s.screen}.${s.format === "jpeg" ? "jpg" : s.format}`;
+  save.textContent = "save";
+  const cap = document.createElement("figcaption");
+  cap.append(`${s.screen} — ${s.title || s.url} · ${s.width}×${s.height} · `, save);
+  fig.append(img, cap);
+  return fig;
+}
+
+function look() {
+  // "all" is a client-side fan-out: the route is one request, one picture, so
+  // asking it for "all" is a 404. Doing it here keeps the server's contract
+  // simple and still shows a two-monitor wall both of its screens.
+  const wanted = target === "all"
+    ? screens.map(s => s.name)
+    : [target || (screens[0] || {}).name];
+  return act(async () => {
+    $("#shots").replaceChildren();
+    $("#shots").classList.remove("stale");
+    $("#looknote").textContent = "…";
+    // Sequential on purpose. Each capture is a CDP round trip plus a PNG encode
+    // on a Pi that is already busy rendering the page being captured.
+    for (const name of wanted) {
+      $("#shots").append(shotFigure(await api("/v1/screenshot", { screen: name })));
+    }
+    $("#lookclear").hidden = false;
+    $("#looknote").textContent = "as of " + new Date().toLocaleTimeString();
+  });
+}
+
+function clearShots() {
+  $("#shots").replaceChildren();          // and let the data: urls go
+  $("#shots").classList.remove("stale");
+  $("#lookclear").hidden = true;
+  $("#looknote").textContent = "";
+}
+
+function markStale() {
+  if (!$("#shots").children.length) return;
+  $("#shots").classList.add("stale");
+  $("#looknote").textContent = "before your last action — Look again";
+}
+
 // Hide what this browser will only 501 on, and say so once rather than letting
 // the controls just be mysteriously absent.
 function drawCapabilities(kind) {
@@ -259,8 +350,10 @@ function drawCapabilities(kind) {
 
   $("#extbox").hidden = !can("extensions");
 
+  $("#look-box").hidden = !can("screenshot");
+
   const missing = ["scroll", "autoscroll", "media", "screens", "window",
-                   "extensions"].filter(f => !can(f));
+                   "extensions", "screenshot"].filter(f => !can(f));
   $("#cap").hidden = !missing.length;
   $("#cap").textContent = missing.length
     ? `this display runs ${kind}, so ${missing.join(", ")} are unavailable `
@@ -275,6 +368,8 @@ function drawScreens() {
   // Name the armed screen on the controls too, so it is never a guess.
   $("#scroll-legend").textContent =
     screens.length > 1 && target ? `Scroll — ${target}` : "Scroll";
+  $("#look-legend").textContent =
+    screens.length > 1 && target ? `Screen — ${target}` : "Screen";
   const all = [...screens, { name: "all", current_url: "every screen" }];
   $("#screens").replaceChildren(...all.map(s => {
     const b = document.createElement("button");
@@ -401,6 +496,9 @@ $("#power").onclick = () => act(() => req("/v1/display", {
 // window from the Pi's own keyboard, so a toggle would lie half the time.
 $("#aside").onclick = () => act(() => api("/v1/window", { state: "minimized" }));
 $("#full").onclick = () => act(() => api("/v1/window", { state: "fullscreen" }));
+
+$("#look").onclick = look;
+$("#lookclear").onclick = clearShots;
 
 // Guarded here rather than at each caller: this covers the four buttons and the
 // six keyboard bindings, and a key still works while the buttons are hidden.

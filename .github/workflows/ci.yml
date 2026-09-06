@@ -32,6 +32,17 @@ jobs:
       # Errors only, not style: undefined names, syntax, unused imports. The
       # things that make a release fail to boot on a box with no keyboard.
       - run: pip install ruff && ruff check --select E9,F .
+      # The remote-desktop boundary, mechanically. /v1/screenshot captures one
+      # browser target's frame tree over CDP, so it structurally cannot see the
+      # box's desktop, its other windows or its taskbar -- the limit is a
+      # property of the transport rather than a rule anyone has to remember.
+      # These are the ways out of it: a desktop capture API, or CDP's own
+      # screencast, which is the one path to video that never leaves CDP.
+      # PLAN.md v1.2.0. Delete this only with a decision behind it.
+      - name: no desktop capture, no streaming
+        run: |
+          ! grep -rnE 'startScreencast|Page\.screencast|scrot|grim|\bmss\b|pyautogui|uinput|CopyFromScreen|import -window' \
+            agent/ roomctl/ web/ deploy/
       # `python -m`, not bare `pytest`: the agent package is imported from the
       # repo root and only -m puts the working directory on sys.path.
       - run: python -m pytest -q

@@ -222,6 +222,14 @@ returns what you sent, so a redirect, an expired login, a consent banner and a
 crashed tab all look identical to success. `POST /v1/screenshot` is the
 read-back:
 
+In the web UI that is the **Look** button: one press, one picture, shown under
+the controls with a *save* link. With **All** armed it fans out client-side and
+shows every monitor side by side. Send anything to the display afterwards and
+the pictures dim — they are of the page *before* that, and a stale screenshot
+presented as current is worse than none.
+
+From a terminal:
+
 ```sh
 roomctl shot -o wall.png && start wall.png     # Windows; `xdg-open` on Linux
 ```
