@@ -325,12 +325,22 @@ function imagePoint(rect, shot, clientX, clientY) {
 // createElement + textContent, never innerHTML: the title comes off an
 // arbitrary web page, and this page holds the agent token. A page titled
 // `<img onerror=…>` must be a caption, not script.
-function shotFigure(s) {
+async function shotFigure(s) {
   const fig = document.createElement("figure");
   const img = document.createElement("img");
   img.src = `data:image/${s.format};base64,${s.image}`;
   img.alt = `${s.screen}: ${s.title || s.url}`;
-  img.loading = "lazy";
+  // Reserve the box before there is anything in it, so swapping one picture for
+  // another of the same screen cannot reflow the column under your cursor.
+  img.style.aspectRatio = `${s.width} / ${s.height}`;
+  // No loading="lazy": the bytes are already here, in the reply. Lazy only
+  // defers the decode, which is the whole thing being avoided below.
+  //
+  // decode() before it goes into the document. An <img> inserted with an
+  // undecoded src paints an empty box for a frame or two first, and after a
+  // click that blink is exactly what you are staring at. Failing to decode is
+  // not fatal -- put it in anyway and let the browser show what it can.
+  await img.decode().catch(() => {});
   // Click the picture, click the page. The capture is pinned to scale 1, so
   // image pixels are CSS pixels and the only conversion left is however much
   // the browser shrank it to fit this column.
@@ -371,8 +381,9 @@ async function lookAt(names) {
   // Sequential on purpose. Each capture is a CDP round trip plus a PNG encode
   // on a Pi that is already busy rendering the page being captured.
   for (const name of names) {
-    figures.push(shotFigure(await api("/v1/screenshot", { screen: name })));
+    figures.push(await shotFigure(await api("/v1/screenshot", { screen: name })));
   }
+  // Decoded and ready to paint by here, so this is the only frame that changes.
   $("#shots").replaceChildren(...figures);
   $("#shots").classList.remove("stale");
   shown = names;
