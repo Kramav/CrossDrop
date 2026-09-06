@@ -7,6 +7,9 @@ any Debian box with monitors on it — a Proxmox host, say.
 - **Pi setup** — [deploy/pi/pi-setup.md](deploy/pi/pi-setup.md) (OS) then
   [deploy/pi/README.md](deploy/pi/README.md) (agent). One script does both:
   [deploy/pi/setup.sh](deploy/pi/setup.sh).
+- **Updating a Pi that's already running** —
+  [deploy/pi/update-over-ssh.md](deploy/pi/update-over-ssh.md). The runbook:
+  ship a tag, change a setting, verify it, roll it back.
 - **Debian / Proxmox host setup** — [deploy/linux.md](deploy/linux.md). Same
   script, other branch.
 - **Build plan and phases** — [PLAN.md](PLAN.md).
@@ -58,6 +61,7 @@ that you only have to open one.
 | [web/index.html](web/index.html) | The controller UI the agent serves at `/`. Single file, no build step, no framework. |
 | [web/home.html](web/home.html) | The idle screen the kiosk sits on. Also single-file. |
 | [deploy/pi/](deploy/pi/) | Provisioning (`setup.sh` — Pi *and* plain Debian), systemd units, tmpfs profile snapshots, and `update.sh` — the release-gated auto-updater with rollback. |
+| [deploy/pi/update-over-ssh.md](deploy/pi/update-over-ssh.md) | The runbook for a Pi already on the wall: ship a tag, flip a setting, verify, roll back, read the logs before they're gone. |
 | [deploy/linux.md](deploy/linux.md) | Running the display on a Debian box instead of a Pi, and why it goes on the Proxmox host rather than in a guest. |
 | [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1) | The tray client. Pure PowerShell + WinForms so it runs on a box with no checkout and no Python. |
 | [tests/](tests/) | pytest, one file per surface. No browser needed unless `ROOM_SMOKE=1`. |
@@ -266,9 +270,12 @@ Worth knowing:
   something", so a poller cannot light the room all night. The page is rendered
   whether or not the monitor is powered.
 - **The image is base64 in the JSON**, so it drops straight into a
-  `data:image/png;base64,…` url. A full-screen PNG is a few MB; `--format jpeg
-  --quality 50` is roughly a tenth of that when you only need to see *what* is
-  up there.
+  `data:image/png;base64,…` url. `--format jpeg` bounds the *worst* case — a
+  photo or a video frame runs to megabytes as PNG — but do not assume it is
+  always smaller. On a flat page PNG usually wins outright, because it
+  compresses a white background almost perfectly while JPEG still pays for a
+  colour profile and its blocks. Measured on the smoke-test fixture: 21 KB PNG
+  against 33 KB JPEG.
 - **Chromium or Edge.** Firefox 501s, as with scroll and media — though unlike
   those, BiDi does have the primitive, so it is unwritten rather than impossible.
 - **Never route a screenshot through `/files/{id}`.** That path is
@@ -442,3 +449,15 @@ listed.
 pytest                  # no browser needed
 ROOM_SMOKE=1 pytest -s  # drives a real kiosk browser
 ```
+
+The smoke tests are where the claims a stub cannot check get checked — that a
+capture really is in CSS pixels, that `error_page` is true on a real Chromium
+error page, and that a click at given coordinates really lands on the element
+that is there. They open one kiosk window for about half a minute:
+
+```sh
+ROOM_BROWSER=chromium ROOM_SMOKE=1 pytest tests/test_smoke.py -q
+```
+
+Run them on the Pi after an update — [deploy/pi/update-over-ssh.md
+§8](deploy/pi/update-over-ssh.md) is the whole procedure.

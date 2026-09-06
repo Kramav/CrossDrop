@@ -121,8 +121,12 @@ fi
 
 # What the wall looked like when it went wrong, for whoever reads this later.
 # Diagnostic, never a gate: no pixel heuristic is worth a false rollback here.
-# jpeg because this lands on the SD card, and best-effort because a release
-# broken enough to fail the checks above may not manage a screenshot either.
+# Best-effort, because a release broken enough to fail the checks above may not
+# manage a screenshot either.
+#
+# jpeg to bound the worst case on an SD card, not because it is always smaller:
+# on a flat error page png usually wins, but a full-screen photo runs to
+# megabytes as png and a few hundred KB as jpeg. Bounding is the point here.
 snapshot_failure() {
   local out="$RELEASES/.failed-$TAG.jpg"
   curl -fsS -m 10 -X POST -H "Authorization: Bearer $TOKEN" \
