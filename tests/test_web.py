@@ -49,6 +49,20 @@ def test_no_timer_fetches_pictures(page):
     assert set(timers) <= allowed, f"{page.name}: unexpected timer {set(timers) - allowed}"
 
 
+def test_stale_marking_hangs_off_the_action_not_the_request():
+    """The bug this replaces: markStale() was hooked into req() on "any non-GET".
+    But non-GET is not the same as changed-something — probeMedia() reads the
+    player with a POST and runs on the 15s poll, so every fresh capture was
+    marked stale the moment it was taken and again every fifteen seconds after.
+    act() is the honest signal: it wraps exactly the user-initiated actions.
+    """
+    html = (PAGES[-1].parent / "index.html").read_text(encoding="utf-8")
+    req = re.search(r"async function req\(.*?\n}", html, re.S).group(0)
+    assert "markStale" not in req, "markStale is back in req(); it belongs in act()"
+    act = re.search(r"async function act\(.*?\n}", html, re.S).group(0)
+    assert "markStale" in act, "nothing marks a picture stale when you act"
+
+
 # --- the one piece of page logic worth executing ----------------------------
 # Clicking the screenshot is how a login gets typed into on a box with no
 # keyboard, and the mapping from picture to page is a scale factor: get it wrong

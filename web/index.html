@@ -255,11 +255,6 @@ function askToken(why) {
 }
 
 async function req(path, opts = {}) {
-  // Any mutation may have changed what is on the wall, so a picture already on
-  // this page is now of the state before it. Here rather than at each button:
-  // upload and display build their own requests and would otherwise be missed,
-  // and so would any route added later.
-  if (opts.method && opts.method !== "GET" && path !== "/v1/screenshot") markStale();
   const r = await fetch(path, opts);
   if (r.status === 401) {
     delete localStorage.token;
@@ -281,6 +276,16 @@ async function api(path, body) {
 
 async function act(fn) {
   $("#status").textContent = "…";
+  // Whatever this is about to do, any picture already on the page is of the
+  // state before it. Here rather than in req(), because "non-GET" is not the
+  // same as "changed something": probeMedia() reads the player with a POST and
+  // runs on the 15s poll, so hooking req() marked every fresh capture stale the
+  // moment it was taken, and again every fifteen seconds after that.
+  //
+  // act() is the honest signal -- it wraps exactly the user-initiated actions.
+  // look() and inputThen() go through it too and clear the mark themselves when
+  // the replacement pictures land.
+  markStale();
   try { await fn(); $("#status").textContent = ""; }
   catch (e) { $("#status").textContent = "✗ " + e.message; }
   refresh();
@@ -370,7 +375,13 @@ async function lookAt(names) {
   $("#shots").classList.toggle("live", can("input"));
   $("#typebox").hidden = !can("input");
   $("#lookclear").hidden = false;
-  $("#looknote").textContent = "as of " + new Date().toLocaleTimeString();
+  // Say it in words, not only as a cursor. A crosshair is invisible until you
+  // happen to hover the right thing, absent entirely on a touch screen, and
+  // indistinguishable from "input is switched off" — which is the actual
+  // question someone is asking when they wonder why clicking does nothing.
+  $("#looknote").textContent =
+    (can("input") ? "click the picture to click the page · " : "")
+    + "as of " + new Date().toLocaleTimeString();
 }
 
 function look() {
