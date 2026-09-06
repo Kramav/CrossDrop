@@ -1,6 +1,7 @@
 """Room display agent — frozen /v1 contract (PLAN.md §5)."""
 
 import contextlib
+import logging
 import os
 import secrets
 import threading
@@ -28,6 +29,41 @@ UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 5}
 # something other than systemd can start the agent.
 SERVER_DEFAULTS = {"host": "127.0.0.1", "port": 8080}
 SCREEN_DEFAULTS = {"name": "", "position": "", "size": "", "home_url": ""}
+
+# The agent's own log. Goes to stderr, which under display-agent.service is
+# journald: `journalctl --user -u display-agent`. There was no log at all before
+# this -- six print() calls, none of them about a request -- so "the wall was
+# showing the wrong thing at 9am" had no way of being answered after the fact.
+log = logging.getLogger("room")
+
+# First gap between kiosk launch attempts; it doubles up to five minutes. Long
+# enough not to spin against a box that will never have a browser, short enough
+# that "the compositor was not up yet" clears itself while you are still looking
+# at the wall. Override with ROOM_LAUNCH_RETRY, the same way browser.py exposes
+# PLACE_SETTLE -- how slow a session is to come up is a property of the box.
+LAUNCH_RETRY_SECS = float(os.getenv("ROOM_LAUNCH_RETRY", "5"))
+
+
+def setup_logging() -> None:
+    """Give the root logger a handler, once, and set the level on ours only.
+
+    uvicorn configures its own named loggers and leaves root alone, so without a
+    handler here everything below WARNING falls through to logging.lastResort
+    and is silently dropped. basicConfig is a no-op if a handler already exists,
+    which is what makes this safe to call from a lifespan that tests run
+    repeatedly.
+
+    The level goes on `room` rather than on root deliberately: root at INFO also
+    turns on every library that logs at INFO, and httpx alone narrates one line
+    per request -- including the once-a-second poll in _home_when_ready(). On a
+    Pi whose journal is 32M and in RAM (deploy/pi/journald-volatile.conf) that
+    is our own audit trail evicted by somebody else's chatter.
+
+    ROOM_LOG=DEBUG adds the reads -- every status poll and every /files fetch.
+    """
+    logging.basicConfig(level=logging.WARNING,
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    log.setLevel(os.getenv("ROOM_LOG", "INFO").upper())
 
 
 def load_config(path: str | os.PathLike | None = None) -> dict:
@@ -98,6 +134,7 @@ def targets(cfg: dict, name: str | None) -> list[dict]:
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
     app.state.cfg = cfg = load_config()
     # Reported by /v1/status. A controller polling us cannot otherwise tell "your
     # autoscroll is still running" from "the 04:00 restart timer fired and threw
@@ -109,26 +146,71 @@ async def lifespan(app: FastAPI):
     # prove a new release can start, while the live kiosk is still running the
     # old one. It must never launch a second browser onto that port or screen.
     launch = cfg["browser"]["autolaunch"] and not os.getenv("ROOM_SELFCHECK")
-    proc = browser.launch(cfg) if launch else None
+    # The kiosk process, once we have one. On app.state rather than a local
+    # because _launch() below fills it in from another thread.
+    app.state.proc = None
+    app.state.launch_error = ""
+    app.state.stopping = threading.Event()
     watching = None
-    if proc:
+    if launch:
         # Only when we own the kiosk: selfcheck boots this app beside a running
         # instance, and must not reach out and blank the real monitors.
-        # claim() itself runs on the thread below, off the startup path: lifespan
-        # blocks the port from binding, and update.sh rolls the release back if
-        # /v1/status doesn't answer within 30s of the restart.
+        # The launch itself runs on the thread below, off the startup path:
+        # lifespan blocks the port from binding, and update.sh rolls the release
+        # back if /v1/status doesn't answer within 30s of the restart.
         watching = display.watch(cfg)
-        threading.Thread(target=_home_when_ready, args=(cfg,), daemon=True).start()
+        threading.Thread(target=_launch, args=(cfg,), daemon=True).start()
     yield
+    app.state.stopping.set()
     for name in list(_autoscroll):
         _autoscroll_stop(name)
     if watching:
         watching.set()
-    if proc:
-        _save_shown(cfg)         # while the browser can still be asked
-        browser.stop(cfg, proc)  # ours: take the whole tree down with us
+    if app.state.proc:
+        _save_shown(cfg)                   # while the browser can still be asked
+        browser.stop(cfg, app.state.proc)  # ours: take the whole tree down with us
     else:
         browser.close()  # not ours: just release the session and leave it running
+
+
+def _launch(cfg: dict) -> None:
+    """Start the kiosk browser, then put each screen on its home page.
+
+    Retries, and never lets the failure out. Launching used to happen inline in
+    lifespan, so anything that raised — no browser binary, a debug port that
+    never came up, an X session slower than we are — took uvicorn down with it.
+    systemd restarts us, the next try fails the same way, and the /v1/status that
+    would have named the cause is down for every one of those attempts. On a box
+    with no keyboard that is the difference between reading the error from your
+    desk and driving over to plug a keyboard in.
+
+    So: the API comes up regardless, `/v1/status` reports `error`, and we keep
+    trying in the background — which is also what makes the genuinely transient
+    case (the compositor is not up yet) heal itself without a restart.
+    """
+    delay = LAUNCH_RETRY_SECS
+    while not app.state.stopping.is_set():
+        try:
+            app.state.proc = browser.launch(cfg)
+        except Exception as e:
+            app.state.launch_error = f"{type(e).__name__}: {e}"
+            log.error("browser launch failed, retrying in %.0fs: %s", delay, e)
+            if app.state.stopping.wait(delay):
+                return
+            delay = min(delay * 2, 300.0)   # backs off to 5 min, then stays there
+            continue
+        app.state.launch_error = ""
+        # Shutdown may have run while launch() was inside its 30s wait_ready(),
+        # in which case it saw proc as None and left the browser alone. Nobody
+        # else is going to take it down, and an orphaned fullscreen kiosk on a
+        # box with no keyboard is the failure this whole module is arranged
+        # around. Both sides stopping it is harmless; neither is not.
+        if app.state.stopping.is_set():
+            browser.stop(cfg, app.state.proc)
+            return
+        log.info("browser launched")
+        _home_when_ready(cfg)
+        return
 
 
 def _home_when_ready(cfg: dict) -> None:
@@ -208,6 +290,34 @@ def _still_there(cfg: dict, url: str) -> bool:
 
 app = FastAPI(title="room-display agent", version="1", lifespan=lifespan)
 _bearer = HTTPBearer(auto_error=True)
+
+
+@app.middleware("http")
+async def access_log(request: Request, call_next):
+    """One line per request: what was asked, of what, and how it went.
+
+    Mutations at INFO, reads at DEBUG. A web UI polls /v1/status every 15s and
+    the kiosk polls /home-status, so logging reads at INFO would bury the one
+    navigate you are actually looking for under a few thousand lines a day --
+    on a Pi whose journal is capped at 32M and lives in RAM
+    (deploy/pi/journald-volatile.conf).
+
+    The body is deliberately not read: consuming it here would starve the route
+    of it, and re-injecting a stream to log a screen name is not worth the class
+    of bug it invites. Route plus status code says enough -- a 503 on
+    /v1/navigate and a 501 on /v1/scroll are each only one thing.
+    """
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        log.exception("%s %s -> unhandled in %.0fms", request.method,
+                      request.url.path, (time.monotonic() - started) * 1000)
+        raise
+    log.log(logging.DEBUG if request.method == "GET" else logging.INFO,
+            "%s %s -> %d in %.0fms", request.method, request.url.path,
+            response.status_code, (time.monotonic() - started) * 1000)
+    return response
 
 
 def auth(app_cfg: HTTPAuthorizationCredentials = Depends(_bearer)) -> None:
@@ -350,6 +460,12 @@ class Status(BaseModel):
     kind: str = ""
     supports: list[str] = []
     started_at: float = 0.0         # unix seconds
+    # Why the browser is not there, when we know. Empty when it is fine, and
+    # `browser` keeps its two original values -- a client reading `== "ok"` is
+    # unaffected, and one that wants the reason has somewhere to read it. This
+    # is the whole point of the agent outliving a failed launch: without it the
+    # only diagnosis available is a journal on a box you cannot log into.
+    error: str = ""
 
 
 # --- autoscroll -------------------------------------------------------------
@@ -357,24 +473,39 @@ class Status(BaseModel):
 # routes already run in a threadpool, and an Event can be set from any thread --
 # including from _go(), which has to stop a scroll the moment the page changes.
 _autoscroll: dict[str, threading.Event] = {}
+# Guards the dict against the restart race: a finishing run must not delete the
+# entry belonging to the run that replaced it. See _autoscroll_start.
+_autoscroll_lock = threading.Lock()
 
 
 def _autoscroll_stop(name: str) -> None:
-    ev = _autoscroll.pop(name, None)
+    with _autoscroll_lock:
+        ev = _autoscroll.pop(name, None)
     if ev:
         ev.set()
 
 
 def _autoscroll_start(cfg: dict, name: str, speed: int) -> None:
     _autoscroll_stop(name)
-    stop = _autoscroll[name] = threading.Event()
+    stop = threading.Event()
+    with _autoscroll_lock:
+        _autoscroll[name] = stop
 
     def run() -> None:
         # The loop itself lives in browser.py so it can hold one CDP connection
         # for the whole run rather than opening one per tick.
         with contextlib.suppress(Exception):    # browser gone, screen closed
             browser.autoscroll(cfg, name, speed, stop)
-        _autoscroll.pop(name, None)
+        # Only if the entry is still *ours*. A second start stops this run and
+        # installs its own event under the same name; popping unconditionally
+        # deleted that one, which left the new run scrolling with nothing left
+        # holding its stop event. `/v1/autoscroll stop` then popped nothing, the
+        # navigate guard in _navigate_one() stopped nothing, and the display
+        # went on scrolling every page it was sent -- the exact haunting that
+        # guard exists to prevent, curable only by restarting the agent.
+        with _autoscroll_lock:
+            if _autoscroll.get(name) is stop:
+                del _autoscroll[name]
 
     threading.Thread(target=run, daemon=True).start()
 
@@ -751,17 +882,22 @@ def serve_file(file_id: str) -> FileResponse:
 @app.get("/v1/status", response_model=Status, dependencies=[Depends(auth)])
 def status() -> Status:
     cfg = app.state.cfg
+    # A launch that is still failing is the better explanation, so it wins: the
+    # error off the socket would only say "connection refused" on a port nothing
+    # ever got as far as opening.
+    error = getattr(app.state, "launch_error", "")
     try:
         url, state = browser.current_url(cfg), "ok"
-    except _BROWSER_ERRORS:
+    except _BROWSER_ERRORS as e:
         url, state = None, "down"
+        error = error or f"{type(e).__name__}: {e}"
     # current_url stays the first screen's, so a pre-multi-monitor client that
     # reads it keeps working unchanged.
     return Status(up=True, current_url=url, browser=state,
                   version=os.getenv("ROOM_VERSION", "dev"), awake=display.awake(),
                   screens=[_screen_out(s) for s in cfg["screens"]],
                   kind=cfg["browser"]["kind"], supports=browser.supports(cfg),
-                  started_at=getattr(app.state, "started_at", 0.0))
+                  started_at=getattr(app.state, "started_at", 0.0), error=error)
 
 
 # Unauthenticated on purpose: you need the page before you can type the token.

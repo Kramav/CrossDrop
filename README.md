@@ -234,7 +234,7 @@ before it keeps working unchanged.
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
 | `PUT /v1/settings` | `{"screens": [{"name", "home_url", "position"?, "size"?}]}` | saves, then moves the windows live |
-| `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"` |
+| `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"`, `"error"` |
 
 Three things to know if the caller is a program rather than a person:
 
@@ -255,6 +255,35 @@ Three things to know if the caller is a program rather than a person:
 `started_at` changes when the agent restarts. That matters because the nightly
 restart timer drops any running autoscroll, and a poller has no other way to
 notice.
+
+**The agent outlives a browser that will not start.** No binary, a debug port
+that never comes up, an X session slower than the agent — none of them stop it
+serving. `browser` reads `"down"` as it always has, and `"error"` says why:
+
+```sh
+roomctl status | jq -r '.browser, .error'
+# down
+# RuntimeError: no chromium binary found; set browser.path in config
+```
+
+It keeps retrying in the background (5s, doubling to 5 min), so the genuinely
+transient case — the compositor was not up yet — clears itself with no restart
+and `error` goes back to `""`. Empty means nothing to report, so a client can
+treat any non-empty value as a real problem. This is the one field you want on
+a box with no keyboard: the alternative was the agent exiting, systemd
+restarting it into the same failure, and no `/v1/status` alive to be asked.
+
+**Every request is logged**, to journald via the service's stderr:
+
+```sh
+journalctl --user -u display-agent -f                  # follow
+journalctl --user -u display-agent | grep /v1/navigate # what was put on the wall
+```
+
+Mutations log at INFO, reads at DEBUG — a controller polling `/v1/status` every
+15s would otherwise bury the one navigate you are looking for, and the Pi's
+journal is 32 MB and in RAM. Set `ROOM_LOG=DEBUG` in the unit to see the reads
+too.
 
 `GET /home` is the idle screen the kiosk sits on, and `GET /home-status` feeds
 it. Both are unauthenticated for the same reason `/files` is — the kiosk browser
