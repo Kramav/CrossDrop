@@ -137,6 +137,11 @@ roomctl media mute
 roomctl window minimized                          # kiosk aside, Pi's desktop free
 roomctl window fullscreen                         # and back on its own monitor
 
+roomctl shot -o wall.png                          # what is ACTUALLY on the wall
+roomctl shot                                      # just the size, url and title
+roomctl shot -s right --region 0,0,800,600        # part of one monitor
+roomctl shot --format jpeg --quality 50 -o q.jpg  # smaller over a slow link
+
 roomctl extension list                            # ad blockers etc.
 roomctl extension install <store-id> [<id>...]    # live at the next browser start
 roomctl extension remove <store-id>
@@ -210,6 +215,53 @@ Everything acts on the media element itself, which means:
 - A film longer than `display.content_off_minutes` (default 2 h) still blanks
   the screen mid-playback; raise it in `config.toml` for a cinema room.
 
+## Seeing what is on the wall
+
+Every other route in this API reports the url it was *given*. `POST /v1/navigate`
+returns what you sent, so a redirect, an expired login, a consent banner and a
+crashed tab all look identical to success. `POST /v1/screenshot` is the
+read-back:
+
+```sh
+roomctl shot -o wall.png && start wall.png     # Windows; `xdg-open` on Linux
+```
+
+```python
+import base64, pathlib, roomctl
+with roomctl.Client(url, token) as c:
+    shot = c.screenshot(screen="left")
+    pathlib.Path("wall.png").write_bytes(base64.b64decode(shot["image"]))
+    print(shot["title"], shot["width"], "x", shot["height"])
+```
+
+**It captures the page, not the screen.** This renders the frame tree of one
+browser window over the same CDP connection `navigate` uses, so it can no more
+see the Pi's desktop, its other windows or its taskbar than `navigate` can drive
+them. That is the deliberate boundary: enough to verify and diagnose what the
+display is showing, and structurally incapable of being a remote desktop. There
+is no streaming and no push — a screenshot happens because someone asked for
+one.
+
+Worth knowing:
+
+- **Image pixels are CSS pixels.** The clip is always sent at `scale: 1`, so a
+  1920-wide viewport is a 1920-wide image even on a HiDPI panel, where an
+  unpinned capture would come back 3840 wide.
+- **`region` is clamped, not rejected** — `{"x": 100, "y": 80}` means "everything
+  below and right of there". The returned `width`/`height` are what you got.
+- **It does not wake the display.** Looking at a screen is not "show me
+  something", so a poller cannot light the room all night. The page is rendered
+  whether or not the monitor is powered.
+- **The image is base64 in the JSON**, so it drops straight into a
+  `data:image/png;base64,…` url. A full-screen PNG is a few MB; `--format jpeg
+  --quality 50` is roughly a tenth of that when you only need to see *what* is
+  up there.
+- **Chromium or Edge.** Firefox 501s, as with scroll and media — though unlike
+  those, BiDi does have the primitive, so it is unwritten rather than impossible.
+- **Never route a screenshot through `/files/{id}`.** That path is
+  unauthenticated by design; putting rendered page content behind it would
+  publish whatever the kiosk is logged into.
+
 ## The `/v1` contract
 
 Frozen. Bearer token on every route; FastAPI publishes the schema at `/docs`.
@@ -228,6 +280,7 @@ before it keeps working unchanged.
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
 | `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
 | `POST /v1/window` | `{"screen"?, "state"}` | `"normal"`\|`"minimized"`\|`"fullscreen"` — the way out of `--kiosk` without stopping the agent |
+| `POST /v1/screenshot` | `{"screen"?, "region"?, "format"?, "quality"?}` | `{"image"` (base64)`, "width", "height", "url", "title", …}`. No `"all"` — one request, one picture |
 | `GET /v1/extensions` | — | `{"installed": [{"id", "name"}], "pending_restart"}` |
 | `POST /v1/extensions` | `{"ids": ["…"]}` | Web Store ids, never urls. Installs unpacked; live at the next browser start |
 | `DELETE /v1/extensions/{id}` | — | as `GET` |
@@ -250,7 +303,8 @@ Three things to know if the caller is a program rather than a person:
   screen that worked, unchanged.
 - **`current_url` in a navigate reply is what we sent, not what loaded.** A
   redirect or a login wall still reports the URL you asked for. `GET /v1/screens`
-  is the read-back that tells you what is actually up.
+  is the read-back that tells you what is actually up — and
+  `POST /v1/screenshot` is the one that shows you.
 
 `started_at` changes when the agent restarts. That matters because the nightly
 restart timer drops any running autoscroll, and a poller has no other way to

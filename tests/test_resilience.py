@@ -268,6 +268,101 @@ def test_concurrent_starts_leave_exactly_one_live_run(client, monkeypatch):
     assert until(lambda: not live), "the surviving run was orphaned"
 
 
+# --- the config swap ---------------------------------------------------------
+
+class Watched(dict):
+    """A dict that records what a reader would have seen after every mutation.
+
+    Racing two threads and hoping to land in the window cannot prove this: it is
+    a couple of bytecodes wide, so the race test passed just as happily with the
+    bug in place. Watching every mutation instead makes it deterministic.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.seen = []
+
+    def _snap(self):
+        self.seen.append(set(self))
+
+    def clear(self):
+        super().clear()
+        self._snap()
+
+    def update(self, *a, **kw):
+        super().update(*a, **kw)
+        self._snap()
+
+    def __setitem__(self, k, v):
+        super().__setitem__(k, v)
+        self._snap()
+
+    def pop(self, *a):
+        out = super().pop(*a)
+        self._snap()
+        return out
+
+
+def test_the_config_swap_never_hides_a_key_that_survives_it():
+    """Every browser route is `def`, so it runs on the threadpool and really can
+    read app.state.cfg mid-swap. clear() then update() left it momentarily
+    empty, and a reader landing there got a KeyError and a 500 out of a route
+    that had done nothing wrong.
+    """
+    old = Watched({"token": "t", "screens": [{"name": "left"}], "gone": 1})
+    fresh = {"token": "t", "screens": [{"name": "right"}]}
+
+    appmod.swap_config(old, fresh)
+
+    assert old == fresh                                 # the swap happened
+    assert old.seen, "nothing was observed"
+    # The invariant: anything present before and after is present throughout.
+    survivors = {"token", "screens"}
+    assert all(survivors <= s for s in old.seen), \
+        f"a reader could have missed {survivors - min(old.seen, key=len)}"
+
+
+# --- display power ------------------------------------------------------------
+
+def test_a_claim_that_x_refused_is_retried(monkeypatch):
+    """claim() runs while the agent is starting, which on a slow boot is before
+    the session exists. An attempt lost there used to be lost for good, leaving
+    the session's own blanking timeouts to sleep the monitors with nothing able
+    to wake them -- the exact trap display.py exists to avoid."""
+    from agent import display
+
+    calls = []
+    monkeypatch.setattr(display, "_claimed", False)
+    monkeypatch.setattr(display, "_ok", True)
+    monkeypatch.setattr(display, "_run", lambda argv: calls.append(argv) or None)
+
+    assert display.claim() is False              # X refused every xset
+    assert display._claimed is False
+    # All four are attempted, not just up to the first refusal.
+    assert len([c for c in calls if c[0] == "xset"]) >= 4
+
+    calls.clear()
+    monkeypatch.setattr(display, "_run", lambda argv: calls.append(argv) or "")
+    assert display._claim_dpms() is True         # X is up now
+    assert display._claimed is True
+
+
+def test_the_retry_never_turns_the_display_back_on(monkeypatch):
+    """The bug the split exists to avoid: re-claiming must not carry claim()'s
+    power sync with it, or the tick after a deliberate `POST /v1/display off`
+    would light the room straight back up."""
+    from agent import display
+
+    monkeypatch.setattr(display, "_claimed", False)
+    monkeypatch.setattr(display, "_ok", True)
+    monkeypatch.setattr(display, "_run", lambda argv: "")
+    display.power(False)
+    assert display.awake() is False
+
+    display._claim_dpms()
+    assert display.awake() is False, "re-claiming woke the display"
+
+
 # --- the access log ---------------------------------------------------------
 
 def test_a_mutation_is_logged(client, monkeypatch, caplog):

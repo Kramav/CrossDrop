@@ -173,6 +173,23 @@ class Client:
             return self._call("POST", "/v1/extensions", json={"ids": install})
         return self._call("GET", "/v1/extensions")
 
+    def screenshot(self, screen: str | None = None, region: dict | None = None,
+                   format: str = "png", quality: int = 80) -> dict:
+        """What the screen is actually showing. `image` is base64.
+
+        The read-back for everything else here: `navigate` reports the url it
+        was handed, so a redirect or a login wall still looks like success.
+
+        `region` is `{"x","y","width","height"}` in CSS pixels, clamped to the
+        viewport. The returned `width`/`height` are what you got.
+
+            shot = c.screenshot()
+            Path("wall.png").write_bytes(base64.b64decode(shot["image"]))
+        """
+        return self._call("POST", "/v1/screenshot",
+                          json={"screen": screen, "region": region,
+                                "format": format, "quality": quality})
+
     def scroll(self, screen: str | None = None, dy: int = 600,
                to: str | None = None) -> dict:
         return self._call("POST", "/v1/scroll",
@@ -243,6 +260,14 @@ def extensions(target: str | None = None, install: list[str] | None = None,
     until the browser restarts -- the reply says so in `pending_restart`."""
     with client(target) as c:
         return c.extensions(install, remove)
+
+
+def screenshot(target: str | None = None, screen: str | None = None,
+               region: dict | None = None, format: str = "png",
+               quality: int = 80) -> dict:
+    """What the screen is actually showing. `image` is base64."""
+    with client(target) as c:
+        return c.screenshot(screen, region, format, quality)
 
 
 def scroll(target: str | None = None, screen: str | None = None,

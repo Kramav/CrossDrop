@@ -115,6 +115,26 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     return cfg
 
 
+def swap_config(cfg: dict, fresh: dict) -> None:
+    """Replace the contents of `cfg` with `fresh`, in place.
+
+    In place, not reassigned: display.watch() closed over this dict at startup
+    and would otherwise read a stale config forever.
+
+    Overwrite first and drop stale keys after, so no key present in both configs
+    is ever *absent*. Every browser route is `def` and runs on the threadpool,
+    so a concurrent request really can read this dict mid-swap; `clear()` then
+    `update()` left it empty in between, and a reader landing there got a
+    KeyError and a 500 out of a route that had done nothing wrong. Each dict
+    operation is atomic on its own, so the worst a reader sees now is one key
+    from the old config beside one from the new -- and between two loads of the
+    same file those differ only in the screen fields the caller just validated.
+    """
+    cfg.update(fresh)
+    for stale in set(cfg) - set(fresh):
+        cfg.pop(stale, None)
+
+
 def screen_of(cfg: dict, name: str | None) -> dict:
     """Resolve a screen name to its config. None -> the first one, so every
     caller that predates multi-monitor keeps hitting the same display."""
@@ -417,6 +437,32 @@ class UploadOut(BaseModel):
     url: str
 
 
+class RegionIn(BaseModel):
+    x: int = 0
+    y: int = 0
+    width: int = 0                  # 0 = to the right/bottom edge of the viewport
+    height: int = 0
+
+
+class ScreenshotIn(BaseModel):
+    screen: str | None = None       # no "all": one request, one picture
+    region: RegionIn | None = None
+    format: str = "png"             # png | jpeg | webp
+    quality: int = 80               # jpeg/webp only; png ignores it
+
+
+class ScreenshotOut(BaseModel):
+    image: str                      # base64, ready for a data: url
+    format: str
+    width: int                      # CSS pixels, and what you actually got --
+    height: int                     # a clamped region returns its real size
+    url: str                        # what the page says it is, beside the
+    title: str                      # picture of it
+    screen: str
+    taken_at: float                 # unix seconds
+    took_ms: int
+
+
 class ScreenOut(BaseModel):
     name: str
     position: str
@@ -657,6 +703,41 @@ def media(body: MediaIn) -> MediaOut:
     return out
 
 
+@app.post("/v1/screenshot", response_model=ScreenshotOut, dependencies=[Depends(auth)])
+def screenshot(body: ScreenshotIn) -> ScreenshotOut:
+    """What one screen is *actually* showing.
+
+    Every other route in this API reports the url it was given: `/v1/navigate`
+    returns what we sent, not what loaded, so a redirect, a login wall, a
+    consent banner and a crashed tab are all indistinguishable from success.
+    This is the read-back.
+
+    POST rather than GET because the body carries a region, and because every
+    other per-screen route here is shaped `{screen, ...}`. It is still a read:
+    nothing on the display changes.
+
+    No `display.touch()`, deliberately. Looking at a screen is not "show me
+    something", and waking the panel in order to photograph it would let a
+    poller light the room all night -- the same reason `/v1/window` and
+    `media action=state` don't touch either. The page is rendered whether or not
+    the monitor is powered, so a screenshot of a sleeping display still works.
+    """
+    cfg = app.state.cfg
+    # screen_of, not targets(): "all" would have to return a list of images, and
+    # nothing has asked for that. One request, one picture, and an unknown name
+    # still 404s the way it does everywhere else.
+    s = screen_of(cfg, body.screen)
+    started = time.monotonic()
+    try:
+        shot = browser.screenshot(cfg, s["name"],
+                                  region=body.region.model_dump() if body.region else None,
+                                  format=body.format, quality=body.quality)
+    except _BROWSER_ERRORS as e:
+        raise _http(e)
+    return ScreenshotOut(screen=s["name"], taken_at=time.time(),
+                         took_ms=int((time.monotonic() - started) * 1000), **shot)
+
+
 @app.post("/v1/display", response_model=DisplayOut, dependencies=[Depends(auth)])
 def display_power(body: DisplayIn) -> DisplayOut:
     """Turn the monitors off when you leave, or back on. Every other /v1 route
@@ -809,13 +890,7 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     # reassigned: display.watch() closed over this dict at startup and would
     # otherwise read a stale config forever.
     #
-    # Built first, then swapped in back to back. Every browser route is `def`,
-    # so it runs on the threadpool: clearing before load_config() left cfg empty
-    # across a file read and an xrandr subprocess, and any concurrent request
-    # reading cfg["screens"] in that window got a KeyError.
-    fresh = load_config()
-    cfg.clear()
-    cfg.update(fresh)
+    swap_config(cfg, load_config())
 
     # The live half, and the only reason this beats editing a file: the window
     # moves while you watch. It must not fail the request -- the settings are

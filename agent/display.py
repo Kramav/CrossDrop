@@ -35,6 +35,7 @@ _MONITOR = re.compile(r"^\s*\d+:\s+\+?\*?(\S+)\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(
 
 _ok: bool | None = None                         # xset usable? probed once
 _on = True                                      # last power state we set
+_claimed = False                                # did X accept claim()? see watch()
 _last: dict[str, float] = {}                    # screen name -> monotonic of last activity
 _content: dict[str, bool] = {}                  # screen name -> showing something but home
 
@@ -59,22 +60,44 @@ def _run(argv: list[str]) -> str | None:
         return None
 
 
-def claim() -> None:
-    """Take ownership of display power for this session.
+def _claim_dpms() -> bool:
+    """Zero the session's own blanking timeouts. True if X accepted all of it.
 
     DPMS stays *enabled* — `force off`/`force on` need it — but with every
     automatic timeout zeroed, so nothing sleeps unless this agent says so. The
     `+dpms` matters: `raspi-config nonint do_blanking` disables DPMS outright on
     X11, which would leave `force off` a no-op. Correct in either order.
+
+    A list, not a generator: all four have to be attempted, and `all()` over a
+    generator would stop at the first one X refused.
+    """
+    global _claimed
+    attempts = [_run(["xset", *args]) is not None
+                for args in (["+dpms"], ["dpms", "0", "0", "0"],
+                             ["s", "off"], ["s", "noblank"])]
+    _claimed = all(attempts)
+    return _claimed
+
+
+def claim() -> bool:
+    """Take ownership of display power for this session. True if X accepted.
+
+    Whether it worked is the caller's business because this runs at startup,
+    where X may simply not be up yet. Silently losing it leaves the session's
+    own blanking timeouts in place — and a monitor that sleeps on its own, on a
+    box with no keyboard, is exactly the trap this module exists to avoid.
+    watch() retries until it lands.
     """
     global _on
-    for args in (["+dpms"], ["dpms", "0", "0", "0"], ["s", "off"], ["s", "noblank"]):
-        _run(["xset", *args])
+    ok = _claim_dpms()
     # Sync our idea of the state to reality: the display may well be dark right
     # now (that is the bug this feature exists for), and without this the first
-    # touch() would see no transition and leave it dark.
+    # touch() would see no transition and leave it dark. Startup only — the
+    # retry in watch() must never do this, or re-claiming after a successful
+    # `POST /v1/display off` would light the room back up.
     _on = False
     power(True)
+    return ok
 
 
 def power(on: bool) -> None:
@@ -146,6 +169,14 @@ def watch(cfg: dict) -> threading.Event:
     def run() -> None:
         while not stop.wait(TICK):
             with contextlib.suppress(Exception):
+                # Keep asking until X takes it. claim() runs while the agent is
+                # starting, which on a slow boot is before the session exists;
+                # an attempt lost there used to be lost for good, leaving the
+                # session's own blanking timeouts to put the monitors to sleep
+                # with nothing able to wake them. Power is deliberately not
+                # touched here — see claim().
+                if not _claimed:
+                    _claim_dpms()
                 if _all_idle(cfg):
                     power(False)
 

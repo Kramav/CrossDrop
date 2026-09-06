@@ -50,7 +50,8 @@ CANDIDATES = {
 # Every name absent here has a matching NotImplementedError below; keep the two
 # in step. Routes that never touch the browser (display, upload) are not listed:
 # they work on every backend, so there is nothing to check.
-_CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window", "extensions")
+_CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window", "extensions",
+             "screenshot")
 SUPPORTS = {
     "chromium": ("navigate", *_CDP_ONLY),
     "edge": ("navigate", *_CDP_ONLY),
@@ -552,13 +553,87 @@ def media(cfg: dict, screen: str | None = None, action: str = "state",
     return r.get("result", {}).get("value")
 
 
-def _viewport_centre(call) -> tuple[int, int]:
+def _viewport(call) -> tuple[int, int]:
+    """The window's CSS-pixel viewport. The fallback is a guess, and is only
+    ever better than nothing: 800x600 keeps a scroll off the PDF sidebar and
+    gives a screenshot a plausible clip rather than an exception."""
     with contextlib.suppress(Exception):        # older builds, odd targets
         v = call("Page.getLayoutMetrics").get("cssLayoutViewport") or {}
         w, h = v.get("clientWidth"), v.get("clientHeight")
         if w and h:
-            return w // 2, h // 2
-    return 400, 400                             # better than a sidebar hit
+            return w, h
+    return 800, 600
+
+
+def _viewport_centre(call) -> tuple[int, int]:
+    w, h = _viewport(call)
+    return w // 2, h // 2                       # better than a sidebar hit
+
+
+SCREENSHOT_FORMATS = ("png", "jpeg", "webp")
+
+
+def screenshot(cfg: dict, screen: str | None = None, region: dict | None = None,
+               format: str = "png", quality: int = 80) -> dict:
+    """Capture what one screen's window is showing. Returns base64 image + size.
+
+    Exists because /v1/navigate reports the url we *sent*: a redirect, a login
+    wall, a consent banner or an "Aw, Snap!" all look like success from every
+    other route in this API. This is the read-back that a url cannot be.
+
+    The clip is always sent, always at `scale: 1`, and that is the whole
+    coordinate contract: without a clip Chromium captures at the device pixel
+    ratio, so a 1920-wide viewport on a HiDPI panel comes back 3840 wide and
+    anything mapping image pixels back onto the page is off by a factor of two.
+    Pinned this way, **image pixels are CSS pixels** and the returned
+    width/height are the same space Input.dispatchMouseEvent takes.
+
+    `region` is clamped to the viewport rather than rejected — an off-by-a-bit
+    rect is worth a slightly smaller picture, not a 422 — so the returned
+    width/height are what you got, which need not be what you asked for.
+
+    This is a page capture, not a screen capture: it renders the frame tree of
+    one browser target and can no more see the box's desktop, its other windows
+    or its taskbar than Page.navigate can drive them.
+    """
+    if cfg["browser"]["kind"] == "firefox":
+        # BiDi does have browsingContext.captureScreenshot, so this one is not
+        # impossible on Firefox the way scroll and media are -- it is just not
+        # written, and the Pi runs chromium. Same 501 either way.
+        raise NotImplementedError(
+            "screenshot needs CDP; use kind = \"chromium\" or \"edge\"")
+    if format not in SCREENSHOT_FORMATS:
+        raise ValueError(f"format must be one of {', '.join(SCREENSHOT_FORMATS)}")
+    if not 1 <= quality <= 100:
+        raise ValueError(f"quality must be 1-100, got {quality}")
+
+    page = _cdp_page(cfg, screen)
+    with _rpc(page["webSocketDebuggerUrl"]) as call:
+        vw, vh = _viewport(call)
+        x, y, w, h = _clip(region, vw, vh)
+        params = {"format": format, "captureBeyondViewport": False,
+                  "clip": {"x": x, "y": y, "width": w, "height": h, "scale": 1}}
+        if format != "png":                     # png ignores it and some builds complain
+            params["quality"] = quality
+        data = call("Page.captureScreenshot", params).get("data") or ""
+    return {"image": data, "format": format, "width": w, "height": h,
+            # Straight off the target listing, so this costs no extra round
+            # trip: what the page says it is, beside the picture of it.
+            "url": page.get("url") or "about:blank", "title": page.get("title") or ""}
+
+
+def _clip(region: dict | None, vw: int, vh: int) -> tuple[int, int, int, int]:
+    """A region clamped into the viewport, as (x, y, width, height)."""
+    if not region:
+        return 0, 0, vw, vh
+    x = min(max(int(region.get("x", 0)), 0), max(vw - 1, 0))
+    y = min(max(int(region.get("y", 0)), 0), max(vh - 1, 0))
+    w = min(int(region.get("width") or vw), vw - x)
+    h = min(int(region.get("height") or vh), vh - y)
+    if w < 1 or h < 1:
+        raise ValueError(
+            f"region is empty against a {vw}x{vh} viewport: {region}")
+    return x, y, w, h
 
 
 def close() -> None:

@@ -5,8 +5,10 @@ it pipes into jq. Errors go to stderr and exit 1, so scripts can branch on it.
 """
 
 import argparse
+import base64
 import json
 import sys
+from pathlib import Path
 
 import roomctl
 
@@ -34,6 +36,14 @@ def main(argv: list[str] | None = None) -> int:
     # Kept in step with agent/browser.py WINDOW_STATES by hand, same as media below.
     win = sub.add_parser("window", help="set the kiosk window aside, or put it back")
     win.add_argument("state", choices=["normal", "minimized", "fullscreen"])
+
+    shot = sub.add_parser("shot", help="what the screen is actually showing")
+    shot.add_argument("-o", "--out", help="write the image here (default: "
+                                          "print the metadata only)")
+    shot.add_argument("--region", help="x,y,width,height in CSS pixels, "
+                                       "clamped to the viewport")
+    shot.add_argument("--format", default="png", choices=["png", "jpeg", "webp"])
+    shot.add_argument("--quality", type=int, default=80, help="jpeg/webp only")
 
     scroll = sub.add_parser("scroll", help="scroll the page")
     where = scroll.add_mutually_exclusive_group()
@@ -69,6 +79,26 @@ def main(argv: list[str] | None = None) -> int:
             return roomctl.extensions(a.target, remove=a.what[0])
         return roomctl.extensions(a.target)
 
+    def do_shot():
+        region = None
+        if a.region:
+            try:
+                x, y, w, h = (int(v) for v in a.region.split(","))
+            except ValueError:
+                raise RuntimeError(f"--region must be x,y,width,height, got {a.region!r}")
+            region = {"x": x, "y": y, "width": w, "height": h}
+        r = roomctl.screenshot(a.target, a.screen, region, a.format, a.quality)
+        # The image never goes to stdout. Every other command prints the agent's
+        # reply verbatim so it pipes into jq, and a megabyte of base64 would
+        # make that useless -- and dumping raw bytes into a terminal is worse.
+        # What is left is exactly the part worth reading: size, url, title.
+        image = base64.b64decode(r.pop("image"))
+        if a.out:
+            Path(a.out).write_bytes(image)
+            r["written"] = a.out
+        r["bytes"] = len(image)
+        return r
+
     def do_scroll():
         if a.top or a.bottom:
             return roomctl.scroll(a.target, a.screen, to="top" if a.top else "bottom")
@@ -84,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             "upload": lambda: roomctl.upload(a.path, a.target, a.screen),
             "extension": do_extension,
             "window": lambda: roomctl.window(a.state, a.target, a.screen),
+            "shot": do_shot,
             "scroll": do_scroll,
             "autoscroll": lambda: roomctl.autoscroll(a.action, a.target, a.screen, a.speed),
             "media": lambda: roomctl.media(a.action, a.target, a.screen, a.value),

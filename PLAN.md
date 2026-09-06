@@ -201,6 +201,25 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 `tests/test_resilience.py` is the surface: the agent surviving things, as against doing them. Each fix was confirmed to fail its tests when reverted. *Accept (unrun on hardware):* rename the Chromium binary, restart the agent, and read the reason out of `roomctl status` from a controller box rather than from a keyboard.
 
+**v1.2.0 — screenshots, and two power/config fixes.** Done. Additive to the frozen `/v1`.
+
+`POST /v1/screenshot` answers the thing this API could not: every other route reports the url it was *given*, so a redirect, an expired SSO login, a consent banner and a crashed tab are all indistinguishable from success. `roomctl shot -o wall.png`, `Client.screenshot()`, and `"screenshot"` in `supports` so a caller discovers it the same way it discovers everything else.
+
+The design decisions worth keeping:
+
+- **It captures the page, not the screen.** `Page.captureScreenshot` renders one browser target's frame tree over the CDP connection `navigate` already uses. It cannot see the Pi's desktop, its other windows or its taskbar. The remote-desktop boundary is therefore a property of the transport rather than a policy anyone has to enforce — and the two rules that keep it there are: everything goes through an existing CDP target, and screenshots stay request/response. No `Page.startScreencast`, which is the one way to cross the line without leaving CDP.
+- **The clip is always sent at `scale: 1`.** Without an explicit clip Chromium captures at the device pixel ratio, so a 1920-wide viewport returns a 3840-wide image on a HiDPI panel and anything mapping the picture back onto the page is off by 2×. Pinned, image pixels *are* CSS pixels — the same space `Input.dispatchMouseEvent` takes, which is what makes this a foundation for interaction later rather than a dead end.
+- **No `display.touch()`.** Looking at a screen is not "show me something"; waking the panel to photograph it would let a poller light the room all night. Same rule as `/v1/window` and `media action=state`.
+- **No `"all"`.** One request, one picture. A list of images needs a second result model and nothing has asked for one.
+- Deliberately unbuilt: streaming, desktop capture, OCR, template matching, and any screenshot path through `/files/{id}` — that route is unauthenticated by design and would publish whatever the kiosk is logged into.
+
+Two fixes rode along, both from the same review:
+
+- **`display.claim()` was fire-and-forget.** It runs while the agent is starting, which on a slow boot is before the session exists; a lost attempt was lost for good, leaving the session's own blanking timeouts to sleep the monitors with nothing able to wake them — the exact trap `display.py` exists to avoid. It now reports success and `watch()` retries until X takes it. The DPMS half is split from the power sync deliberately: re-claiming must not carry `power(True)` with it, or the tick after a deliberate `POST /v1/display off` would light the room back up.
+- **The config swap could be read empty.** `clear()` then `update()` in `PUT /v1/settings` left `app.state.cfg` momentarily blank, and every browser route is `def` and runs on the threadpool, so a reader landing there got a `KeyError` and a 500. Now `swap_config()`: overwrite, then drop stale keys, so nothing present on both sides is ever absent. The window is a couple of bytecodes wide and a racing test passed just as happily with the bug in — so the test watches every mutation instead, which is deterministic.
+
+*Accept (unrun on hardware):* `roomctl shot -o wall.png` against the Pi, and confirm the image matches what is on the monitor at the size reported. Nothing in the suite can prove a picture *looks* right — only that the clip, the clamp and the wake behaviour around it are correct.
+
 **Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**
 
 **Future considerations.** Deliberately deferred, each with the trigger that should bring it back. Not a wish list — if the trigger doesn't happen, the item is correct as unbuilt.
