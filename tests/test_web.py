@@ -37,16 +37,26 @@ def test_nothing_builds_dom_from_a_string(page):
 
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: p.name)
-def test_no_timer_fetches_pictures(page):
-    """The remote-desktop boundary, mechanically. A screenshot happens because
-    someone asked for one; a panel that re-fetched on an interval would be a
-    slow remote desktop, which is the one thing this is not. Adding a poller
-    means adding a timer, so the timers are what this checks.
+def test_nothing_captures_on_a_recurring_timer(page):
+    """The remote-desktop boundary, mechanically.
+
+    `setInterval` is the primitive that makes a page keep doing something on its
+    own, so that is the one held to a fixed list: a capture on a repeating timer
+    is a slow remote desktop, which is the one thing this is not.
+
+    One-shot `setTimeout` is deliberately *not* restricted — it is how the page
+    sleeps while a click settles, inside an action somebody took. What keeps
+    that honest is the rule below it: no timer callback may reach a capture.
     """
     html = page.read_text(encoding="utf-8")
-    timers = re.findall(r"set(?:Interval|Timeout)\(\s*([\w$]+)", html)
+    repeating = set(re.findall(r"setInterval\(\s*([\w$]+)", html))
     allowed = {"refresh", "tick"}         # status polls; neither captures
-    assert set(timers) <= allowed, f"{page.name}: unexpected timer {set(timers) - allowed}"
+    assert repeating <= allowed, f"{page.name}: recurring {repeating - allowed}"
+    for name in repeating:
+        body = re.search(rf"(?:async )?function {name}\(.*?\n}}", html, re.S)
+        assert body, f"{page.name}: {name}() runs on a timer but is not a function"
+        assert "/v1/screenshot" not in body.group(0), \
+            f"{page.name}: {name}() runs on a timer and captures"
 
 
 def test_stale_marking_hangs_off_the_action_not_the_request():

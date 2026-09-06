@@ -363,14 +363,18 @@ function shotScreens() {
 }
 
 async function lookAt(names) {
-  $("#shots").replaceChildren();
-  $("#shots").classList.remove("stale");
-  $("#looknote").textContent = "…";
+  // Build the replacements first, swap them in once. Clearing up front left an
+  // empty box for the whole round trip — worst right after a click, which is
+  // exactly when you are watching. The old picture stays up, dimmed, until
+  // there is a newer one to put in its place.
+  const figures = [];
   // Sequential on purpose. Each capture is a CDP round trip plus a PNG encode
   // on a Pi that is already busy rendering the page being captured.
   for (const name of names) {
-    $("#shots").append(shotFigure(await api("/v1/screenshot", { screen: name })));
+    figures.push(shotFigure(await api("/v1/screenshot", { screen: name })));
   }
+  $("#shots").replaceChildren(...figures);
+  $("#shots").classList.remove("stale");
   shown = names;
   $("#shots").classList.toggle("live", can("input"));
   $("#typebox").hidden = !can("input");
@@ -408,8 +412,36 @@ function markStale() {
 // Only present when the agent has [interact] enabled; `supports` says so, and
 // drawCapabilities() hides the lot when it does not.
 
-// Every input goes out with a fresh capture after it, so you see the caret land
-// and the form fill in. That is one picture per deliberate action, not a timer.
+const sleep = ms => new Promise(done => setTimeout(done, ms));
+
+// How long to let the page react before photographing it. CDP *dispatches* an
+// input event; it does not wait to see what the page decides to do about it. So
+// a click that submits a form has not navigated yet when the request returns,
+// and capturing straight away photographs the page you just left — every time.
+//
+// The fixed wait is what lets a navigation start; the poll after it is what
+// waits for one to finish. Neither is a timer that captures on its own: both
+// only ever run inside an action somebody took.
+const SETTLE_MS = 400;
+const SETTLE_MAX_MS = 3000;
+
+async function settle(screen) {
+  await sleep(SETTLE_MS);
+  const deadline = Date.now() + SETTLE_MAX_MS;
+  while (Date.now() < deadline) {
+    try {
+      const s = await req("/v1/inspect?screen=" + encodeURIComponent(screen),
+                          { headers: auth() });
+      if (s.ready_state === "complete") return;
+    } catch {
+      return;               // an agent too old to inspect: just take the picture
+    }
+    await sleep(150);
+  }
+}
+
+// Every input is followed by a fresh capture, so you see the caret land and the
+// form fill in. One picture per deliberate action — never a timer.
 async function inputThen(screen, actions) {
   return act(async () => {
     const r = await api("/v1/input", { screen, actions });
@@ -417,6 +449,10 @@ async function inputThen(screen, actions) {
       const bad = r.results[r.results.length - 1] || {};
       throw new Error(`${bad.do || "action"}: ${bad.error || "failed"}`);
     }
+    // The old picture is still up and dimmed at this point (act marked it), so
+    // say what the wait is for rather than leaving it looking wedged.
+    $("#looknote").textContent = "waiting for the page…";
+    await settle(screen);
     await lookAt([screen]);
   });
 }
