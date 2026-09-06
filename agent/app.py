@@ -14,7 +14,7 @@ import httpx
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import AnyHttpUrl, BaseModel
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
 from . import browser, display, extensions, settings, storage
 
@@ -23,6 +23,12 @@ DEFAULTS = {
     "debug_port": 9222, "disk_cache_mb": 100, "extensions_dir": "",
 }
 UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 5}
+# POST /v1/input, off unless config.toml turns it on. It is the only route that
+# acts *as* whoever the kiosk is logged in as, which is the line worth a switch;
+# everything else here either shows something or reads something back. Kept in
+# config.toml rather than settings.json on purpose -- that file is root-owned and
+# the agent cannot write it, and a switch the API can flip for itself is not one.
+INTERACT_DEFAULTS = {"enabled": False, "max_actions": 40, "deadline_ms": 30_000}
 # Where to bind. Empty host = loopback, which is the safe default anywhere that
 # is not the Pi; the Pi's config sets its tailnet address (PLAN.md §10 — never
 # 0.0.0.0). This lives here rather than only in the systemd unit so that
@@ -74,6 +80,7 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     cfg["upload"] = UPLOAD_DEFAULTS | cfg.get("upload", {})
     cfg["server"] = SERVER_DEFAULTS | cfg.get("server", {})
     cfg["display"] = display.DEFAULTS | cfg.get("display", {})
+    cfg["interact"] = INTERACT_DEFAULTS | cfg.get("interact", {})
     if not cfg["browser"]["profile_dir"]:
         cfg["browser"]["profile_dir"] = str(path.parent / "profile")
     if not cfg["upload"]["dir"]:
@@ -451,6 +458,63 @@ class ScreenshotIn(BaseModel):
     quality: int = 80               # jpeg/webp only; png ignores it
 
 
+class FieldOut(BaseModel):
+    selector: str           # resolves again next call: an id or a name, never a path
+    tag: str
+    type: str = ""          # a "password" here is a login wall, in one field
+    label: str = ""         # never the value — see browser._INSPECT_JS
+
+
+class InspectOut(BaseModel):
+    screen: str
+    url: str
+    title: str
+    ready_state: str
+    error_page: bool        # Chromium's own crash/network page, which /v1/status
+    has_media: bool         # cannot see: it renders fine and answers 200
+    scroll_y: int
+    scroll_height: int
+    fields: list[FieldOut] = []
+
+
+class ActionIn(BaseModel):
+    do: str                 # see browser.INPUT_ACTIONS
+    x: int | None = None
+    y: int | None = None
+    selector: str | None = None     # preferred over x/y: survives a reflow
+    text: str | None = None         # type
+    key: str | None = None          # key
+    modifiers: list[str] = []       # ctrl | alt | shift | meta
+    ms: int | None = None           # wait
+    # `from` is a Python keyword, so the wire name is an alias. drag takes
+    # [x, y] pairs: two numbers, and no second nested model for a point.
+    from_: list[int] | None = Field(default=None, alias="from")
+    to: list[int] | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class InputIn(BaseModel):
+    screen: str | None = None
+    actions: list[ActionIn]
+    deadline_ms: int | None = None  # capped by [interact].deadline_ms
+
+
+class ActionResult(BaseModel):
+    do: str
+    ok: bool
+    took_ms: int
+    x: int | None = None            # where a selector actually resolved to
+    y: int | None = None
+    error: str | None = None
+
+
+class InputOut(BaseModel):
+    ok: bool                        # false = it stopped partway; see results
+    screen: str
+    results: list[ActionResult]
+
+
 class ScreenshotOut(BaseModel):
     image: str                      # base64, ready for a data: url
     format: str
@@ -736,6 +800,80 @@ def screenshot(body: ScreenshotIn) -> ScreenshotOut:
         raise _http(e)
     return ScreenshotOut(screen=s["name"], taken_at=time.time(),
                          took_ms=int((time.monotonic() - started) * 1000), **shot)
+
+
+@app.get("/v1/inspect", response_model=InspectOut, dependencies=[Depends(auth)])
+def inspect(screen: str | None = None) -> InspectOut:
+    """What the page says about itself: title, ready state, scroll, form fields.
+
+    The machine-readable half of `/v1/screenshot` — a program cannot look at a
+    picture. `error_page` is the one a poller most needs: Chromium's own crash
+    and network pages render perfectly and answer `/v1/status` with a 200, so
+    "Aw, Snap!" is indistinguishable from success everywhere else in this API.
+
+    No field *values*, ever. Naming a password box is how a caller knows where
+    to type; handing back what is in it would make this a credential leak.
+
+    A read, so no `display.touch()` — same rule as `/v1/screenshot`.
+    """
+    cfg = app.state.cfg
+    s = screen_of(cfg, screen)
+    try:
+        return InspectOut(screen=s["name"], **browser.inspect(cfg, s["name"]))
+    except _BROWSER_ERRORS as e:
+        raise _http(e)
+
+
+@app.post("/v1/input", response_model=InputOut, dependencies=[Depends(auth)])
+def send_input(body: InputIn) -> InputOut:
+    """Click, drag, type and press keys on one screen, in order.
+
+    Exists for the failure this box cannot otherwise recover from: the Pi has no
+    keyboard, so an expired SSO login or a consent wall is a page nobody can get
+    past (PLAN.md §6). Everything goes into one browser target's renderer — it
+    cannot reach the window manager, the desktop, or any other application.
+
+    **Off unless `[interact] enabled = true`.** It is the only route that acts
+    *as* whoever the kiosk is logged in as. Disabled, it is absent from
+    `supports` and 501s, exactly like a capability the browser lacks.
+
+    One request per sequence, not per verb: a login is five actions, and as five
+    requests that is five websockets and five chances to interleave with
+    something else. Stops at the first failure, because half a login is the
+    dangerous half — a click that missed would otherwise be followed by a
+    password typed into whatever does have focus.
+    """
+    cfg = app.state.cfg
+    if not browser.interactive(cfg):
+        raise HTTPException(501, "input is disabled; set [interact] enabled = true "
+                                 "in config.toml and restart the agent")
+    limits = cfg["interact"]
+    if len(body.actions) > limits["max_actions"]:
+        raise HTTPException(422, f"at most {limits['max_actions']} actions, "
+                                 f"got {len(body.actions)}")
+    s = screen_of(cfg, body.screen)
+    # The caller may ask for less time, never more: a deadline is what stops one
+    # request holding a threadpool thread while a page never settles.
+    ms = min(body.deadline_ms or limits["deadline_ms"], limits["deadline_ms"])
+
+    actions = [a.model_dump(exclude_none=True, by_alias=True) for a in body.actions]
+    # Typing is what this route is for, and a password is what it will mostly
+    # type. The audit line records that text was entered and how much, never
+    # what. Everything else is safe to name in full.
+    log.info("input on %s: %s", s["name"],
+             ", ".join(f"type({len(a['text'])} chars)" if a["do"] == "type"
+                       else a["do"] for a in actions))
+    display.touch(s)        # acting on a screen is activity, and you want to see it
+    try:
+        results = browser.input(cfg, s["name"], actions,
+                                deadline=time.monotonic() + ms / 1000)
+    except _BROWSER_ERRORS as e:
+        raise _http(e)      # a malformed list is a 422; nothing has run
+    out = [ActionResult(**r) for r in results]
+    if not all(r.ok for r in out):
+        log.warning("input on %s stopped at action %d: %s", s["name"],
+                    len(out) - 1, out[-1].error)
+    return InputOut(ok=all(r.ok for r in out), screen=s["name"], results=out)
 
 
 @app.post("/v1/display", response_model=DisplayOut, dependencies=[Depends(auth)])

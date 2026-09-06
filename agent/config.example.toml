@@ -79,6 +79,29 @@ extensions_dir = ""          # chromium/edge only. Every child directory of this
                                # restart (deploy/pi/room-display-restart.timer)
                                # invisible: the chart you left up is still up.
 
+# POST /v1/input -- click, drag, type, press keys. OFF unless you turn it on.
+#
+# It exists for the one failure a keyboard-less box cannot recover from: an
+# expired SSO login or a consent wall is a page nobody can get past, and the
+# whole point of this display is that nobody has to be in the room. Everything
+# it sends goes into the kiosk browser's own renderer over the same CDP
+# connection navigate uses -- it cannot reach the window manager, the desktop,
+# or any other application on the box.
+#
+# It ships off because it is the only route here that acts *as* whoever the
+# kiosk is logged in as. Everything else shows something or reads something
+# back. Turned off, `input` is absent from /v1/status `supports` and the route
+# 501s, so a client hides the feature rather than discovering it by failing.
+#
+# This lives here and not in settings.json deliberately: on the Pi this file is
+# root:<user> 640 and the agent cannot write it. A switch the API can turn on
+# for itself is not a switch. Changing it needs a restart.
+#
+# [interact]
+# enabled = false
+# max_actions = 40        # per request; a login is five
+# deadline_ms = 30000     # whole request. A caller may ask for less, never more
+
 [upload]
 dir = ""                     # empty = ./uploads next to this config.
                              # On the Pi point this at tmpfs — i.e. RAM, hence the caps.

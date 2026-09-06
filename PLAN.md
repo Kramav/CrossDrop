@@ -228,6 +228,27 @@ Three checks keep the boundary from eroding by accident, since none of it is enf
 
 *Accept (unrun on hardware):* `roomctl shot -o wall.png` against the Pi, and confirm the image matches what is on the monitor at the size reported. Nothing in the suite can prove a picture *looks* right — only that the clip, the clamp and the wake behaviour around it are correct.
 
+**v1.3.0 — inspect, input, and a rollback that can see the wall.** Done. Additive to the frozen `/v1`.
+
+**`GET /v1/inspect`** is `/v1/screenshot` for a program, which cannot look at a picture: title, ready state, scroll position, form fields, and `error_page`. That last one is the point — Chromium's own crash and network pages render perfectly and answer `/v1/status` with a 200, so "Aw, Snap!" was indistinguishable from success everywhere in this API. It reports no field **values**: naming a password box is how a caller knows where to type, and handing back what is in it would turn a diagnostic into a credential leak.
+
+**`POST /v1/input`** — click, double, right, move, drag, type, key, wait — exists for the failure a keyboard-less box cannot otherwise recover from: PLAN §6 has always said persisted cookies *reduce, not eliminate,* school re-logins, and until now an expired login meant a wall stuck on a form nobody could fill in.
+
+- **It ships off**, behind `[interact] enabled` in `config.toml` — the root-owned file the agent cannot write. It is the only route here that acts *as* whoever the kiosk is logged in as; everything else shows something or reads something back. Off, `input` is absent from `supports` and the route 501s, so a client hides the feature rather than discovering it by failing. That reuses the capability mechanism exactly, and needed no new error semantics.
+- **A list per request, not a route per verb.** A login is five actions; as five requests that is five websockets to the debug port and five chances to interleave. One request is one connection, one ordering, one audit line.
+- **Structure is checked before anything runs; runtime failures stop the rest.** There is no undo. A typo in action 3 must not be found out after actions 1 and 2 have clicked and typed — and a click that missed must not be followed by a password typed into whatever else has focus. `/v1/extensions` set the precedent: the caller's typo is total, a runtime failure is per-item.
+- **The audit line records that text was typed and how much, never what.**
+- Deadline per request, default 30 s, capped by config; a caller may ask for less, never more.
+- Still the page and nothing else: same CDP target as `navigate`, so it cannot alt-tab, reach the window manager, close the kiosk, or type into another application.
+
+**The web UI** grew the payoff of pinning captures to `scale: 1` — **click the picture to click the page**, because the two are the same coordinate space. Type box with a *hide* toggle for passwords, ⏎ to submit, and a fresh capture after every action so you watch the form fill in. `imagePoint()` is its own function with no DOM in it, and `tests/test_web.py` runs it under node across five geometries: a wrong scale factor misses every target by a constant and looks exactly like the click never arriving, which is not something anyone can eyeball.
+
+**`update.sh` can finally see the wall.** Step 6 proved the agent answers, which a Chromium error page does perfectly. It now also polls `/v1/inspect` and rolls back on `error_page: true` — *leniently*: inspect not answering at all (an older agent, a firefox box, a browser still coming up) is "cannot tell", never a rollback, because a false rollback on a keyboard-less box is worse than the regression it would be guarding. On any failure it saves a jpeg of what the wall was showing beside the `.failed-$TAG` latch. **Diagnostic, never a gate** — no pixel heuristic is worth a false rollback here.
+
+`tests/test_deploy.py` is new and pins what `deploy/` assumes about the agent: the Pi has no `jq`, so `update.sh` reads JSON with `sed` and `case`, which makes the compact `"error_page":false` wire shape a contract between two files that never import each other. It also runs `bash -n` over every shell script, which nothing did before.
+
+*Accept (unrun on hardware):* with `[interact] enabled`, put a login page on the wall, press Look, click the username box in the picture, type, and watch the next capture show the caret in the right field.
+
 **Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**
 
 **Future considerations.** Deliberately deferred, each with the trigger that should bring it back. Not a wish list — if the trigger doesn't happen, the item is correct as unbuilt.

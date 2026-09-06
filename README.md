@@ -137,6 +137,11 @@ roomctl media mute
 roomctl window minimized                          # kiosk aside, Pi's desktop free
 roomctl window fullscreen                         # and back on its own monitor
 
+roomctl inspect                                   # title, error_page, form fields
+roomctl click "#login"                            # needs [interact] enabled
+roomctl type "kramav"
+roomctl key ctrl+a
+
 roomctl shot -o wall.png                          # what is ACTUALLY on the wall
 roomctl shot                                      # just the size, url and title
 roomctl shot -s right --region 0,0,800,600        # part of one monitor
@@ -270,6 +275,79 @@ Worth knowing:
   unauthenticated by design; putting rendered page content behind it would
   publish whatever the kiosk is logged into.
 
+`GET /v1/inspect` is the same question answered for a program, which cannot look
+at a picture: title, ready state, scroll position, and `error_page` — which
+catches Chromium's own crash and network pages, the ones that render perfectly
+and answer `/v1/status` with a cheerful 200.
+
+```sh
+roomctl inspect | jq '{title, error_page, fields: [.fields[].selector]}'
+```
+
+It never reports a field's **value**. Naming a password box is how you know
+where to type; handing back what is in it would make a diagnostic a leak.
+
+## Typing on the wall
+
+The Pi has no keyboard. When a school login expires or a consent wall appears,
+the display is stuck on a page nobody can get past — and that is the one failure
+this whole project cannot otherwise recover from.
+
+`POST /v1/input` is the way out, and it **ships off**:
+
+```toml
+# /etc/room-display/config.toml, then restart the agent
+[interact]
+enabled = true
+```
+
+Off, `input` is absent from `supports` and the route 501s, so clients hide it
+rather than discovering it by failing. It is the only route here that acts *as*
+whoever the kiosk is logged in as — everything else shows something or reads
+something back — which is why it is the one thing behind a switch, and why that
+switch lives in the root-owned `config.toml` the agent cannot write.
+
+In the web UI: press **Look**, then **click the picture where you want to
+click the page**. The capture is pinned to CSS pixels, so those are the same
+coordinate space. Type into the box, tick *hide* for a password, press ⏎ to
+submit. Every action is followed by a fresh capture, so you watch the form fill
+in.
+
+From a program, a whole login is one request:
+
+```python
+c.input([{"do": "click", "selector": "#user"},
+         {"do": "type",  "text": user},
+         {"do": "click", "selector": "#pass"},
+         {"do": "type",  "text": password},
+         {"do": "key",   "key": "Enter"}])
+```
+
+```sh
+roomctl click "#user" && roomctl type "kramav" && roomctl key Enter
+roomctl click 812 442 --right
+```
+
+Actions are `click`, `double`, `right`, `move`, `drag`, `type`, `key`, `wait`.
+Prefer `selector` over `x, y` — it survives a reflow, and it scrolls the element
+into view first.
+
+Worth knowing:
+
+- **It stops at the first failure.** Half a login is the dangerous half: if the
+  click that focuses the password box missed, the next action would type the
+  password into whatever does have focus. `results` names the action that
+  stopped it, and `ok` is `false` — a 200, because some of it did happen.
+- **A malformed list runs none of it.** Structure is checked before anything is
+  dispatched, because there is no undo.
+- **Input goes into the kiosk page, nowhere else.** Same CDP target as
+  `navigate` — it cannot alt-tab, reach the window manager, close the kiosk, or
+  type into any other application on the box.
+- **The log records that you typed, never what.** `type(7 chars)`, not the
+  password.
+- **One request, one deadline.** Default 30 s, capped by `[interact]
+  deadline_ms`; a caller may ask for less, never more.
+
 ## The `/v1` contract
 
 Frozen. Bearer token on every route; FastAPI publishes the schema at `/docs`.
@@ -289,6 +367,8 @@ before it keeps working unchanged.
 | `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
 | `POST /v1/window` | `{"screen"?, "state"}` | `"normal"`\|`"minimized"`\|`"fullscreen"` — the way out of `--kiosk` without stopping the agent |
 | `POST /v1/screenshot` | `{"screen"?, "region"?, "format"?, "quality"?}` | `{"image"` (base64)`, "width", "height", "url", "title", …}`. No `"all"` — one request, one picture |
+| `GET /v1/inspect` | `?screen=` | `{"url", "title", "ready_state", "error_page", "scroll_y", "fields": [...]}`. No field *values* |
+| `POST /v1/input` | `{"screen"?, "actions": [...], "deadline_ms"?}` | `{"ok", "results": [...]}`. **501 unless `[interact] enabled = true`** |
 | `GET /v1/extensions` | — | `{"installed": [{"id", "name"}], "pending_restart"}` |
 | `POST /v1/extensions` | `{"ids": ["…"]}` | Web Store ids, never urls. Installs unpacked; live at the next browser start |
 | `DELETE /v1/extensions/{id}` | — | as `GET` |

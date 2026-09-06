@@ -84,10 +84,12 @@ def test_every_cdp_only_capability_has_a_guard():
     cfg = {"browser": {"kind": "firefox", "debug_port": 9222},
            "screens": [{"name": "left", "position": "", "home_url": "about:blank"},
                        {"name": "right", "position": "", "home_url": "about:blank"}]}
+    # `input` is in neither: it is withheld by config, not by browser kind, and
+    # test_input.py proves that gate. Everything else CDP-only lands here.
     withheld = set(browser.supports({"browser": {"kind": "chromium"}})) - \
         set(browser.supports(cfg))
     assert withheld == {"scroll", "autoscroll", "media", "screens", "window",
-                        "extensions", "screenshot"}
+                        "extensions", "screenshot", "inspect"}
     # `extensions` is the one guarded at the route rather than in browser.py:
     # installing is a filesystem operation, not a browser one, and it is only
     # withheld because --load-extension has no Firefox equivalent. That its
@@ -95,6 +97,8 @@ def test_every_cdp_only_capability_has_a_guard():
     for call in (lambda: browser.scroll(cfg, "left", dy=1),
                  lambda: browser.media(cfg, "left"),
                  lambda: browser.screenshot(cfg, "left"),
+                 lambda: browser.inspect(cfg, "left"),
+                 lambda: browser.input(cfg, "left", [{"do": "click", "x": 1, "y": 1}]),
                  lambda: browser.window(cfg, cfg["screens"][0], "minimized"),
                  lambda: browser.navigate(cfg, "https://x/", "right")):
         with pytest.raises(NotImplementedError):

@@ -51,7 +51,7 @@ CANDIDATES = {
 # in step. Routes that never touch the browser (display, upload) are not listed:
 # they work on every backend, so there is nothing to check.
 _CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window", "extensions",
-             "screenshot")
+             "screenshot", "inspect", "input")
 SUPPORTS = {
     "chromium": ("navigate", *_CDP_ONLY),
     "edge": ("navigate", *_CDP_ONLY),
@@ -61,10 +61,27 @@ SUPPORTS = {
 }
 
 
+def interactive(cfg: dict) -> bool:
+    """Is `POST /v1/input` switched on? Off unless config.toml says otherwise.
+
+    It is the only route that acts *as* whoever the kiosk is logged in as, so it
+    is the one thing here that ships off. Install-time and file-only, in the
+    config the agent cannot write (root:<user> 640) -- a switch the API can turn
+    on for itself is not a switch.
+    """
+    return bool((cfg.get("interact") or {}).get("enabled"))
+
+
 def supports(cfg: dict) -> list[str]:
     # Unknown kinds take the CDP path everywhere else in this file, so they get
     # the CDP answer here too rather than a conservative lie.
-    return list(SUPPORTS.get(cfg["browser"]["kind"], SUPPORTS["chromium"]))
+    names = list(SUPPORTS.get(cfg["browser"]["kind"], SUPPORTS["chromium"]))
+    if not interactive(cfg):
+        # Absent, not merely refused: a client reads `supports` to decide what
+        # to offer, and the web UI hides a control it finds missing. A disabled
+        # agent should look exactly like one that cannot do it.
+        names = [n for n in names if n != "input"]
+    return names
 
 
 def _exe(kind: str, path: str = "") -> str:
@@ -495,6 +512,237 @@ def autoscroll(cfg: dict, screen: str | None, speed: int,
                   "deltaX": 0, "deltaY": speed})
 
 
+# --- input ------------------------------------------------------------------
+# Click and type, for the one thing this display genuinely cannot do otherwise:
+# the Pi has no keyboard, so an expired SSO login or a consent wall is a page
+# nobody can get past (PLAN.md §6 "SSO expiry").
+#
+# Everything here is dispatched into one CDP *target* -- the same connection
+# navigate uses. It reaches that window's renderer and nothing else: it cannot
+# alt-tab, cannot reach the window manager, cannot close the kiosk, and cannot
+# type into any other application. That is the boundary, and it is a property of
+# the transport rather than a rule anyone has to remember.
+
+INPUT_ACTIONS = ("click", "double", "right", "move", "drag", "type", "key", "wait")
+
+# Modifier bits, as CDP wants them.
+_MODIFIERS = {"alt": 1, "ctrl": 2, "control": 2, "meta": 4, "cmd": 4, "shift": 8}
+
+# The named keys worth having: everything a login form or a PDF viewer needs.
+# name -> (windowsVirtualKeyCode, key, text). A single printable character is
+# handled separately; anything else is refused rather than guessed at, because a
+# key that silently does nothing is worse than one that says it is unsupported.
+_KEYS = {
+    "Enter": (13, "Enter", "\r"), "Tab": (9, "Tab", "\t"),
+    "Escape": (27, "Escape", ""), "Backspace": (8, "Backspace", ""),
+    "Delete": (46, "Delete", ""), "Space": (32, " ", " "),
+    "ArrowUp": (38, "ArrowUp", ""), "ArrowDown": (40, "ArrowDown", ""),
+    "ArrowLeft": (37, "ArrowLeft", ""), "ArrowRight": (39, "ArrowRight", ""),
+    "Home": (36, "Home", ""), "End": (35, "End", ""),
+    "PageUp": (33, "PageUp", ""), "PageDown": (34, "PageDown", ""),
+}
+
+_BUTTONS = {"click": ("left", 1), "double": ("left", 2), "right": ("right", 1)}
+
+# Find an element and give back where to click it. scrollIntoView first: an
+# element below the fold has coordinates outside the viewport, and dispatching a
+# click at those lands on nothing at all while reporting success.
+_FIND_JS = """(() => {
+  const el = document.querySelector(%(selector)s);
+  if (!el) return null;
+  el.scrollIntoView({block: 'center', inline: 'center'});
+  const r = el.getBoundingClientRect();
+  if (r.width < 1 || r.height < 1) return null;
+  return {x: Math.round(r.left + r.width / 2),
+          y: Math.round(r.top + r.height / 2)};
+})()"""
+
+
+def _mouse(call, kind: str, x: int, y: int, clicks: int = 1,
+           button: str = "left") -> None:
+    call("Input.dispatchMouseEvent",
+         {"type": kind, "x": x, "y": y, "button": button, "clickCount": clicks})
+
+
+def _find(call, selector: str) -> tuple[int, int]:
+    at = _evaluate(call, _FIND_JS % {"selector": json.dumps(selector)}, "find")
+    if not at:
+        raise ValueError(f"no visible element matches {selector!r}")
+    return int(at["x"]), int(at["y"])
+
+
+def _key_spec(key: str, modifiers: list) -> dict:
+    """Resolve a key and its modifiers into CDP's fields, or raise. Pure, so the
+    whole action list can be checked before any of it is dispatched."""
+    bits = 0
+    for m in modifiers:
+        if str(m).lower() not in _MODIFIERS:
+            raise ValueError(f"unknown modifier {m!r}; "
+                             f"have: {', '.join(sorted(set(_MODIFIERS)))}")
+        bits |= _MODIFIERS[str(m).lower()]
+    if key in _KEYS:
+        code, name, text = _KEYS[key]
+    elif len(key) == 1:
+        # A printable character. keyCode is the uppercase form, which is what a
+        # physical keyboard reports and what shortcut handlers match on.
+        code, name, text = ord(key.upper()), key, key
+    else:
+        raise ValueError(f"unknown key {key!r}; a single character, or one of: "
+                         f"{', '.join(sorted(_KEYS))}")
+    # A modified key carries no text: ctrl+a is a shortcut, not the letter "a",
+    # and sending text with it selects all *and* types an "a". Shift is the
+    # exception -- shift+A is genuinely the character.
+    return {"key": name, "windowsVirtualKeyCode": code, "nativeVirtualKeyCode": code,
+            "modifiers": bits, "text": "" if bits & ~8 else text}
+
+
+def _check(a: dict) -> None:
+    """Everything about one action that can be wrong without asking the browser.
+
+    Run over the whole list before any of it executes, because there is no undo:
+    a typo in action 3 must not be discovered after actions 1 and 2 have already
+    clicked something and typed into it. `/v1/extensions` sets the precedent --
+    the caller's typo is total, a runtime failure is per-item.
+    """
+    do = a.get("do")
+    if do not in INPUT_ACTIONS:
+        raise ValueError(f"unknown action {do!r}; have: {', '.join(INPUT_ACTIONS)}")
+    if do in _BUTTONS or do == "move":
+        if not a.get("selector"):
+            _point((a.get("x"), a.get("y")), "x/y")
+    elif do == "drag":
+        _point(a.get("from"), "from")
+        _point(a.get("to"), "to")
+    elif do == "type":
+        if not isinstance(a.get("text"), str) or not a["text"]:
+            raise ValueError("type needs a non-empty text")
+    elif do == "key":
+        _key_spec(str(a.get("key") or ""), list(a.get("modifiers") or []))
+    elif do == "wait":
+        ms = a.get("ms", 0)
+        if not isinstance(ms, int) or isinstance(ms, bool) or not 0 <= ms <= 10_000:
+            raise ValueError(f"wait ms must be an integer 0-10000, got {ms!r}")
+
+
+def _act(call, a: dict) -> dict:
+    """Perform one already-checked action. Returns what is worth reporting."""
+    do = a["do"]
+
+    if do in _BUTTONS:
+        button, clicks = _BUTTONS[do]
+        x, y = _at(call, a)
+        _mouse(call, "mousePressed", x, y, clicks, button)
+        _mouse(call, "mouseReleased", x, y, clicks, button)
+        return {"x": x, "y": y}
+
+    if do == "move":
+        x, y = _at(call, a)
+        _mouse(call, "mouseMoved", x, y)
+        return {"x": x, "y": y}
+
+    if do == "drag":
+        x0, y0 = _point(a.get("from"), "from")
+        x1, y1 = _point(a.get("to"), "to")
+        _mouse(call, "mousePressed", x0, y0)
+        # Intermediate moves, not just press-then-release: HTML5 drag and drop
+        # and every canvas app want to see the pointer travel, and a single jump
+        # is routinely ignored as a stray click.
+        for i in range(1, 6):
+            _mouse(call, "mouseMoved", x0 + (x1 - x0) * i // 5,
+                   y0 + (y1 - y0) * i // 5)
+        _mouse(call, "mouseReleased", x1, y1)
+        return {"x": x1, "y": y1}
+
+    if do == "type":
+        # insertText, not a key event per character: one round trip instead of
+        # two per letter, and it still fires beforeinput/input, which is what a
+        # framework-controlled field actually listens for.
+        call("Input.insertText", {"text": a["text"]})
+        return {}
+
+    if do == "key":
+        spec = _key_spec(str(a.get("key") or ""), list(a.get("modifiers") or []))
+        # Both events, always: a page that sees a key pressed and never released
+        # keeps thinking a modifier is held down.
+        call("Input.dispatchKeyEvent",
+             {"type": "keyDown" if spec["text"] else "rawKeyDown", **spec})
+        call("Input.dispatchKeyEvent", {**spec, "type": "keyUp", "text": ""})
+        return {}
+
+    time.sleep(int(a.get("ms", 0)) / 1000)
+    return {}
+
+
+def _at(call, a: dict) -> tuple[int, int]:
+    """Where an action points: a selector if it has one, else coordinates."""
+    if a.get("selector"):
+        return _find(call, str(a["selector"]))
+    return _point((a.get("x"), a.get("y")), "x/y")
+
+
+def _point(pair, what: str) -> tuple[int, int]:
+    try:
+        x, y = pair
+        x, y = int(x), int(y)
+    except (TypeError, ValueError):
+        raise ValueError(f"{what} must be two numbers, got {pair!r}")
+    if x < 0 or y < 0:
+        raise ValueError(f"{what} must not be negative, got ({x}, {y})")
+    return x, y
+
+
+def input(cfg: dict, screen: str | None, actions: list[dict],
+          deadline: float | None = None) -> list[dict]:
+    """Run `actions` against one screen, in order, over one connection.
+
+    A list rather than a route per verb: a login is click, type, click, type,
+    click, and as five requests that is five websockets to the debug port and
+    five chances to interleave with something else. One request is one
+    connection, one ordering, and one audit record.
+
+    **Stops at the first failure.** Half a login sequence is the dangerous case:
+    if the click that focuses the password box missed, the next action would
+    type the password into whatever does have focus. The result list says which
+    action stopped it.
+
+    `deadline` is a time.monotonic() value. Checked between actions, so a long
+    list cannot hold a threadpool thread indefinitely.
+    """
+    if cfg["browser"]["kind"] == "firefox":
+        # BiDi has input.performActions, so this is unwritten rather than
+        # impossible -- but the Pi runs chromium and the dev box is the only
+        # firefox. Same 501 as scroll and media.
+        raise NotImplementedError(
+            "input needs CDP; use kind = \"chromium\" or \"edge\"")
+    if not actions:
+        raise ValueError("no actions")
+    for i, a in enumerate(actions):
+        try:
+            _check(a)
+        except ValueError as e:
+            raise ValueError(f"action {i}: {e}")    # nothing has run yet
+
+    page = _cdp_page(cfg, screen)
+    results: list[dict] = []
+    with _rpc(page["webSocketDebuggerUrl"]) as call:
+        for a in actions:
+            if deadline is not None and time.monotonic() > deadline:
+                results.append({"do": a["do"], "ok": False, "took_ms": 0,
+                                "error": "deadline exceeded before this action"})
+                break
+            started = time.monotonic()
+            try:
+                extra = _act(call, a)
+            except Exception as e:      # element gone, socket dropped, protocol
+                results.append({"do": a["do"], "ok": False,
+                                "took_ms": int((time.monotonic() - started) * 1000),
+                                "error": str(e)})
+                break                   # never type into whatever has focus now
+            results.append({"do": a["do"], "ok": True, **extra,
+                            "took_ms": int((time.monotonic() - started) * 1000)})
+    return results
+
+
 MEDIA_ACTIONS = ("state", "play", "pause", "toggle", "mute", "unmute", "seek", "volume")
 
 # Whatever the page is playing, driven through the element itself — there is no
@@ -540,17 +788,9 @@ def media(cfg: dict, screen: str | None = None, action: str = "state",
         raise ValueError(f"action must be one of {', '.join(MEDIA_ACTIONS)}")
     page = _cdp_page(cfg, screen)
     with _rpc(page["webSocketDebuggerUrl"]) as call:
-        r = call("Runtime.evaluate", {
-            "expression": _MEDIA_JS % {"action": json.dumps(action),
-                                       "value": json.dumps(float(value))},
-            "returnByValue": True,
-            # Chromium refuses play() on a page nobody has interacted with, and
-            # nobody ever interacts with a kiosk. This is what a real click gives.
-            "userGesture": True})
-    if r.get("exceptionDetails"):
-        raise RuntimeError(f"media {action} failed: "
-                           f"{r['exceptionDetails'].get('text', 'script error')}")
-    return r.get("result", {}).get("value")
+        return _evaluate(call, _MEDIA_JS % {"action": json.dumps(action),
+                                            "value": json.dumps(float(value))},
+                         f"media {action}")
 
 
 def _viewport(call) -> tuple[int, int]:
@@ -620,6 +860,85 @@ def screenshot(cfg: dict, screen: str | None = None, region: dict | None = None,
             # Straight off the target listing, so this costs no extra round
             # trip: what the page says it is, beside the picture of it.
             "url": page.get("url") or "about:blank", "title": page.get("title") or ""}
+
+
+# Structured page state, for a caller that cannot look at a picture. A
+# screenshot answers "what is wrong" for a person; this answers it for eve, for
+# update.sh, and for anything deciding whether to retry.
+#
+# Deliberately reports no field *values*. Naming a password box is how a caller
+# knows where to type; handing back what is in it turns a diagnostic route into
+# a credential leak.
+_INSPECT_JS = """(() => {
+  const visible = el => {
+    const r = el.getBoundingClientRect();
+    return r.width >= 1 && r.height >= 1;
+  };
+  const label = el =>
+    (el.labels && el.labels[0] && el.labels[0].textContent) ||
+    el.getAttribute('aria-label') || el.placeholder || el.name || '';
+  // Only selectors that will still resolve on the next call: an id or a name.
+  // An nth-child path would be stable for exactly as long as the page is.
+  const selector = el =>
+    el.id ? '#' + CSS.escape(el.id)
+    : el.name ? el.tagName.toLowerCase() + '[name="' + CSS.escape(el.name) + '"]'
+    : '';
+  const fields = [...document.querySelectorAll(
+      'input, textarea, select, button, [role=button]')]
+    .filter(visible)
+    .slice(0, 40)                       // a long form is not worth a long reply
+    .map(el => ({selector: selector(el), tag: el.tagName.toLowerCase(),
+                 type: (el.getAttribute('type') || '').toLowerCase(),
+                 label: String(label(el)).trim().slice(0, 80)}))
+    .filter(f => f.selector);
+  return {
+    title: document.title,
+    ready_state: document.readyState,
+    // Chromium's own error page renders perfectly and answers /v1/status, so
+    // "Aw, Snap!" and ERR_CONNECTION_REFUSED look like success everywhere else.
+    error_page: !!document.querySelector('#main-frame-error'),
+    has_media: !!document.querySelector('video, audio'),
+    scroll_y: Math.round(window.scrollY || 0),
+    scroll_height: Math.round(document.documentElement.scrollHeight || 0),
+    fields: fields,
+  };
+})()"""
+
+
+def inspect(cfg: dict, screen: str | None = None) -> dict:
+    """What one screen's page says about itself. No image, no field values.
+
+    The machine-readable half of `screenshot`: a program cannot look at a
+    picture, and `scroll_y` moving is the only proof an autoscroll is running.
+    """
+    if cfg["browser"]["kind"] == "firefox":
+        raise NotImplementedError(
+            "inspect needs CDP; use kind = \"chromium\" or \"edge\"")
+    page = _cdp_page(cfg, screen)
+    with _rpc(page["webSocketDebuggerUrl"]) as call:
+        state = _evaluate(call, _INSPECT_JS, "inspect")
+    url = page.get("url") or "about:blank"
+    out = {"url": url, **(state or {})}
+    # A page that failed to load may have no document to ask, so the url is the
+    # second witness -- Chromium parks these on chrome-error://chromewebdata/.
+    out["error_page"] = bool(out.get("error_page")) or url.startswith("chrome-error")
+    return out
+
+
+def _evaluate(call, expression: str, what: str):
+    """Run a page script and return its value, or raise with the page's own
+    message. Every JS-bearing route funnels through here so a thrown TypeError
+    surfaces as a failure rather than as a silent None."""
+    r = call("Runtime.evaluate", {"expression": expression, "returnByValue": True,
+                                  # Chromium refuses play(), and some focus
+                                  # handling, on a page nobody has interacted
+                                  # with -- and nobody ever interacts with a
+                                  # kiosk. This is what a real click gives.
+                                  "userGesture": True})
+    if r.get("exceptionDetails"):
+        raise RuntimeError(
+            f"{what} failed: {r['exceptionDetails'].get('text', 'script error')}")
+    return r.get("result", {}).get("value")
 
 
 def _clip(region: dict | None, vw: int, vh: int) -> tuple[int, int, int, int]:

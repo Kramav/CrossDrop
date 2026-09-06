@@ -54,7 +54,16 @@
      pictures of the page before it. Shown dimmed rather than removed: the
      comparison is usually the thing you wanted. */
   #shots.stale img { opacity: .4; filter: grayscale(.5); }
+  /* Armed for input: the picture is in CSS pixels, so where you click on it is
+     where the click lands on the page. Nothing else in the UI is a target. */
+  #shots.live img { cursor: crosshair; }
+  #shots.live img:hover { outline: 2px solid currentColor; outline-offset: 2px; }
   #looknote { font-size: .8rem; opacity: .7; }
+  #typebox { display: flex; gap: .4rem; align-items: center; margin-top: .5rem; }
+  #typebox input[type=text], #typebox input[type=password] { flex: 1; min-width: 0;
+    padding: .4rem; font: inherit; }
+  #typebox label { font-size: .8rem; opacity: .7; display: flex; gap: .25rem;
+                   align-items: center; }
   #status { opacity: .7; word-break: break-all; min-height: 1.5em; }
   kbd { font: .8em ui-monospace, monospace; border: 1px solid var(--line);
         border-bottom-width: 2px; border-radius: .3rem; padding: 0 .3em; }
@@ -158,6 +167,16 @@
     <span id="looknote"></span>
   </div>
   <div id="shots"></div>
+  <!-- Only when the agent has [interact] enabled. Clicking the picture clicks
+       the page: the capture is pinned to CSS pixels, so the two coordinate
+       spaces are the same one. -->
+  <div id="typebox" hidden>
+    <input id="typed" type="text" placeholder="type into the focused field…"
+           autocomplete="off" spellcheck="false">
+    <label><input id="hide" type="checkbox"> hide</label>
+    <button type="button" id="sendtext">Type</button>
+    <button type="button" id="enter" title="Press Enter">⏎</button>
+  </div>
 </fieldset>
 
 <p id="status" role="status" aria-live="polite">…</p>
@@ -284,6 +303,20 @@ function send(file) {
 // expired login and a crashed tab all look like success from everywhere else on
 // this page; this is the one control that shows you.
 
+// Where on the *page* a click on the *picture* landed. Its own function with no
+// DOM in it because getting this wrong misses every target by a constant factor
+// and looks exactly like the click never arriving — see tests/test_web.py.
+//
+// `rect` is where the image ended up on screen after CSS shrank it to the
+// column; `shot.width/height` are the capture's own pixels, which are CSS
+// pixels of the remote page because the capture is pinned to scale 1.
+function imagePoint(rect, shot, clientX, clientY) {
+  return {
+    x: Math.round((clientX - rect.left) * shot.width / rect.width),
+    y: Math.round((clientY - rect.top) * shot.height / rect.height),
+  };
+}
+
 // createElement + textContent, never innerHTML: the title comes off an
 // arbitrary web page, and this page holds the agent token. A page titled
 // `<img onerror=…>` must be a caption, not script.
@@ -293,6 +326,14 @@ function shotFigure(s) {
   img.src = `data:image/${s.format};base64,${s.image}`;
   img.alt = `${s.screen}: ${s.title || s.url}`;
   img.loading = "lazy";
+  // Click the picture, click the page. The capture is pinned to scale 1, so
+  // image pixels are CSS pixels and the only conversion left is however much
+  // the browser shrank it to fit this column.
+  if (can("input")) img.onclick = e => {
+    const p = imagePoint(e.currentTarget.getBoundingClientRect(), s,
+                         e.clientX, e.clientY);
+    clickAt(s.screen, p.x, p.y);
+  };
   const save = document.createElement("a");
   save.href = img.src;
   save.download = `${s.screen}.${s.format === "jpeg" ? "jpg" : s.format}`;
@@ -303,30 +344,45 @@ function shotFigure(s) {
   return fig;
 }
 
-function look() {
+// The screens the pictures on the page are of. Input aims at these, not at the
+// armed target: you click what you are looking at.
+let shown = [];
+
+function shotScreens() {
+  if (shown.length) return shown;
   // "all" is a client-side fan-out: the route is one request, one picture, so
   // asking it for "all" is a 404. Doing it here keeps the server's contract
   // simple and still shows a two-monitor wall both of its screens.
-  const wanted = target === "all"
-    ? screens.map(s => s.name)
-    : [target || (screens[0] || {}).name];
-  return act(async () => {
-    $("#shots").replaceChildren();
-    $("#shots").classList.remove("stale");
-    $("#looknote").textContent = "…";
-    // Sequential on purpose. Each capture is a CDP round trip plus a PNG encode
-    // on a Pi that is already busy rendering the page being captured.
-    for (const name of wanted) {
-      $("#shots").append(shotFigure(await api("/v1/screenshot", { screen: name })));
-    }
-    $("#lookclear").hidden = false;
-    $("#looknote").textContent = "as of " + new Date().toLocaleTimeString();
-  });
+  return (target === "all" ? screens.map(s => s.name)
+                           : [target || (screens[0] || {}).name]).filter(Boolean);
+}
+
+async function lookAt(names) {
+  $("#shots").replaceChildren();
+  $("#shots").classList.remove("stale");
+  $("#looknote").textContent = "…";
+  // Sequential on purpose. Each capture is a CDP round trip plus a PNG encode
+  // on a Pi that is already busy rendering the page being captured.
+  for (const name of names) {
+    $("#shots").append(shotFigure(await api("/v1/screenshot", { screen: name })));
+  }
+  shown = names;
+  $("#shots").classList.toggle("live", can("input"));
+  $("#typebox").hidden = !can("input");
+  $("#lookclear").hidden = false;
+  $("#looknote").textContent = "as of " + new Date().toLocaleTimeString();
+}
+
+function look() {
+  shown = [];                             // re-read the armed screen
+  return act(() => lookAt(shotScreens()));
 }
 
 function clearShots() {
   $("#shots").replaceChildren();          // and let the data: urls go
-  $("#shots").classList.remove("stale");
+  $("#shots").classList.remove("stale", "live");
+  shown = [];
+  $("#typebox").hidden = true;
   $("#lookclear").hidden = true;
   $("#looknote").textContent = "";
 }
@@ -335,6 +391,39 @@ function markStale() {
   if (!$("#shots").children.length) return;
   $("#shots").classList.add("stale");
   $("#looknote").textContent = "before your last action — Look again";
+}
+
+// --- input ------------------------------------------------------------------
+// Only present when the agent has [interact] enabled; `supports` says so, and
+// drawCapabilities() hides the lot when it does not.
+
+// Every input goes out with a fresh capture after it, so you see the caret land
+// and the form fill in. That is one picture per deliberate action, not a timer.
+async function inputThen(screen, actions) {
+  return act(async () => {
+    const r = await api("/v1/input", { screen, actions });
+    if (!r.ok) {
+      const bad = r.results[r.results.length - 1] || {};
+      throw new Error(`${bad.do || "action"}: ${bad.error || "failed"}`);
+    }
+    await lookAt([screen]);
+  });
+}
+
+const clickAt = (screen, x, y) =>
+  inputThen(screen, [{ do: "click", x, y }]);
+
+function sendTyped(withEnter) {
+  const text = $("#typed").value;
+  if (!text && !withEnter) return;
+  const screen = shotScreens()[0];
+  if (!screen) return;
+  const actions = text ? [{ do: "type", text }] : [];
+  if (withEnter) actions.push({ do: "key", key: "Enter" });
+  // Cleared straight away, and never stored: this is where a password gets
+  // typed, and it should not survive the request that sent it.
+  $("#typed").value = "";
+  return inputThen(screen, actions);
 }
 
 // Hide what this browser will only 501 on, and say so once rather than letting
@@ -351,6 +440,13 @@ function drawCapabilities(kind) {
   $("#extbox").hidden = !can("extensions");
 
   $("#look-box").hidden = !can("screenshot");
+  // Input is withheld by config rather than by browser kind, so it is left out
+  // of the "this display runs firefox" explanation below — an agent with
+  // [interact] off is not missing a browser feature, it is switched off.
+  if (!can("input")) {
+    $("#typebox").hidden = true;
+    $("#shots").classList.remove("live");
+  }
 
   const missing = ["scroll", "autoscroll", "media", "screens", "window",
                    "extensions", "screenshot"].filter(f => !can(f));
@@ -499,6 +595,15 @@ $("#full").onclick = () => act(() => api("/v1/window", { state: "fullscreen" }))
 
 $("#look").onclick = look;
 $("#lookclear").onclick = clearShots;
+$("#sendtext").onclick = () => sendTyped(false);
+$("#enter").onclick = () => sendTyped(true);
+// Enter in the box types the text *and* presses Enter on the page, which is
+// what submitting a login form is.
+$("#typed").onkeydown = e => { if (e.key === "Enter") sendTyped(true); };
+// A password typed into a visible box in an office is the obvious hazard, and
+// the box is not something we can know the shape of in advance.
+$("#hide").onchange = e =>
+  $("#typed").type = e.target.checked ? "password" : "text";
 
 // Guarded here rather than at each caller: this covers the four buttons and the
 // six keyboard bindings, and a key still works while the buttons are hidden.

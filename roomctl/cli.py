@@ -45,6 +45,22 @@ def main(argv: list[str] | None = None) -> int:
     shot.add_argument("--format", default="png", choices=["png", "jpeg", "webp"])
     shot.add_argument("--quality", type=int, default=80, help="jpeg/webp only")
 
+    sub.add_parser("inspect", help="what the page says about itself")
+
+    # One verb per subcommand rather than a JSON action list on the command
+    # line: the list is what the *library* is for, and quoting JSON through two
+    # shells is how you end up typing a password into the wrong field.
+    click = sub.add_parser("click", help="click a selector, or an x y")
+    click.add_argument("where", nargs="+", help="a CSS selector, or: X Y")
+    click.add_argument("--double", action="store_true")
+    click.add_argument("--right", action="store_true")
+
+    typ = sub.add_parser("type", help="type text into whatever has focus")
+    typ.add_argument("text")
+
+    press = sub.add_parser("key", help="press a key, e.g. Enter or ctrl+a")
+    press.add_argument("combo", help="Key, or mod+mod+Key")
+
     scroll = sub.add_parser("scroll", help="scroll the page")
     where = scroll.add_mutually_exclusive_group()
     where.add_argument("--down", action="store_true", help="down a screenful (default)")
@@ -99,6 +115,21 @@ def main(argv: list[str] | None = None) -> int:
         r["bytes"] = len(image)
         return r
 
+    def do_click():
+        do = "double" if a.double else "right" if a.right else "click"
+        if len(a.where) == 2 and all(w.lstrip("-").isdigit() for w in a.where):
+            act = {"do": do, "x": int(a.where[0]), "y": int(a.where[1])}
+        elif len(a.where) == 1:
+            act = {"do": do, "selector": a.where[0]}
+        else:
+            raise RuntimeError("click takes a selector, or two numbers: X Y")
+        return roomctl.input([act], a.target, a.screen)
+
+    def do_key():
+        *mods, key = a.combo.split("+")
+        return roomctl.input([{"do": "key", "key": key, "modifiers": mods}],
+                             a.target, a.screen)
+
     def do_scroll():
         if a.top or a.bottom:
             return roomctl.scroll(a.target, a.screen, to="top" if a.top else "bottom")
@@ -115,6 +146,11 @@ def main(argv: list[str] | None = None) -> int:
             "extension": do_extension,
             "window": lambda: roomctl.window(a.state, a.target, a.screen),
             "shot": do_shot,
+            "inspect": lambda: roomctl.inspect(a.target, a.screen),
+            "click": do_click,
+            "type": lambda: roomctl.input([{"do": "type", "text": a.text}],
+                                          a.target, a.screen),
+            "key": do_key,
             "scroll": do_scroll,
             "autoscroll": lambda: roomctl.autoscroll(a.action, a.target, a.screen, a.speed),
             "media": lambda: roomctl.media(a.action, a.target, a.screen, a.value),

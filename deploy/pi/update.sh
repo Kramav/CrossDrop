@@ -85,7 +85,8 @@ systemctl --user restart "$UNIT"
 # This is the check selfcheck cannot do: a real restart, real browser, real
 # socket. Runtime and kiosk regressions only ever show up here.
 TOKEN="$(sed -n 's|^token = "\(.*\)"|\1|p' "$CFG")"
-URL="http://$(tailscale ip -4 | head -1):$PORT/v1/status"
+BASE="http://$(tailscale ip -4 | head -1):$PORT"
+URL="$BASE/v1/status"
 healthy=0
 for _ in $(seq "$VERIFY_SECS"); do
   if curl -fsS -m 3 -H "Authorization: Bearer $TOKEN" "$URL" >/dev/null 2>&1; then
@@ -95,9 +96,50 @@ for _ in $(seq "$VERIFY_SECS"); do
   sleep 1
 done
 
+# --- 6b. and against the wall ----------------------------------------------
+# /v1/status answering proves the agent is up, not that anything is on the
+# monitors: Chromium's own error page renders perfectly and returns a happy 200
+# through every route above. /v1/inspect is the assertion that sees it.
+#
+# Lenient on purpose. A release is rolled back only if the kiosk *reports* an
+# error page. inspect not answering at all -- an older agent, a firefox box, a
+# browser still coming up -- is "cannot tell", and a false rollback on a box
+# with no keyboard is worse than the regression it would be guarding against.
+page_ok=1
+if [ "$healthy" = 1 ]; then
+  for _ in $(seq 15); do
+    body="$(curl -fsS -m 3 -H "Authorization: Bearer $TOKEN" "$BASE/v1/inspect" 2>/dev/null || true)"
+    case "$body" in
+      *'"error_page":false'*) page_ok=1; break ;;
+      *'"error_page":true'*)  page_ok=0 ;;
+      *) break ;;                     # 501, 404, no answer: nothing to judge
+    esac
+    sleep 1
+  done
+  [ "$page_ok" = 1 ] || echo "kiosk is showing a browser error page" >&2
+fi
+
+# What the wall looked like when it went wrong, for whoever reads this later.
+# Diagnostic, never a gate: no pixel heuristic is worth a false rollback here.
+# jpeg because this lands on the SD card, and best-effort because a release
+# broken enough to fail the checks above may not manage a screenshot either.
+snapshot_failure() {
+  local out="$RELEASES/.failed-$TAG.jpg"
+  curl -fsS -m 10 -X POST -H "Authorization: Bearer $TOKEN" \
+       -H 'Content-Type: application/json' -d '{"format":"jpeg","quality":60}' \
+       "$BASE/v1/screenshot" 2>/dev/null \
+    | sed -n 's/.*"image":"\([^"]*\)".*/\1/p' | base64 -d > "$out" 2>/dev/null || true
+  if [ -s "$out" ]; then
+    echo "what the wall was showing: $out" >&2
+  else
+    rm -f "$out"
+  fi
+}
+
 # --- 7. rollback ------------------------------------------------------------
-if [ "$healthy" != 1 ]; then
-  echo "ROLLBACK: $TAG did not answer $URL within ${VERIFY_SECS}s" >&2
+if [ "$healthy" != 1 ] || [ "$page_ok" != 1 ]; then
+  snapshot_failure
+  echo "ROLLBACK: $TAG did not come up healthy at $BASE within ${VERIFY_SECS}s" >&2
   touch "$RELEASES/.failed-$TAG"      # latch, so the timer stops re-trying it
   if [ -n "$PREV" ] && [ -e "$PREV" ]; then
     ln -sfn "$PREV" "$CURRENT"

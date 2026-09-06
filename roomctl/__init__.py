@@ -190,6 +190,35 @@ class Client:
                           json={"screen": screen, "region": region,
                                 "format": format, "quality": quality})
 
+    def inspect(self, screen: str | None = None) -> dict:
+        """What the page says about itself — no image, no field values.
+
+        The one a program wants: `error_page` catches Chromium's own crash and
+        network pages, which render fine and answer `/v1/status` with a 200.
+
+            if c.inspect()["error_page"]:
+                c.reload()
+        """
+        return self._call("GET", "/v1/inspect", params={"screen": screen})
+
+    def input(self, actions: list[dict], screen: str | None = None,
+              deadline_ms: int | None = None) -> dict:
+        """Click, drag, type and press keys, in order, in one request.
+
+        501 unless the agent's config.toml has `[interact] enabled = true` —
+        check `"input" in status()["supports"]` first. Stops at the first
+        failure; `results` says which action, and `ok` is false.
+
+            c.input([{"do": "click", "selector": "#user"},
+                     {"do": "type", "text": user},
+                     {"do": "click", "selector": "#pass"},
+                     {"do": "type", "text": password},
+                     {"do": "key", "key": "Enter"}])
+        """
+        return self._call("POST", "/v1/input",
+                          json={"screen": screen, "actions": actions,
+                                "deadline_ms": deadline_ms})
+
     def scroll(self, screen: str | None = None, dy: int = 600,
                to: str | None = None) -> dict:
         return self._call("POST", "/v1/scroll",
@@ -268,6 +297,20 @@ def screenshot(target: str | None = None, screen: str | None = None,
     """What the screen is actually showing. `image` is base64."""
     with client(target) as c:
         return c.screenshot(screen, region, format, quality)
+
+
+def inspect(target: str | None = None, screen: str | None = None) -> dict:
+    """What the page says about itself — no image, no field values."""
+    with client(target) as c:
+        return c.inspect(screen)
+
+
+def input(actions: list[dict], target: str | None = None,
+          screen: str | None = None, deadline_ms: int | None = None) -> dict:
+    """Click, drag, type and press keys, in order. 501 unless the agent's
+    config.toml has `[interact] enabled = true`."""
+    with client(target) as c:
+        return c.input(actions, screen, deadline_ms)
 
 
 def scroll(target: str | None = None, screen: str | None = None,

@@ -6,7 +6,10 @@ stops working, and nothing in the console says why — so it is exactly the
 regression that survives a careful read.
 """
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -44,3 +47,43 @@ def test_no_timer_fetches_pictures(page):
     timers = re.findall(r"set(?:Interval|Timeout)\(\s*([\w$]+)", html)
     allowed = {"refresh", "tick"}         # status polls; neither captures
     assert set(timers) <= allowed, f"{page.name}: unexpected timer {set(timers) - allowed}"
+
+
+# --- the one piece of page logic worth executing ----------------------------
+# Clicking the screenshot is how a login gets typed into on a box with no
+# keyboard, and the mapping from picture to page is a scale factor: get it wrong
+# and every click misses by a constant, which looks exactly like the click never
+# arriving. Nobody can eyeball a wrong scale factor, so it is run instead.
+
+CASES = [
+    # rect (where CSS put the image), shot (the capture's own pixels), click, expect
+    ("shown at its true size", {"left": 0, "top": 0, "width": 1920, "height": 1080},
+     {"width": 1920, "height": 1080}, (960, 540), (960, 540)),
+    ("halved to fit the column", {"left": 0, "top": 0, "width": 960, "height": 540},
+     {"width": 1920, "height": 1080}, (480, 270), (960, 540)),
+    ("offset down the page", {"left": 100, "top": 200, "width": 960, "height": 540},
+     {"width": 1920, "height": 1080}, (100, 200), (0, 0)),
+    ("bottom-right corner", {"left": 0, "top": 0, "width": 480, "height": 270},
+     {"width": 1920, "height": 1080}, (480, 270), (1920, 1080)),
+    ("a tall portrait monitor", {"left": 10, "top": 10, "width": 270, "height": 480},
+     {"width": 1080, "height": 1920}, (145, 250), (540, 960)),
+]
+
+
+@pytest.mark.parametrize("name,rect,shot,click,expect", CASES,
+                         ids=[c[0] for c in CASES])
+def test_a_click_on_the_picture_maps_onto_the_page(name, rect, shot, click, expect):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("no node")
+    src = re.search(r"function imagePoint\(.*?\n}", (PAGES[-1].parent / "index.html")
+                    .read_text(encoding="utf-8"), re.S)
+    assert src, "imagePoint went missing from index.html"
+    script = (f"{src.group(0)}\n"
+              f"const p = imagePoint({json.dumps(rect)}, {json.dumps(shot)}, "
+              f"{click[0]}, {click[1]});\n"
+              f"console.log(JSON.stringify(p));")
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert (got["x"], got["y"]) == expect
