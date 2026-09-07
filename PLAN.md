@@ -249,6 +249,24 @@ Three checks keep the boundary from eroding by accident, since none of it is enf
 
 *Accept (unrun on hardware):* with `[interact] enabled`, put a login page on the wall, press Look, click the username box in the picture, type, and watch the next capture show the caret in the right field.
 
+**v1.1.9 — the controller became a viewport.** Done, and no server change: every route it calls already existed.
+
+The page was a form — a drop zone, then stacked fieldsets of buttons, and the screenshot bolted on underneath as one more panel. Once the capture existed that ordering was backwards: the picture of the wall is the thing you look at, and everything else is chrome around it. So the page is now an app shell — top bar, full-bleed capture, right-hand rail, bottom input bar — and the screenshot is the page rather than a feature of it.
+
+- **The capture is the drop target.** Drop a file on the picture of the screen and it goes on that screen.
+- **The rail** holds what you press repeatedly: scroll, auto-scroll and speed, window, display power. A column rather than a floating dock, because permanently covering a strip of the screen you are trying to read is the opposite of the point — the media dock may overlay only because it is there just while something plays.
+- **`Ctrl-K` / `⋮`** is one filterable command list for everything else. Commands carry a `when` guard, so a firefox agent never sees the ones it would 501 on — the same `supports` mechanism, expressed as a list instead of a dozen `hidden` assignments.
+- **The rail and the palette call the same named `ACT.*` functions.** A button that drifts from its palette entry is a bug nobody notices until the two disagree.
+- Auto-scroll and display-power buttons read their state from `/v1/status`, never from a local toggle: the 04:00 restart drops a running autoscroll, and a latched button would go on claiming it.
+
+Three bugs found while building it, each worth more than the feature that surfaced it:
+
+- **Fresh captures were marked stale instantly.** `markStale()` was hooked into `req()` on "any non-GET" — but non-GET is not the same as changed-something. `probeMedia()` reads the player with a POST and runs on the 15 s poll, so every capture was stale the moment it was taken and again every fifteen seconds. Moved to `act()`, which wraps exactly the user-initiated actions.
+- **The picture blinked on every swap.** Not the DOM clearing — the browser decoding the data url *after* the `<img>` was already in the document. `await img.decode()` before insertion, `aspect-ratio` to reserve the box, and `loading="lazy"` dropped: the bytes are already in the reply, so lazy only deferred the decode being avoided.
+- **Captures landed mid-load.** `readyState: "complete"` means sub-resources loaded, not painted — and it reads `complete` for the *old* document until a navigation commits, so polling too early got a confident answer about the wrong page. Three constants now: a wait before asking, a grace after it reports complete, and a ceiling.
+
+`tests/test_web.py` grew with it: the id check now counts a CSS reference as a reference (a layout hook used only by the stylesheet is still used), the timer rule holds `setInterval` to a fixed list *and* checks no recurring callback reaches `/v1/screenshot`, and `imagePoint()` — picture coordinates to page coordinates — runs under node across five geometries, because a wrong scale factor misses every target by a constant and looks exactly like the click never arriving.
+
 **Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**
 
 **Future considerations.** Deliberately deferred, each with the trigger that should bring it back. Not a wish list — if the trigger doesn't happen, the item is correct as unbuilt.
@@ -356,6 +374,16 @@ per-tick websocket (see Phase 7a).
   boundary ever widens beyond "the tailnet, no hostile device on it" — the
   honest fix then is an allowlist of ids in `config.toml`, which the agent
   cannot write.
+
+**v1.2.x — which window is which.** Done. `_cdp_page()` mapped screens to windows by *position in `/json`'s list*. That is the order the windows were opened in — but only while the list holds nothing but those windows, and a browser with extensions loaded does not guarantee it. One stray page target moved every screen one place along, silently, and the wrong mapping was then written into `_targets` so it stayed wrong until a restart. Tolerable when the worst case was a navigate on the wrong monitor; not tolerable now that the same path carries a click and a typed password.
+
+Three changes, in order of how much they do:
+
+- **Drop the targets no window of ours could be showing** — `devtools://` and `chrome-extension://`, and *only* those, because `/v1/navigate` allows http and https alone and `home_url` is validated the same way, so nothing can steer a kiosk window there. `chrome-error://` is deliberately kept: that is our own window having failed to load, which is the exact state `/v1/inspect` reports and `update.sh` rolls back on, so filtering it would lose the window at the moment it most needs describing. (Written the other way first, and `tests/test_input.py` caught it.)
+- **Index only while the counts agree.** Same window count as screens, and list order is meaningful; otherwise it is not, and position in a list is no basis for deciding which monitor gets the next keystroke.
+- **Otherwise ask the browser where its windows actually are** (`Browser.getWindowForTarget`) and match against the screen's own coordinates — nearest, since a compositor may nudge a window a few pixels. Nothing to match on means a `RuntimeError` the caller sees as a 503, and **nothing is cached**: the old failure was not picking wrong once, it was recording the wrong answer and repeating it unasked.
+
+`tests/test_screens.py` covers all of it; each of the nine fails against the old implementation.
 
 **Still open.**
 

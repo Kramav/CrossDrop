@@ -82,23 +82,47 @@ Right-click for screen, Home, Reload, Display off. Reads the same
 powershell -ExecutionPolicy Bypass -WindowStyle Hidden -File deploy\windows\roomtray.ps1
 ```
 
-**Web UI** — the drop zone the agent serves, and the only place with scroll
-controls and saved links. Open it as its own window:
+**Web UI** — the controller the agent serves, and the only place that shows you
+the wall rather than describing it. Open it as its own window:
 
 ```powershell
 msedge.exe --app=http://<pi-tailnet-ip>:8080/
 ```
 
-Paste a link or drag a file (`.pdf .png .jpg .jpeg .gif .webp .txt`, plus
-`.mp4 .webm .mp3 .m4a .wav`, 25 MB cap)
-and the display follows. Paste the agent token into **Settings** on first run;
-it stays in that browser.
+```
+┌ Acer │ Samsung │ Both ──  https://… ──[Show]──  Home  Reload  ⋮ ┐
+│ ┌──────────────────────────────────────────────┐  ┌────────┐   │
+│ │ ■ ACER · 2545×1440 · 8:13:13 PM          ⟳  │  │ SCROLL │   │
+│ │                                              │  │ ⤒ ▲▼ ⤓ │   │
+│ │            the capture, full-bleed           │  │   ⏬   │   │
+│ │                                              │  │ WINDOW │   │
+│ │       ┌ ⏪ ⏸ ⏩ 4:12/9:30 🔊 ──▭─ ┐         │  │  ⊟ ⛶   │   │
+│ └───────┴─────────────────────────────┴────────┘  │DISPLAY◐│   │
+│ [Type into the focused field…] □hide [Send]       ↑↓ PgDn ⌃K   │
+└────────────────────────────────────────────────────────────────┘
+```
+
+- **The capture is the page.** Drop a file or paste a link anywhere on it
+  (`.pdf .png .jpg .jpeg .gif .webp .txt`, plus `.mp4 .webm .mp3 .m4a .wav`,
+  25 MB cap) and the display follows. Press **⟳** for a fresh one; it is never
+  on a timer.
+- **Click the picture to click the page**, when the agent has `[interact]`
+  enabled. The badge says so in words when it is armed.
+- **The rail** is everything that moves the page without replacing it: scroll,
+  auto-scroll and its speed, set the kiosk aside, display power.
+- **The dock** appears over the capture by itself whenever the screen actually
+  has a video or audio on it, and goes away again when it does not.
+- **<kbd>Ctrl</kbd><kbd>K</kbd>** is everything else — saved links, send a file,
+  settings — as one list you filter by typing. The **⋮** button opens the same
+  thing.
+
+Paste the agent token into **Settings** on first run; it stays in that browser.
 
 Both the web UI and the tray hide what the agent's browser can't do, from
-`supports` in `/v1/status` — on a Firefox agent the scroll controls, the
-playback bar and the screen picker are simply absent, with one line saying why,
-rather than present and returning 501. An agent too old to report `supports`
-gets the old behaviour: everything shown.
+`supports` in `/v1/status` — on a Firefox agent the scroll rail, the playback
+dock, the capture and the screen picker are simply absent, with one line saying
+why, rather than present and returning 501. An agent too old to report
+`supports` gets the old behaviour: everything shown.
 
 **Settings** also holds the screens editor — each monitor's name, home URL,
 position and size, applied live with no restart, so moving a window between

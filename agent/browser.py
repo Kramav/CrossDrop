@@ -9,6 +9,7 @@ Both are JSON-RPC over one websocket, so `_rpc` serves both.
 import contextlib
 import itertools
 import json
+import logging
 import os
 import shutil
 import signal
@@ -21,6 +22,12 @@ from pathlib import Path
 import websocket
 
 from . import extensions
+
+# A child of app.py's "room" logger, so it inherits the level ROOM_LOG sets and
+# lands in the same journal. The print()s elsewhere in this file predate that and
+# are startup notices rather than diagnostics; this one is something you go
+# looking for after a screen has behaved oddly.
+log = logging.getLogger("room.browser")
 
 CANDIDATES = {
     "firefox": [
@@ -1015,26 +1022,98 @@ _targets: dict[str, str] = {}
 _loaded: list[str] = []
 
 
+# Targets that are pages but can never be one of *our* windows. Both of these
+# are type "page" in /json, and each one shifts the index of everything after
+# it -- which mattered because the fallback below used to map screens to windows
+# by position in this list, so one stray target silently moved every screen one
+# place along, then cached the wrong answer so it stayed wrong.
+#
+# Only these two, and only because a kiosk window provably cannot be showing
+# them: /v1/navigate allows http and https alone, and `home_url` is validated
+# the same way, so nothing can steer a window here.
+#
+# `chrome-error://` is deliberately NOT in this list, though it looks like it
+# belongs: that is our own window having failed to load, which is exactly the
+# state /v1/inspect exists to report and update.sh rolls a release back on.
+# Filtering it would lose the window at the moment it most needs describing.
+# `chrome://` is out for a weaker version of the same reason -- a crash-restored
+# new-tab page can be a real window, and dropping it would strand the screen.
+_NOT_OURS = ("devtools://", "chrome-extension://")
+
+
+def _pages(port: int) -> list[dict]:
+    """The kiosk's own content targets, in the browser's own order."""
+    return [t for t in _get(port, "/json")
+            if t.get("type") == "page"
+            and not str(t.get("url") or "").startswith(_NOT_OURS)]
+
+
 def _cdp_page(cfg: dict, screen: str | None = None) -> dict:
     """The page target belonging to `screen`."""
-    port = cfg["browser"]["debug_port"]
-    pages = [t for t in _get(port, "/json") if t.get("type") == "page"]
+    pages = _pages(cfg["browser"]["debug_port"])
     if not pages:
         raise RuntimeError("browser has no page target")
 
-    names = [s["name"] for s in screens(cfg)]
-    name = screen or names[0]
+    scr = screens(cfg)
+    name = screen or scr[0]["name"]
     tid = _targets.get(name)
     for p in pages:
         if p["id"] == tid:
             return p
 
-    # No mapping, or the window was closed and reopened, or we are driving a
-    # browser we did not launch. Fall back to config order -- that is the order
-    # the windows were opened in -- and remember what we picked.
-    i = names.index(name) if name in names else 0
-    page = pages[i] if i < len(pages) else pages[0]
+    page = _identify(cfg, name, scr, pages)
     _targets[name] = page["id"]
+    return page
+
+
+def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
+    """Which window belongs to `name`, when there is no mapping yet.
+
+    Reached on the first call after a launch, after a window has been closed and
+    reopened, and whenever we are driving a browser we did not start.
+
+    List order is the answer only when it can be: it is the order the windows
+    were opened in, so it holds exactly while there are as many windows as
+    screens. When there are not, position in a list means nothing at all, and
+    guessing sends the next click -- or the next typed password -- to whichever
+    monitor happened to sort into that slot.
+    """
+    names = [s["name"] for s in scr]
+    i = names.index(name) if name in names else 0
+    if len(scr) == 1:
+        return pages[0]                     # nothing to get wrong
+    if len(pages) == len(scr):
+        return pages[i]
+
+    # Ask the browser where its windows actually are, and match that against the
+    # screen's own coordinates -- the only thing here that is genuinely about
+    # *which monitor*, rather than about the order of a list.
+    want = (scr[i].get("position") or "").strip()
+    if not want:
+        raise RuntimeError(
+            f"{len(pages)} windows for {len(scr)} screens, and {name!r} has no "
+            f"position to identify it by; restart the agent to reopen its windows")
+    x, y = _pair(want, ",", "position")
+    port = cfg["browser"]["debug_port"]
+    placed = []
+    with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
+        for p in pages:
+            with contextlib.suppress(Exception):    # a target that just closed
+                b = call("Browser.getWindowForTarget",
+                         {"targetId": p["id"]}).get("bounds") or {}
+                if "left" in b and "top" in b:
+                    placed.append((abs(b["left"] - x) + abs(b["top"] - y), p))
+    if not placed:
+        raise RuntimeError(
+            f"{len(pages)} windows for {len(scr)} screens and none would say "
+            f"where it is; cannot tell which one is {name!r}")
+    # Nearest, not exact: a compositor is entitled to adjust a window by a few
+    # pixels, and the nearest window to where this screen is supposed to be
+    # beats the nth entry of a list that no longer lines up.
+    placed.sort(key=lambda t: t[0])
+    off, page = placed[0]
+    log.warning("screen %r: %d windows for %d screens, matched %s by position "
+                "(%d px from %s)", name, len(pages), len(scr), page["id"], off, want)
     return page
 
 

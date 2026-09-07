@@ -81,6 +81,127 @@ def test_lost_window_falls_back_to_config_order(cdp):
     assert browser._targets["right"] == "T2"
 
 
+# --- which window is which --------------------------------------------------
+# The fallback maps screens to windows by position in /json's list. That is the
+# order the windows were opened in -- but only while the list holds nothing but
+# those windows, and a browser with extensions loaded does not guarantee that.
+
+def with_pages(monkeypatch, pages, bounds=None):
+    """Re-stub /json with `pages`, and optionally give each window a position."""
+    browser._targets.clear()
+    monkeypatch.setattr(browser, "_get", lambda port, path:
+                        pages if path == "/json"
+                        else {"webSocketDebuggerUrl": "ws://browser"})
+    seen = []
+
+    @contextlib.contextmanager
+    def rpc(ws_url):
+        def call(method, params=None):
+            seen.append((ws_url, method, params or {}))
+            tid = (params or {}).get("targetId")
+            return {"windowId": 7, "bounds": (bounds or {}).get(tid, {})}
+        yield call
+
+    monkeypatch.setattr(browser, "_rpc", rpc)
+    return seen
+
+
+def test_an_extension_page_does_not_shift_every_screen(monkeypatch):
+    """The bug. A loaded extension's own page is type "page" in /json, so it
+    landed in the list ahead of the kiosk windows and moved each screen one
+    place along -- silently, and then cached, so it stayed wrong. On a display
+    that can now be clicked and typed into, that is a password going to the
+    wrong monitor."""
+    with_pages(monkeypatch, [
+        {"type": "page", "id": "EXT", "url": "chrome-extension://abc/options.html",
+         "webSocketDebuggerUrl": "ws://ext"},
+        *PAGES,
+    ])
+    assert browser._cdp_page(make_cfg(), "left")["id"] == "T1"
+    assert browser._cdp_page(make_cfg(), "right")["id"] == "T2"
+
+
+@pytest.mark.parametrize("url", [
+    "devtools://devtools/bundled/inspector.html",
+    "chrome-extension://abc/options.html",
+])
+def test_a_target_no_window_of_ours_could_be_showing_is_dropped(monkeypatch, url):
+    """Only these two. /v1/navigate allows http and https alone and `home_url`
+    is validated the same way, so nothing can steer a kiosk window here."""
+    with_pages(monkeypatch, [{"type": "page", "id": "X", "url": url,
+                              "webSocketDebuggerUrl": "ws://x"}, *PAGES])
+    assert browser._cdp_page(make_cfg(), "left")["id"] == "T1"
+
+
+def test_a_failed_page_is_still_our_window(monkeypatch):
+    """chrome-error:// looks like one of the browser's own pages and is not: it
+    is our window having failed to load, which is the exact state /v1/inspect
+    reports and update.sh rolls a release back on. Filtering it would lose the
+    window at the moment it most needs describing."""
+    error = {"type": "page", "id": "T1", "url": "chrome-error://chromewebdata/",
+             "webSocketDebuggerUrl": "ws://one"}
+    with_pages(monkeypatch, [error, PAGES[1]])
+    cfg = make_cfg()
+    assert browser._cdp_page(cfg, "left")["id"] == "T1"
+    assert browser._cdp_page(cfg, "right")["id"] == "T2"
+
+
+def test_a_single_screen_takes_whatever_is_there(monkeypatch):
+    """One screen cannot be sent to the wrong monitor, so an unexpected extra
+    page must not turn a working display into an error."""
+    with_pages(monkeypatch, [*PAGES])
+    cfg = make_cfg(names=("main",))
+    assert browser._cdp_page(cfg)["id"] == "T1"
+
+
+def test_an_unmatched_count_is_resolved_by_where_the_window_is(monkeypatch):
+    """Three windows, two screens: list order means nothing now, so ask the
+    browser where each window actually is."""
+    third = {"type": "page", "id": "T3", "url": "http://three/",
+             "webSocketDebuggerUrl": "ws://three"}
+    seen = with_pages(monkeypatch, [third, *PAGES], bounds={
+        "T3": {"left": 9000, "top": 0}, "T1": {"left": 0, "top": 0},
+        "T2": {"left": 1366, "top": 0}})
+    cfg = make_cfg()
+    cfg["screens"][0]["position"] = "0,0"
+    cfg["screens"][1]["position"] = "1366,0"
+    assert browser._cdp_page(cfg, "right")["id"] == "T2"
+    assert browser._cdp_page(cfg, "left")["id"] == "T1"
+    assert any(m == "Browser.getWindowForTarget" for _, m, _ in seen)
+
+
+def test_a_window_a_few_pixels_off_still_matches(monkeypatch):
+    """A compositor is entitled to nudge a window; nearest beats exact."""
+    third = {"type": "page", "id": "T3", "url": "http://three/",
+             "webSocketDebuggerUrl": "ws://three"}
+    with_pages(monkeypatch, [third, *PAGES], bounds={
+        "T3": {"left": 0, "top": 0}, "T1": {"left": 2, "top": 1},
+        "T2": {"left": 1360, "top": 4}})
+    cfg = make_cfg()
+    cfg["screens"][1]["position"] = "1366,0"
+    assert browser._cdp_page(cfg, "right")["id"] == "T2"
+
+
+def test_an_unmatched_count_with_nothing_to_match_on_says_so(monkeypatch):
+    """Refusing beats guessing: the caller gets a 503 it can read, instead of a
+    click landing on the other monitor."""
+    with_pages(monkeypatch, [{"type": "page", "id": "T3", "url": "http://three/",
+                              "webSocketDebuggerUrl": "ws://three"}, *PAGES])
+    with pytest.raises(RuntimeError, match="position"):
+        browser._cdp_page(make_cfg(), "right")      # no position configured
+    assert "right" not in browser._targets          # and nothing wrong is cached
+
+
+def test_a_guess_is_never_cached(monkeypatch):
+    """The old failure was not just picking wrong once -- it wrote the wrong
+    mapping into _targets, so every later call repeated it without asking."""
+    with_pages(monkeypatch, [{"type": "page", "id": "T3", "url": "http://three/",
+                              "webSocketDebuggerUrl": "ws://three"}, *PAGES])
+    with contextlib.suppress(RuntimeError):
+        browser._cdp_page(make_cfg(), "left")
+    assert browser._targets == {}
+
+
 # --- scroll -----------------------------------------------------------------
 
 def wheel(cdp):
