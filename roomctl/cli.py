@@ -95,14 +95,29 @@ def main(argv: list[str] | None = None) -> int:
             return c.extensions(remove=a.what[0])
         return c.extensions()
 
+    # Argument checks that need no connection, run before there is one. Inside
+    # the client block they were reached only on a box that could already
+    # resolve a target, so `click 1 2 3` on one that cannot -- CI, a fresh
+    # checkout -- complained about a missing targets.toml instead of the
+    # arguments, which are the thing the user got wrong.
+    def parse_region():
+        if not a.region:
+            return None
+        try:
+            x, y, w, h = (int(v) for v in a.region.split(","))
+        except ValueError:
+            raise RuntimeError(f"--region must be x,y,width,height, got {a.region!r}")
+        return {"x": x, "y": y, "width": w, "height": h}
+
+    def parse_click():
+        do = "double" if a.double else "right" if a.right else "click"
+        if len(a.where) == 2 and all(w.lstrip("-").isdigit() for w in a.where):
+            return {"do": do, "x": int(a.where[0]), "y": int(a.where[1])}
+        if len(a.where) == 1:
+            return {"do": do, "selector": a.where[0]}
+        raise RuntimeError("click takes a selector, or two numbers: X Y")
+
     def do_shot(c):
-        region = None
-        if a.region:
-            try:
-                x, y, w, h = (int(v) for v in a.region.split(","))
-            except ValueError:
-                raise RuntimeError(f"--region must be x,y,width,height, got {a.region!r}")
-            region = {"x": x, "y": y, "width": w, "height": h}
         r = c.screenshot(a.screen, region, a.format, a.quality)
         # The image never goes to stdout. Every other command prints the agent's
         # reply verbatim so it pipes into jq, and a megabyte of base64 would
@@ -114,16 +129,6 @@ def main(argv: list[str] | None = None) -> int:
             r["written"] = a.out
         r["bytes"] = len(image)
         return r
-
-    def do_click(c):
-        do = "double" if a.double else "right" if a.right else "click"
-        if len(a.where) == 2 and all(w.lstrip("-").isdigit() for w in a.where):
-            act = {"do": do, "x": int(a.where[0]), "y": int(a.where[1])}
-        elif len(a.where) == 1:
-            act = {"do": do, "selector": a.where[0]}
-        else:
-            raise RuntimeError("click takes a selector, or two numbers: X Y")
-        return c.input([act], a.screen)
 
     def do_key(c):
         *mods, key = a.combo.split("+")
@@ -137,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     # Straight onto roomctl.Client — there is no by-name wrapper layer any more,
     # so a new endpoint is a Client method and a line here, not three places.
     try:
+        region = parse_region() if a.cmd == "shot" else None
+        act = parse_click() if a.cmd == "click" else None
         with roomctl.client(a.target) as c:
             result = {
                 "status": lambda: c.status(),
@@ -149,7 +156,7 @@ def main(argv: list[str] | None = None) -> int:
                 "window": lambda: c.window(a.state, a.screen),
                 "shot": lambda: do_shot(c),
                 "inspect": lambda: c.inspect(a.screen),
-                "click": lambda: do_click(c),
+                "click": lambda: c.input([act], a.screen),
                 "type": lambda: c.input([{"do": "type", "text": a.text}], a.screen),
                 "key": lambda: do_key(c),
                 "scroll": lambda: do_scroll(c),
