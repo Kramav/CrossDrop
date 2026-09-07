@@ -1,5 +1,16 @@
 # Running the smoke suite on the Pi
 
+> **Where:** on the Pi, over SSH, as the user that owns the graphical session.
+> **From:** `/opt/room-display/current` — the code. **Not** `/etc/room-display`,
+> which is the config, and not `~`. Every block below carries its own `cd` so it
+> works whatever shell you arrive in.
+>
+> | Path | What lives there |
+> |---|---|
+> | `/opt/room-display/current` | the code, `tests/`, and `.venv` — **run from here** |
+> | `/etc/room-display/config.toml` | the token and install-time facts |
+> | `~/.local/share/room-display/` | settings, and the profile snapshot |
+
 `pytest` on its own needs no browser and proves the agent's logic. The **smoke**
 suite is the other half: it drives a real Chromium and checks the things a stub
 cannot, which is exactly the set that differs between your laptop and the box on
@@ -35,12 +46,20 @@ stopping the ones after it, and the whole look → click → type → verify wor
 
 ---
 
-## 1. Get in, and get a display
+## The whole thing, if you already know why
 
 ```sh
-ssh room@<pi-tailnet-ip>
-cd /opt/room-display/current
+systemctl --user stop display-agent
+cd /opt/room-display/current && DISPLAY=:0 ROOM_BROWSER=chromium ROOM_SMOKE=1 \
+  .venv/bin/python -m pytest tests/test_smoke.py -q
+systemctl --user start display-agent
 ```
+
+The rest of this page is what each line is for and what to do when one fails.
+
+---
+
+## 1. Get a display, and a session bus
 
 Two things an SSH session does not give you, and both are needed here:
 
@@ -52,6 +71,9 @@ export DISPLAY=:0                                  # the tests launch a browser
 `DISPLAY` is the one people forget. Without it Chromium exits with *"Missing X
 server or $DISPLAY"* and the fixture reports `browser never came up` — which
 reads like a code problem and is not one.
+
+If `systemctl --user` answers `Failed to connect to bus`, it is the first line
+you are missing. `deploy/pi/update-over-ssh.md` §1 has the longer version.
 
 ---
 
@@ -81,25 +103,38 @@ logins, screen settings and uploads all live outside the release tree.
 ## 3. Run it
 
 ```sh
-ROOM_BROWSER=chromium ROOM_SMOKE=1 .venv/bin/python -m pytest tests/test_smoke.py -q
+cd /opt/room-display/current && DISPLAY=:0 ROOM_BROWSER=chromium ROOM_SMOKE=1 \
+  .venv/bin/python -m pytest tests/test_smoke.py -q
 ```
 
-- `ROOM_SMOKE=1` is what un-skips the file. Without it you get `13 skipped`.
-- `ROOM_BROWSER=chromium` is the default on the Pi, but being explicit costs
-  nothing and makes the command copy-pasteable onto a dev box.
-- `.venv/bin/python -m pytest`, not bare `pytest`: `-m` is what puts the release
-  directory on `sys.path`, and the release venv already has pytest — it is in
-  `agent/requirements.txt`.
+- **The `cd` is not optional, even though the venv path could be absolute.**
+  `-m pytest` puts the *working directory* on `sys.path`, and that is how
+  `import agent` resolves. Run it from `/etc/room-display` — the config
+  directory, and an easy place to already be — and you get
+  `-bash: .venv/bin/python: No such file or directory`.
+- **The variables go on the command line, not on their own.** `ROOM_BROWSER=chromium`
+  as a separate line sets a shell variable that child processes never see. It
+  happens not to matter here, because chromium is the default; `ROOM_SMOKE=1`
+  very much does matter, and it is the one people put on the right line by
+  accident rather than on purpose.
+- `ROOM_SMOKE=1` is what un-skips the file. Without it: `13 skipped`.
+- `.venv/bin/python -m pytest`, not bare `pytest` — the release venv already has
+  pytest, it is in `agent/requirements.txt`, and the system python does not.
 
 Expect **13 passed in ~20s**, and one fullscreen browser window that opens,
 does its work and closes itself.
 
-Want to watch it happen, or narrow to one thing:
+Narrower, or louder — each one standalone:
 
 ```sh
-... -m pytest tests/test_smoke.py -q -k click     # just the input tests
-... -m pytest tests/test_smoke.py -v              # name each test as it runs
-... -m pytest tests/test_smoke.py -x --tb=long    # stop at the first failure
+cd /opt/room-display/current && DISPLAY=:0 ROOM_SMOKE=1 .venv/bin/python -m pytest \
+  tests/test_smoke.py -q -k click            # just the input tests
+
+cd /opt/room-display/current && DISPLAY=:0 ROOM_SMOKE=1 .venv/bin/python -m pytest \
+  tests/test_smoke.py -v                     # name each test as it runs
+
+cd /opt/room-display/current && DISPLAY=:0 ROOM_SMOKE=1 .venv/bin/python -m pytest \
+  tests/test_smoke.py -x --tb=long           # stop at the first failure
 ```
 
 ---
@@ -132,6 +167,10 @@ timeout has nothing to wake it.
 
 ## Troubleshooting
 
+**`-bash: .venv/bin/python: No such file or directory`** — you are in the wrong
+directory. Almost always `/etc/room-display`, which is the config and has no
+venv in it. The code is `/opt/room-display/current`. Check with `pwd`.
+
 **`debug port 9222 is already in use`** — §2. Something is on that port: the
 agent, or a browser a previous run leaked. Check and clear it:
 
@@ -139,6 +178,15 @@ agent, or a browser a previous run leaked. Check and clear it:
 systemctl --user stop display-agent
 curl -s http://127.0.0.1:9222/json/version         # anything still answering?
 pkill -f 'remote-debugging-port=9222'              # last resort
+```
+
+**The agent came back on its own** — did you start `room-display-update` just
+before stopping it? The updater restarts `display-agent` when it deploys a tag,
+which takes 9222 straight back. Check what it did, then stop the agent again:
+
+```sh
+journalctl --user -u room-display-update -n 5 --no-pager
+systemctl --user is-active display-agent           # want: inactive
 ```
 
 **`browser never came up: {...}`** — the fixture waited 30s and gave up. The

@@ -1,5 +1,16 @@
 # Updating the Pi over SSH
 
+> **Where:** on the Pi, over SSH, as the user that owns the graphical session —
+> except §3, which is on your own machine. Commands here use absolute paths or
+> carry their own `cd`, so any block works from whatever directory you land in.
+>
+> | Path | What lives there |
+> |---|---|
+> | `/opt/room-display/current` | the code — a symlink to the running release |
+> | `/opt/room-display/releases/` | past releases, and the `.failed-*` markers |
+> | `/etc/room-display/config.toml` | the token and install-time facts, root-owned |
+> | `~/.local/share/room-display/` | screen settings, and the profile snapshot |
+
 A runbook for the box on the wall, from your desk. The *mechanism* — tags,
 `selfcheck`, rollback, pruning — is [README.md §11](README.md); this is the
 order you type things in.

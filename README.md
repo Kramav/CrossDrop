@@ -139,6 +139,8 @@ they are install-time facts that need a browser relaunch, not a config reload.
 
 **`roomctl`** — the CLI, and the same functions eve imports.
 
+From the repo root on a controller box, not on the Pi:
+
 ```sh
 pip install -e .                                  # puts `roomctl` on PATH
 cp roomctl/targets.example.toml roomctl/targets.toml
@@ -478,6 +480,8 @@ and cannot send a header. The random id is the capability, and ids are never
 listed.
 
 ## Tests
+
+From the repo root, with `agent/requirements.txt` installed:
 
 ```sh
 pytest                  # no browser needed
