@@ -385,12 +385,27 @@ Three changes, in order of how much they do:
 
 `tests/test_screens.py` covers all of it; each of the nine fails against the old implementation.
 
-**Still open.**
+**Closed since.** Every code and installer finding above has been dealt with:
 
-- **9 — `tailscale up --ssh` is enabled silently by the installer**
-  (`setup.sh:62`), making every install SSH-reachable under tailnet ACLs the
-  script never mentions. Defensible, but it should be a stated decision rather
-  than a silent one inside a `curl | bash`. This is a line of README, not code.
+| Was | Now |
+|---|---|
+| 9 — `tailscale up --ssh` enabled silently | Announced before it happens, and declinable with `TSSSH=0` |
+| `apt full-upgrade` can turn 3 minutes into 30 | `UPGRADE=0` skips it, and the wait is announced |
+| Nothing checked `pip install` succeeded | Checked, and it refuses to enable the service |
+| The banner printed the token into scrollback | The token is never read into a variable; the banner prints the command that reads it |
+| 10 — unsigned tags are code execution on every Pi | `VERIFY_TAG=1` makes `git verify-tag` a hard gate. Off by default: enabling it without a key in place would stop every Pi updating, and a display stuck on an old release is worse than the risk it removes |
+| S3 — a wedged browser stacks up threadpool threads | Fail-fast latch in `_get()`, `ROOM_DEAD_COOLDOWN`. `wait_ready()` bypasses it, or a launch poll would go from 0.3 s to 5 s |
+| S9 — a non-ASCII token 500s | Compared as bytes, so it 401s; and `load_config` warns that such a token can never be sent at all |
+| S10 — the sweep could evict the upload just written | `sweep(spare=…)` names it rather than trusting mtime order |
+| S11 — `up` is a hardcoded `true` | Left alone and documented: it means "this agent answered", `browser`/`error` carry the news. Redefining a frozen field would silently change behaviour for anything that does read it |
+
+Two leaks surfaced while fixing those, both mine, both from this session's work:
+
+- **`_launch()` re-read `app.state.stopping` each pass**, so a thread from a previous lifespan saw the *next* one's fresh unset event and carried on launching browsers for an agent that had already stopped. One process has one lifespan, so it could never bite in production — it bit the suite, which starts dozens. The event is handed to the thread now.
+- **Two autoscroll tests passed on a race.** They left `browser.autoscroll` unstubbed, so the worker reached a debug port that was not there and removed its own entry; the assertion only won because that failure took about two seconds. The S3 latch made it instant and the race flipped. Stubbed properly, and they wait for the state rather than assuming it.
+
+**Still open, and not code.**
+
 - **Two things unverified on hardware.** Removing `--remote-allow-origins=*`
   only matters against a real Chromium — no test covers it and none can; on the
   next deploy confirm `/v1/status` still returns a `current_url` rather than a
@@ -400,14 +415,37 @@ Three changes, in order of how much they do:
   calls a second rather than ten wheel events, so the round-trip half of that
   cost is five times smaller — but Chromium is doing the interpolation instead,
   and nobody has measured which side that lands on. Same run answers it.
-- **Minor install gaps.** `apt full-upgrade -y` (`setup.sh:52`) can turn a
-  3-minute install into 30 with a reboot; nothing checks `pip install` succeeded
-  before enabling the service, so you learn from the `journalctl` dump; the final
-  banner prints the token into terminal scrollback.
-- **Naming.** The repo is named CrossDrop but every path, unit and config says
-  `room-display`, and `setup.sh:19` hardcodes `github.com/Kramav/CrossDrop`. If
-  that repo is private, both the README's `curl | bash` line and `setup.sh`'s
-  clone fail on a git credential prompt in a pipeline with no tty. Not checked.
+- **The smoke suite has never run on the Pi**, only against a desktop Chrome.
+  `deploy/pi/update-over-ssh.md` §8 is the command.
+- **The rollback has never actually fired** since `update.sh` grew the
+  `/v1/inspect` gate and the failure screenshot. It is the one feature here that
+  matters and it is still only proven on the happy path.
+- **Naming — settled, not open.** **CrossDrop is the repo; `room-display` is the
+  installation.** Two names on purpose, and neither is going to change.
+
+  A rename was costed three ways. *New hardware only* was the worst of them: old
+  and new boxes would carry different layouts forever, every command in
+  [deploy/pi/update-over-ssh.md](deploy/pi/update-over-ssh.md) would grow an
+  "older installs say…" note, and `settings.py` would keep a two-location lookup
+  that could never be removed — permanent complexity bought with nothing but
+  consistency. A *flag day* with a migration script is at least coherent, but it
+  is a migration on hardware nobody can reach with a keyboard, for a cosmetic
+  gain. Doing neither costs one line of explanation, which is this one.
+
+  What *was* worth fixing is the thing the mismatch was pointing at. The data
+  dir was the last path that was neither passed in nor named in `config.toml` —
+  spelled out once in `agent/settings.py` and again in
+  `deploy/pi/profile-snapshot.sh`, two copies with nothing keeping them in step.
+  A box where those disagree snapshots into a directory the agent never reads,
+  and looks like a working install until the reboot that needed the snapshot.
+  Now: `settings.DATA_DIR`, one `ROOM_DATA` variable that moves both halves
+  together (systemd applies `Environment=` to `ExecStartPre` and `ExecStopPost`,
+  so the unit covers the script too), and a test that fails if the two defaults
+  drift. A future move is a deployment decision rather than a code edit.
+
+  Still unchecked: `setup.sh` hardcodes `github.com/Kramav/CrossDrop`, so if that
+  repo is private both the README's `curl | bash` line and the clone fail on a
+  git credential prompt in a pipeline with no tty.
 
 ## 12. Open items for you
 1. Confirm A2 (SD boot), A4 (64-bit OS), A5 (desktop auto-login), A6 (private repo).

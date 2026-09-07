@@ -72,7 +72,9 @@ def save(cfg: dict, filename: str, chunks) -> str:
         dest.unlink(missing_ok=True)  # never leave a partial file in RAM
         raise
 
-    sweep(cfg)
+    # Never the one we just wrote: the caller is about to hand its url to the
+    # kiosk, and a concurrent burst of uploads must not delete it in between.
+    sweep(cfg, spare=file_id)
     return file_id
 
 
@@ -90,15 +92,25 @@ def media_type(file_id: str) -> str:
     return TYPES[Path(file_id).suffix.lower()]
 
 
-def sweep(cfg: dict) -> None:
-    # ponytail: keep the newest N, drop the rest. Crude, but this is RAM on a
-    # box nobody logs into — an age- or byte-budget policy if that ever bites.
-    #
-    # Floored at 1. `keep = 0` reads like "this is a display, not a filestore,
-    # hold nothing" — but the file just uploaded has to survive long enough for
-    # the kiosk to GET it, and `files[:-0 or None]` is `files[:None]`, i.e.
-    # every file including that one. Uploads would 404 on the display instead.
+def sweep(cfg: dict, spare: str | None = None) -> None:
+    """Keep the newest N uploads, drop the rest. `spare` is never dropped.
+
+    ponytail: crude, but this is RAM on a box nobody logs into — an age- or
+    byte-budget policy if that ever bites.
+
+    Floored at 1. `keep = 0` reads like "this is a display, not a filestore,
+    hold nothing" — but the file just uploaded has to survive long enough for
+    the kiosk to GET it, and `files[:-0 or None]` is `files[:None]`, i.e. every
+    file including that one. Uploads would 404 on the display instead.
+
+    `spare` exists for the same reason one step further out. Mtime order says
+    which file is newest, not which one somebody is waiting for: `keep`
+    concurrent uploads landing while yours is still being fetched would sweep
+    it, and the display would show a 404 for a file that uploaded perfectly.
+    The one being served is named explicitly rather than inferred from a clock.
+    """
     keep = max(1, cfg["upload"]["keep"])
     files = sorted(Path(cfg["upload"]["dir"]).glob("*"), key=lambda p: p.stat().st_mtime)
     for old in files[:-keep]:
-        old.unlink(missing_ok=True)
+        if old.name != spare:
+            old.unlink(missing_ok=True)

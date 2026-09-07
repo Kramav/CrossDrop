@@ -51,6 +51,29 @@ echo "new release $TAG (running: $RUNNING)"
 [ -d "$CACHE" ] || git clone --bare "$REPO" "$CACHE"
 git -C "$CACHE" fetch --prune --force origin '+refs/tags/*:refs/tags/*'
 
+# Opt-in signature check. Off by default, because turning it on without a
+# signing key in place would stop every Pi updating at the next tag -- and a
+# display stuck on an old release is a worse first experience than the risk it
+# removes. On with VERIFY_TAG=1, and then it is a hard gate: an unsigned or
+# badly signed tag never reaches the swap.
+#
+# What it buys, when you want it: without this, push access to the repo is code
+# execution on every Pi within 30 minutes (PLAN.md §11 finding 10). Worth
+# enabling on a box that matters, along with the signer's public key in the
+# updating user's GnuPG keyring.
+if [ "${VERIFY_TAG:-0}" = 1 ]; then
+  if ! git -C "$CACHE" verify-tag "$TAG" 2>&1; then
+    echo "VERIFY_TAG=1 and $TAG is not a validly signed tag - refusing" >&2
+    # mkdir first: on a first-ever run nothing has created $RELEASES yet, and
+    # under `set -e` a failed touch would kill the script with an error about
+    # the wrong thing entirely.
+    mkdir -p "$RELEASES"
+    touch "$RELEASES/.failed-$TAG"     # latch, or the timer retries every 30 min
+    exit 1
+  fi
+  echo "$TAG signature ok"
+fi
+
 DEST="$RELEASES/$TAG"
 rm -rf "$DEST"                      # a half-built dir from a killed run
 mkdir -p "$DEST"

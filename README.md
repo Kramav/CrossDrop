@@ -302,6 +302,11 @@ Worth knowing:
   against 33 KB JPEG.
 - **Chromium or Edge.** Firefox 501s, as with scroll and media — though unlike
   those, BiDi does have the primitive, so it is unwritten rather than impossible.
+- **`title` is whatever the browser calls the page right now.** For a moment
+  after a navigate that is Chromium's provisional title — the bare host — because
+  `Page.navigate` returns on commit, before the `<title>` is parsed.
+  `GET /v1/inspect` reads `document.title` and is the one to ask if you need the
+  real answer the instant you land.
 - **Never route a screenshot through `/files/{id}`.** That path is
   unauthenticated by design; putting rendered page content behind it would
   publish whatever the kiosk is logged into.
@@ -428,6 +433,10 @@ Three things to know if the caller is a program rather than a person:
 `started_at` changes when the agent restarts. That matters because the nightly
 restart timer drops any running autoscroll, and a poller has no other way to
 notice.
+
+**`up` is not a health check.** It is always `true` and means "this agent
+answered", which the HTTP 200 already told you. It stays because `/v1` is frozen.
+**`browser` and `error` are the fields that carry news** — check those.
 
 **The agent outlives a browser that will not start.** No binary, a debug port
 that never comes up, an X session slower than the agent — none of them stop it

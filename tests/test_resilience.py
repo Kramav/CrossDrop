@@ -363,6 +363,115 @@ def test_the_retry_never_turns_the_display_back_on(monkeypatch):
     assert display.awake() is False, "re-claiming woke the display"
 
 
+# --- a wedged browser must not take the agent with it ------------------------
+
+def test_a_dead_port_is_not_dialled_again_immediately(monkeypatch):
+    """The case this is for is not a browser that has *gone* — a closed port
+    refuses instantly — but one wedged and still holding it, where every call
+    pays the full socket timeout. A controller polling /v1/status every 15s
+    stacks those up faster than they drain, one threadpool thread per screen per
+    poll, and the pool is 40: a wedged browser quietly takes the agent down.
+    """
+    from agent import browser
+
+    tries = []
+
+    def slow(url, timeout=None):
+        tries.append(url)
+        raise OSError("timed out")
+
+    monkeypatch.setattr(browser.urllib.request, "urlopen", slow)
+    monkeypatch.setattr(browser, "_dead_until", 0.0)
+
+    with pytest.raises(OSError):
+        browser._get(9222, "/json")
+    assert len(tries) == 1
+    # Second call inside the cooldown: refused without touching the socket.
+    with pytest.raises(OSError, match="not trying again"):
+        browser._get(9222, "/json")
+    assert len(tries) == 1, "it dialled the wedged port again"
+
+
+def test_the_latch_lifts_once_the_browser_answers(monkeypatch):
+    from agent import browser
+
+    monkeypatch.setattr(browser, "_dead_until", time.monotonic() + 999)
+    with pytest.raises(OSError):
+        browser._get(9222, "/json")
+
+    class Fake:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"[]"
+
+    monkeypatch.setattr(browser.urllib.request, "urlopen",
+                        lambda url, timeout=None: Fake())
+    # wait_ready's path bypasses the latch, which is the whole point of it:
+    # polling a port that is not up *yet* must stay fast during a launch.
+    assert browser._get(9222, "/json", latch=False) == []
+    assert browser._get(9222, "/json") == []        # and the latch is now clear
+
+
+def test_waiting_for_a_launch_is_never_latched_out(monkeypatch):
+    """A fast-fail here would turn wait_ready's 0.3s poll into a 5s one and
+    leave the kiosk dark for five seconds after it was ready."""
+    from agent import browser
+
+    monkeypatch.setattr(browser, "_dead_until", time.monotonic() + 999)
+    tries = []
+
+    def slow(url, timeout=None):
+        tries.append(url)
+        raise OSError("not up yet")
+
+    monkeypatch.setattr(browser.urllib.request, "urlopen", slow)
+    with pytest.raises(OSError):
+        browser._get(9222, "/json/version", latch=False)
+    assert len(tries) == 1, "the latch blocked a launch poll"
+
+
+# --- the token ---------------------------------------------------------------
+
+def unicode_config(tmp_path, monkeypatch):
+    p = tmp_path / "config.toml"
+    p.write_text('token = "påssword-with-ünicode"\nhome_url = "about:blank"\n'
+                 '[browser]\nkind = "chromium"\nautolaunch = false\n',
+                 encoding="utf-8")
+    monkeypatch.setenv("ROOM_CONFIG", str(p))
+    return p
+
+
+def test_a_non_ascii_token_in_the_config_is_a_401_not_a_500(tmp_path, monkeypatch,
+                                                            no_browser):
+    """compare_digest refuses two str arguments unless *both* are pure ASCII, so
+    a token with an accent in config.toml raised TypeError out of the dependency
+    and surfaced as a 500 — which reads as "the agent is broken" while the real
+    problem is a token nobody can ever send."""
+    unicode_config(tmp_path, monkeypatch)
+    with TestClient(app) as c:
+        assert c.get("/v1/status", headers={"Authorization": "Bearer nope"}
+                     ).status_code == 401
+
+
+def test_a_token_that_cannot_be_sent_says_so_in_the_log(tmp_path, monkeypatch,
+                                                        caplog):
+    """An HTTP header is latin-1, so such a token cannot reach us at all: every
+    request 401s forever while the config looks perfectly fine to whoever wrote
+    it. Not fatal — a bad token must never stop a keyboard-less display booting
+    — so the journal is where the answer has to be."""
+    unicode_config(tmp_path, monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="room"):
+        appmod.load_config()
+    assert any("non-ASCII" in r.getMessage() for r in caplog.records)
+
+
+def test_an_ordinary_token_says_nothing(tmp_path, monkeypatch, caplog):
+    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path)))
+    with caplog.at_level(logging.WARNING, logger="room"):
+        appmod.load_config()
+    assert not [r for r in caplog.records if "non-ASCII" in r.getMessage()]
+
+
 # --- the access log ---------------------------------------------------------
 
 def test_a_mutation_is_logged(client, monkeypatch, caplog):

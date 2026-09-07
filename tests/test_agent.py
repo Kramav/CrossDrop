@@ -122,6 +122,33 @@ def test_storage_caps_and_sweeps(tmp_path):
     assert len(list(tmp_path.glob("*"))) == 2   # partial file cleaned up
 
 
+def test_the_file_just_written_survives_its_own_sweep(tmp_path):
+    """Mtime order says which file is newest, not which one somebody is waiting
+    for. With `keep` files already present and same-second timestamps — which is
+    what a tmpfs and a fast disk give you — the sweep could pick the new one,
+    and the display would 404 on a file that uploaded perfectly."""
+    cfg = {"upload": {"dir": str(tmp_path), "max_mb": 1, "keep": 2}}
+    for i in range(5):
+        file_id = storage.save(cfg, f"f{i}.txt", [b"hi"])
+        # The one just written is always still there to be fetched.
+        assert storage.path(cfg, file_id).read_bytes() == b"hi"
+
+    # Flatten every mtime, so "newest" carries no information at all, and sweep
+    # again: the spared file must still be spared on identity, not on a clock.
+    for p in tmp_path.glob("*"):
+        os.utime(p, (1_000_000, 1_000_000))
+    storage.sweep(cfg, spare=file_id)
+    assert storage.path(cfg, file_id).read_bytes() == b"hi"
+
+
+def test_a_sweep_with_nothing_to_spare_still_prunes(tmp_path):
+    cfg = {"upload": {"dir": str(tmp_path), "max_mb": 1, "keep": 1}}
+    for i in range(4):
+        storage.save(cfg, f"f{i}.txt", [b"hi"])
+    storage.sweep(cfg)
+    assert len(list(tmp_path.glob("*"))) == 1
+
+
 def test_keep_zero_still_serves_the_file_just_uploaded(tmp_path):
     """`keep = 0` reads like "a display, not a filestore — hold nothing", and
     `files[:-0 or None]` would delete every file including the one just written.

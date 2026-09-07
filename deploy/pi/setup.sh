@@ -47,9 +47,16 @@ echo "== packages"
 # enterprise repo, and that must not abort an install whose packages all come
 # from Debian main.
 sudo apt update || true
-# Pi only. Upgrading every package on a hypervisor — kernel included, under the
-# VMs — is the admin's decision, not a side effect of installing a kiosk.
-if [ "$IS_PI" = 1 ]; then sudo apt full-upgrade -y; fi
+# Pi only, and skippable. Upgrading every package on a hypervisor — kernel
+# included, under the VMs — is the admin's decision, not a side effect of
+# installing a kiosk. On a Pi it is usually right, but it can turn a 3-minute
+# install into 30 plus a reboot, which is a surprise worth being able to decline:
+#   UPGRADE=0 bash setup.sh
+UPGRADE="${UPGRADE:-1}"
+if [ "$IS_PI" = 1 ] && [ "$UPGRADE" = 1 ]; then
+  echo "   full-upgrade (UPGRADE=0 to skip; this can take a while)"
+  sudo apt full-upgrade -y
+fi
 sudo apt install -y python3-venv git
 # Trixie Pi OS ships Debian's `chromium`, which installs /usr/bin/chromium and
 # NO /usr/bin/chromium-browser. Bookworm and earlier shipped Raspberry Pi's own
@@ -59,7 +66,21 @@ CHROMIUM="$(command -v chromium || command -v chromium-browser || true)"
 
 echo "== tailscale"
 command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
-tailscale ip -4 >/dev/null 2>&1 || sudo tailscale up --ssh   # prints a URL; open it
+# --ssh makes this box reachable over Tailscale SSH, under your tailnet ACLs and
+# not this script's. That is a real decision and it used to be made silently, so
+# it is said out loud and can be declined: TSSSH=0 leaves SSH to whatever the
+# image was set up with. Said before it happens, because after `tailscale up`
+# runs you have already agreed to it.
+TSSSH="${TSSSH:-1}"
+if ! tailscale ip -4 >/dev/null 2>&1; then
+  if [ "$TSSSH" = 1 ]; then
+    echo "   enabling Tailscale SSH on this node (TSSSH=0 to skip)."
+    echo "   Access is then governed by your tailnet ACLs — check them."
+    sudo tailscale up --ssh                  # prints a URL; open it
+  else
+    sudo tailscale up                        # prints a URL; open it
+  fi
+fi
 TS_IP="$(tailscale ip -4 | head -1)"
 echo "   $TS_IP"
 
@@ -139,7 +160,15 @@ else
 fi
 cd /opt/room-display/current
 [ -d .venv ] || python3 -m venv .venv
-.venv/bin/pip install -q -r agent/requirements.txt
+# Checked, not assumed. This used to run under `set -e` with no message of its
+# own: a wheel that failed to build left the venv half-populated, the script
+# carried on and enabled the service, and the first you heard of it was a
+# journalctl dump at the end. Say which step failed, at the step that failed.
+if ! .venv/bin/pip install -q -r agent/requirements.txt; then
+  echo "pip install failed — not enabling the service. Fix the error above and" >&2
+  echo "re-run this script; nothing before this point needs undoing." >&2
+  exit 1
+fi
 
 echo "== config"
 CFG=/etc/room-display/config.toml
@@ -230,12 +259,24 @@ else
   journalctl --user -u display-agent -n 20 --no-pager || true
 fi
 
-TOKEN="$(sudo sed -n 's|^token = "\(.*\)"|\1|p' "$CFG")"
+# The token is deliberately *not* printed. It used to be, for the copy-paste
+# convenience of the line below -- which also wrote the one credential this box
+# has into terminal scrollback, a `script` log, and whatever the terminal
+# emulator keeps. Printing the command that reads it costs one extra step and
+# leaves the secret in the file it already lives in.
 cat <<EOF
 
-Done. From a controller box:
+Done. From a controller box, with the token this prints (do not paste it into
+anything that keeps history):
 
-  curl -H "Authorization: Bearer $TOKEN" http://$TS_IP:$PORT/v1/status
+  sudo sed -n 's|^token = "\\(.*\\)"|\\1|p' $CFG
+
+  curl -H "Authorization: Bearer \$TOKEN" http://$TS_IP:$PORT/v1/status
+
+Or from this box, without the token ever being on screen:
+
+  curl -sH "Authorization: Bearer \$(sudo sed -n 's|^token = "\\(.*\\)"|\\1|p' $CFG)" \\
+       http://$TS_IP:$PORT/v1/status
 
 Still on you: disable this node's key expiry in the Tailscale admin console,
 or the Pi silently drops off the tailnet in ~6 months with no keyboard to fix it.

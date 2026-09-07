@@ -11,7 +11,14 @@
 set -euo pipefail
 
 PROFILE="${PROFILE:-/run/user/$(id -u)/room-display/profile}"
-SNAP="${SNAP:-$HOME/.local/share/room-display/profile.tar.gz}"
+# Kept in step with agent/settings.py DATA_DIR by a test, not by hand: the agent
+# and this script each carry their own copy of the default, and a box where the
+# two disagree snapshots into a directory the agent never reads -- which looks
+# exactly like a working install until the reboot that needed the snapshot.
+# Setting ROOM_DATA in display-agent.service covers both, since systemd applies
+# Environment= to ExecStartPre and ExecStopPost as well.
+DATA="${ROOM_DATA:-$HOME/.local/share/room-display}"
+SNAP="${SNAP:-$DATA/profile.tar.gz}"
 
 # Whole profile minus caches. Auth is not just Cookies: Local Storage and
 # IndexedDB hold session tokens too, so excluding by allowlist would silently

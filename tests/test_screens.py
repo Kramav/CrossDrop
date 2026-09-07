@@ -402,31 +402,55 @@ def test_first_window_is_moved_not_opened(cdp):
 
 # --- autoscroll -------------------------------------------------------------
 
-def test_autoscroll_stops_when_the_screen_navigates(monkeypatch):
+@pytest.fixture
+def running_autoscroll(monkeypatch):
+    """Autoscroll that actually runs until it is stopped.
+
+    These two used to leave `browser.autoscroll` unstubbed, so the worker thread
+    reached a debug port that was not there, gave up, and removed its own entry.
+    They passed only because that failure took a couple of seconds — long enough
+    for the assertion to get in first. Adding the fail-fast latch to _get() made
+    the same failure instant and the race started going the other way, which is
+    the trouble with a test that depends on how slow a socket is.
+    """
+    # Restored afterwards. `app` is a module-level singleton every test shares,
+    # so a config left behind here is one a later test's live server answers
+    # with -- including its token, which is not the token that test will send.
+    cfg = make_cfg()
+    monkeypatch.setattr(appmod.app.state, "cfg", cfg, raising=False)
+    monkeypatch.setattr(browser, "scroll", lambda *a, **k: None)
+    monkeypatch.setattr(browser, "navigate", lambda c, url, s=None: url)
+    monkeypatch.setattr(browser, "autoscroll",
+                        lambda c, screen, speed, stop: stop.wait(20))
+    yield cfg
+    for name in list(appmod._autoscroll):
+        appmod._autoscroll_stop(name)
+
+
+def started(name, want=True, timeout=5.0):
+    """Wait for the worker thread to register (or clear) its entry."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and (name in appmod._autoscroll) != want:
+        time.sleep(0.01)
+    return (name in appmod._autoscroll) == want
+
+
+def test_autoscroll_stops_when_the_screen_navigates(running_autoscroll):
     """The bug most likely to ship unnoticed: a leftover loop scrolling whatever
     page lands next, with nothing in the UI to explain it."""
-    cfg = make_cfg()
-    appmod.app.state.cfg = cfg
-    monkeypatch.setattr(browser, "scroll", lambda *a, **k: None)
-    monkeypatch.setattr(browser, "navigate", lambda c, url, s=None: url)
-
-    appmod._autoscroll_start(cfg, "left", 40)
-    assert "left" in appmod._autoscroll
+    appmod._autoscroll_start(running_autoscroll, "left", 40)
+    assert started("left")
     appmod._go("https://elsewhere/", "left")
-    assert "left" not in appmod._autoscroll
+    assert started("left", want=False)
 
 
-def test_autoscroll_on_one_screen_leaves_the_other_alone(monkeypatch):
-    cfg = make_cfg()
-    appmod.app.state.cfg = cfg
-    monkeypatch.setattr(browser, "scroll", lambda *a, **k: None)
-    monkeypatch.setattr(browser, "navigate", lambda c, url, s=None: url)
-
-    appmod._autoscroll_start(cfg, "left", 40)
-    appmod._autoscroll_start(cfg, "right", 40)
+def test_autoscroll_on_one_screen_leaves_the_other_alone(running_autoscroll):
+    appmod._autoscroll_start(running_autoscroll, "left", 40)
+    appmod._autoscroll_start(running_autoscroll, "right", 40)
+    assert started("left") and started("right")
     appmod._go("https://x/", "left")
-    assert "right" in appmod._autoscroll and "left" not in appmod._autoscroll
-    appmod._autoscroll_stop("right")
+    assert started("left", want=False)
+    assert started("right"), "navigating one screen stopped the other"
 
 
 # --- config + HTTP surface --------------------------------------------------

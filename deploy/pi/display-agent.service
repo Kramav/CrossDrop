@@ -15,6 +15,12 @@ Wants=network-online.target
 [Service]
 WorkingDirectory=/opt/room-display/current
 Environment=ROOM_CONFIG=/etc/room-display/config.toml
+# Where the agent keeps what it owns: settings.json, last.json and the profile
+# snapshot. Commented out because the default below is what both halves already
+# use; uncomment to move them, and both move together — systemd applies
+# Environment= to ExecStartPre and ExecStopPost, so profile-snapshot.sh sees it
+# too. That is the whole reason it is one variable and not two defaults.
+# Environment=ROOM_DATA=%h/.local/share/room-display
 # Written by update.sh into each release dir as `ROOM_VERSION=<tag>`, so
 # /v1/status reports the tag it is actually running. The `-` keeps a plain
 # Phase 5 checkout (no VERSION file) working -- it just reports "dev".

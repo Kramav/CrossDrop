@@ -172,13 +172,18 @@ def test_smoke_a_capture_is_in_css_pixels(kiosk, page_server):
 def test_smoke_a_full_capture_matches_what_it_reports(kiosk, page_server):
     import base64
     kiosk.post("/v1/navigate", json={"url": page_server})
+    # Not immediately: Page.navigate returns on *commit*, and for a moment after
+    # that the target listing still carries Chromium's provisional title, which
+    # is the bare host. Waiting for the document to be parsed is what the UI's
+    # settle() does for the same reason.
+    assert wait_title(kiosk, "ready") == "ready"
     shot = kiosk.post("/v1/screenshot", json={}).json()
     assert png_size(base64.b64decode(shot["image"])) == (shot["width"], shot["height"])
     # A fullscreen kiosk on any real monitor. Mostly this catches the viewport
     # falling back to the 800x600 guess, which would silently halve every
     # coordinate a client derives from the picture.
     assert shot["width"] >= 640 and shot["height"] >= 480, shot
-    assert shot["title"] == "ready"
+    assert shot["title"] == "ready", "screenshot reported a stale title"
 
 
 def test_smoke_jpeg_decodes_and_is_the_same_size_on_screen(kiosk, page_server):

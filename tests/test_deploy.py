@@ -104,10 +104,111 @@ def test_the_image_stays_first_in_the_reply(client, monkeypatch):
     assert re.search(r'"image":"([A-Za-z0-9+/=]*)"', raw).group(1) == "AAAA"
 
 
+SETUP_SH = (Path(__file__).parent.parent / "deploy/pi/setup.sh").read_text(
+    encoding="utf-8")
+
+
+SNAPSHOT_SH = (Path(__file__).parent.parent / "deploy/pi/profile-snapshot.sh"
+               ).read_text(encoding="utf-8")
+
+
+def test_the_agent_and_the_snapshot_script_agree_on_the_data_dir():
+    """Each carries its own copy of the default, because one is Python and the
+    other is bash and neither can import the other. A box where they disagree
+    snapshots into a directory the agent never reads — which looks exactly like
+    a working install right up until the reboot that needed the snapshot."""
+    from agent import settings
+
+    assert settings.DATA_DIR == ".local/share/room-display"
+    assert f'$HOME/{settings.DATA_DIR}' in SNAPSHOT_SH, \
+        "profile-snapshot.sh's default has drifted from settings.DATA_DIR"
+
+
+def test_both_halves_move_together(monkeypatch, tmp_path):
+    """One variable, not two. systemd applies Environment= to ExecStartPre and
+    ExecStopPost as well, so setting it in the unit moves the agent and the
+    snapshot script at once."""
+    from agent import settings
+
+    monkeypatch.delenv("ROOM_SETTINGS", raising=False)
+    monkeypatch.setenv("ROOM_DATA", str(tmp_path / "elsewhere"))
+    assert settings.data_dir() == tmp_path / "elsewhere"
+    assert settings.path() == tmp_path / "elsewhere" / "settings.json"
+    assert settings.last_path() == tmp_path / "elsewhere" / "last.json"
+    assert 'ROOM_DATA:-' in SNAPSHOT_SH, "the script ignores ROOM_DATA"
+    # And the unit documents it, so the two are discoverable together.
+    unit = (Path(__file__).parent.parent / "deploy/pi/display-agent.service"
+            ).read_text(encoding="utf-8")
+    assert "ROOM_DATA" in unit
+
+
+def test_room_settings_still_wins(monkeypatch, tmp_path):
+    """It predates ROOM_DATA and the whole suite points it at a tmp_path."""
+    from agent import settings
+
+    monkeypatch.setenv("ROOM_DATA", str(tmp_path / "dir"))
+    monkeypatch.setenv("ROOM_SETTINGS", str(tmp_path / "explicit.json"))
+    assert settings.path() == tmp_path / "explicit.json"
+
+
+def test_the_installer_never_prints_the_token():
+    """It used to, for the convenience of a copy-pasteable curl — which also
+    wrote the one credential this box has into terminal scrollback, a `script`
+    log, and whatever the emulator keeps. Printing the command that reads it
+    costs one step and leaves the secret in the file it already lives in."""
+    # The token is never read into a variable at all, so there is nothing for
+    # the heredoc to interpolate even by accident.
+    assert 'TOKEN="$(' not in SETUP_SH, "the installer still captures the token"
+    banner = SETUP_SH[SETUP_SH.index("Done. From a controller box"):]
+    assert "\\$TOKEN" in banner, "the placeholder should stay unexpanded"
+    # The reader is shown the command that reads it, and runs it themselves.
+    assert "sed -n" in banner
+
+
+def test_the_installer_stops_if_pip_fails():
+    """It ran under `set -e` with no message of its own: a wheel that failed to
+    build left a half-populated venv, the script carried on and enabled the
+    service, and you learned about it from a journalctl dump at the end."""
+    assert "if ! .venv/bin/pip install" in SETUP_SH
+    assert "not enabling the service" in SETUP_SH
+
+
+def test_the_installer_says_it_is_enabling_tailscale_ssh():
+    """It made every install SSH-reachable under tailnet ACLs the script never
+    mentioned. Defensible, but it should be a stated decision rather than a
+    silent one inside a `curl | bash`."""
+    assert "TSSSH" in SETUP_SH
+    said = SETUP_SH.index("enabling Tailscale SSH")
+    assert said < SETUP_SH.index("tailscale up --ssh"), "said after the fact"
+
+
+def test_full_upgrade_can_be_declined():
+    assert "UPGRADE" in SETUP_SH and "UPGRADE=0 to skip" in SETUP_SH
+
+
+def test_tag_verification_is_opt_in_and_a_hard_gate():
+    """Off by default: turning it on without a signing key in place would stop
+    every Pi updating, and a display stuck on an old release is worse than the
+    risk it removes. On, it must refuse rather than warn."""
+    assert 'VERIFY_TAG:-0' in UPDATE_SH, "not off by default"
+    block = UPDATE_SH[UPDATE_SH.index("VERIFY_TAG:-0"):]
+    block = block[:block.index("# --- 3")]
+    assert "verify-tag" in block and "exit 1" in block
+    # And it latches, or the timer retries the same bad tag every 30 minutes.
+    assert ".failed-$TAG" in block
+    # The latch needs its directory to exist on a first-ever run.
+    assert block.index('mkdir -p "$RELEASES"') < block.index('touch "$RELEASES')
+
+
 def test_the_rollback_still_latches_and_snapshots_before_it(client):
     """Order matters: the picture has to be taken while the broken release is
-    still the one running, i.e. before the symlink goes back."""
-    latch = UPDATE_SH.index('touch "$RELEASES/.failed-$TAG"')
-    snap = UPDATE_SH.index("snapshot_failure\n")
-    restore = UPDATE_SH.index('ln -sfn "$PREV" "$CURRENT"')
+    still the one running, i.e. before the symlink goes back.
+
+    Scoped to the rollback section rather than the whole file — the signature
+    check latches too, and searching from the top found *its* touch instead.
+    """
+    section = UPDATE_SH[UPDATE_SH.index("# --- 7. rollback"):]
+    latch = section.index('touch "$RELEASES/.failed-$TAG"')
+    snap = section.index("snapshot_failure\n")
+    restore = section.index('ln -sfn "$PREV" "$CURRENT"')
     assert snap < latch < restore

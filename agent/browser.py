@@ -372,7 +372,7 @@ def wait_ready(kind: str, port: int, timeout: float = 30.0) -> None:
                 websocket.create_connection(_bidi_url(port), timeout=5,
                                             suppress_origin=True).close()
             else:
-                _get(port, "/json/version")
+                _get(port, "/json/version", latch=False)
             return
         except (OSError, websocket.WebSocketException):
             if time.monotonic() > deadline:
@@ -865,7 +865,11 @@ def screenshot(cfg: dict, screen: str | None = None, region: dict | None = None,
         data = call("Page.captureScreenshot", params).get("data") or ""
     return {"image": data, "format": format, "width": w, "height": h,
             # Straight off the target listing, so this costs no extra round
-            # trip: what the page says it is, beside the picture of it.
+            # trip: what the browser currently calls the page, beside a picture
+            # of it. Note "currently" -- Page.navigate returns on commit, so for
+            # a moment after one this is Chromium's provisional title, which is
+            # the bare host. /v1/inspect reads document.title instead and is the
+            # one to ask if you need the real answer the instant you land.
             "url": page.get("url") or "about:blank", "title": page.get("title") or ""}
 
 
@@ -974,16 +978,65 @@ def close() -> None:
 
 # --- plumbing ---------------------------------------------------------------
 
-def _get(port: int, path: str):
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
-        return json.loads(r.read())
+# How long to keep refusing after the debug port has failed us once. The case
+# this exists for is not a browser that has *gone* -- a closed port refuses
+# instantly -- but one that is wedged and still holding it, which is what
+# Chromium does while it thrashes on memory. Then every call pays the full
+# socket timeout: 5s for the HTTP probe, 15s for a websocket, and `screen: all`
+# multiplies it by the monitor count.
+#
+# A controller polling /v1/status every 15s stacks those up faster than they
+# drain, one threadpool thread per screen per poll, and FastAPI's pool is 40 --
+# so a wedged browser quietly takes the *agent* down with it, which is the one
+# thing the whole degraded-boot design exists to prevent.
+#
+# The window is deliberately short: this is a fast-fail latch, not a circuit
+# breaker with a state machine. Being wrong costs one round trip.
+DEAD_COOLDOWN = float(os.getenv("ROOM_DEAD_COOLDOWN", "5"))
+_dead_until = 0.0
+
+
+def _refuse_if_dead(port: int) -> None:
+    left = _dead_until - time.monotonic()
+    if left > 0:
+        raise OSError(f"debug port {port} did not answer moments ago; "
+                      f"not trying again for {left:.0f}s")
+
+
+def _mark(alive: bool) -> None:
+    global _dead_until
+    _dead_until = 0.0 if alive else time.monotonic() + DEAD_COOLDOWN
+
+
+def _get(port: int, path: str, latch: bool = True):
+    """GET the debug port. `latch=False` for the callers whose whole job is to
+    keep asking a port that is not answering yet -- wait_ready() polls during a
+    launch, and a fast-fail there would turn a 0.3s poll into a 5s one and leave
+    the kiosk sitting dark for five seconds after it was ready."""
+    if latch:
+        _refuse_if_dead(port)
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=5) as r:
+            body = json.loads(r.read())
+    except OSError:
+        if latch:
+            _mark(alive=False)
+        raise
+    _mark(alive=True)       # an answer is an answer, whoever went looking for it
+    return body
 
 
 def _connect(ws_url: str):
     """Open a websocket, return (ws, call(method, params) -> result)."""
     # suppress_origin: Chrome rejects unexpected Origins, Firefox validates them.
     # Sending none keeps both happy.
-    ws = websocket.create_connection(ws_url, timeout=15, suppress_origin=True)
+    try:
+        ws = websocket.create_connection(ws_url, timeout=15, suppress_origin=True)
+    except Exception:
+        # The port answered /json a moment ago or we would not have a url, so a
+        # websocket that will not open is the deeper kind of wedged.
+        _mark(alive=False)
+        raise
     seq = itertools.count(1)
 
     def call(method: str, params: dict | None = None) -> dict:

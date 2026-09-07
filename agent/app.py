@@ -87,6 +87,15 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         cfg["upload"]["dir"] = str(path.parent / "uploads")
     if not cfg.get("token"):
         raise RuntimeError(f"{path}: token is required")
+    # Not fatal, deliberately: a bad token must never be the reason a display
+    # with no keyboard fails to boot. But an HTTP header is latin-1, so a token
+    # with a non-ASCII character in it cannot be *sent* -- every request would
+    # 401 forever and the config would look perfectly fine to whoever wrote it.
+    # Say so once, in the journal, where the answer is.
+    if not str(cfg["token"]).isascii():
+        log.warning("%s: token has non-ASCII characters in it, so it can never "
+                    "be sent in an Authorization header -- every request will "
+                    "401. Use hex or base64: openssl rand -hex 32", path)
 
     # No [[screen]] blocks -> ask X what monitors exist, so a fresh install drives
     # every connected screen without anyone editing a config file. Explicit blocks
@@ -186,7 +195,13 @@ async def lifespan(app: FastAPI):
         # lifespan blocks the port from binding, and update.sh rolls the release
         # back if /v1/status doesn't answer within 30s of the restart.
         watching = display.watch(cfg)
-        threading.Thread(target=_launch, args=(cfg,), daemon=True).start()
+        # The event is handed over, not looked up. Reading app.state.stopping on
+        # each pass meant a thread from a *previous* lifespan saw the next one's
+        # fresh, unset event and carried on launching browsers for an agent that
+        # had already stopped. One process only ever has one lifespan, so this
+        # never bit in production -- it bit the test suite, which starts dozens.
+        threading.Thread(target=_launch, args=(cfg, app.state.stopping),
+                         daemon=True).start()
     yield
     app.state.stopping.set()
     for name in list(_autoscroll):
@@ -200,7 +215,7 @@ async def lifespan(app: FastAPI):
         browser.close()  # not ours: just release the session and leave it running
 
 
-def _launch(cfg: dict) -> None:
+def _launch(cfg: dict, stopping: threading.Event) -> None:
     """Start the kiosk browser, then put each screen on its home page.
 
     Retries, and never lets the failure out. Launching used to happen inline in
@@ -216,13 +231,13 @@ def _launch(cfg: dict) -> None:
     case (the compositor is not up yet) heal itself without a restart.
     """
     delay = LAUNCH_RETRY_SECS
-    while not app.state.stopping.is_set():
+    while not stopping.is_set():
         try:
             app.state.proc = browser.launch(cfg)
         except Exception as e:
             app.state.launch_error = f"{type(e).__name__}: {e}"
             log.error("browser launch failed, retrying in %.0fs: %s", delay, e)
-            if app.state.stopping.wait(delay):
+            if stopping.wait(delay):
                 return
             delay = min(delay * 2, 300.0)   # backs off to 5 min, then stays there
             continue
@@ -232,7 +247,7 @@ def _launch(cfg: dict) -> None:
         # else is going to take it down, and an orphaned fullscreen kiosk on a
         # box with no keyboard is the failure this whole module is arranged
         # around. Both sides stopping it is harmless; neither is not.
-        if app.state.stopping.is_set():
+        if stopping.is_set():
             browser.stop(cfg, app.state.proc)
             return
         log.info("browser launched")
@@ -348,7 +363,14 @@ async def access_log(request: Request, call_next):
 
 
 def auth(app_cfg: HTTPAuthorizationCredentials = Depends(_bearer)) -> None:
-    if not secrets.compare_digest(app_cfg.credentials, app.state.cfg["token"]):
+    # Compared as bytes. compare_digest refuses two str arguments unless both
+    # are pure ASCII, so a token with any non-ASCII character in it -- which
+    # nothing stops you putting in config.toml -- raised TypeError out of the
+    # dependency and surfaced as a 500. A wrong token has to be a 401 whatever
+    # it is made of, and a 500 here reads as "the agent is broken" while you
+    # stare at a token that is merely wrong.
+    if not secrets.compare_digest(app_cfg.credentials.encode("utf-8"),
+                                  str(app.state.cfg["token"]).encode("utf-8")):
         raise HTTPException(401, "bad token")
 
 
@@ -557,6 +579,12 @@ class SettingsOut(BaseModel):
 
 
 class Status(BaseModel):
+    # Always true, and kept because /v1 is frozen and something out there may
+    # read it. It means "this agent answered", which the 200 already told you --
+    # it is not a health check and never was. `browser` and `error` are the
+    # fields that carry news. Left as-is rather than redefined: a client that
+    # does branch on it would silently change behaviour the day we made it
+    # honest, which is worse than a field that is merely useless.
     up: bool
     current_url: str | None
     browser: str

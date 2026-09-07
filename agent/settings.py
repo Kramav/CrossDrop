@@ -22,9 +22,35 @@ from pathlib import Path
 SCREEN_FIELDS = ("name", "home_url", "position", "size")
 
 
+# The deployed name. `room-display` and not `CrossDrop` deliberately -- see
+# PLAN.md §11 "Naming": the repo is the source, this is the installation, and
+# renaming the installation is a migration on hardware nobody can reach with a
+# keyboard, for a cosmetic gain.
+DATA_DIR = ".local/share/room-display"
+
+
+def data_dir() -> Path:
+    """Where the agent keeps what it owns: settings.json, last.json, and the
+    profile snapshot that deploy/pi/profile-snapshot.sh writes beside them.
+
+    This is the last path in the agent that is neither passed in nor named in
+    config.toml, which makes it the one that could move *silently*: change the
+    literal above and an existing box comes up with no saved screens and no
+    restored page, having lost only things nobody notices until they look.
+
+    ROOM_DATA is how a move becomes a deployment decision instead of a code
+    edit. profile-snapshot.sh reads the same variable, and a systemd
+    `Environment=` line covers the unit's ExecStartPre and ExecStopPost too, so
+    the two halves cannot drift apart -- which they otherwise would, because
+    each half has its own copy of the default.
+    """
+    return Path(os.getenv("ROOM_DATA") or Path.home() / DATA_DIR)
+
+
 def path() -> Path:
-    return Path(os.getenv("ROOM_SETTINGS")
-                or Path.home() / ".local/share/room-display/settings.json")
+    # ROOM_SETTINGS names the file outright and still wins: it predates
+    # ROOM_DATA and the tests point it at a tmp_path.
+    return Path(os.getenv("ROOM_SETTINGS") or data_dir() / "settings.json")
 
 
 def last_path() -> Path:

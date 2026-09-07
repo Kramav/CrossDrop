@@ -255,6 +255,11 @@ logins or your screen settings. Those live outside the release tree:
     ~/.local/share/room-display/profile.tar.gz          the logins
     /opt/room-display/extensions/                       ad blockers
 
+> **The paths say `room-display`, the repo says CrossDrop.** That is deliberate
+> and settled — CrossDrop is the source, `room-display` is the installation. See
+> PLAN.md §11 "Naming". The data dir is the one you can move, with `ROOM_DATA`
+> in `display-agent.service`; it moves the snapshot script with it.
+
 ---
 
 ## 10. When the wall is wrong but SSH works
