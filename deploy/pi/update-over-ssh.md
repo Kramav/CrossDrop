@@ -211,17 +211,23 @@ It keeps retrying in the background (5 s, doubling to 5 min), so a transient
 cause — the compositor was not up yet — clears itself and `error` goes back to
 `""` with no restart.
 
-**The full acceptance run**, on the Pi, with a real browser. This is what proves
-screenshots are in the right coordinate space and that a click lands where it
-was aimed:
+**The full acceptance run**, on the Pi, with a real browser — what proves
+captures are in the right coordinate space and that a click lands where it was
+aimed. **Stop the agent first**; it holds the debug port the tests need, and
+they refuse to start otherwise:
 
 ```sh
+systemctl --user stop display-agent
 cd /opt/room-display/current
-ROOM_BROWSER=chromium ROOM_SMOKE=1 .venv/bin/python -m pytest tests/test_smoke.py -q
+DISPLAY=:0 ROOM_BROWSER=chromium ROOM_SMOKE=1 \
+  .venv/bin/python -m pytest tests/test_smoke.py -q
+systemctl --user start display-agent
 ```
 
-It opens one kiosk window over whatever is on the wall for about half a minute,
-then puts it back. Run it when nobody is using the room.
+13 passed, about 20 seconds, one fullscreen window that closes itself. The wall
+comes back to what it was showing. Full walkthrough, including what each test
+proves and what to do when one fails:
+[smoke-on-the-pi.md](smoke-on-the-pi.md).
 
 ---
 

@@ -62,6 +62,7 @@ that you only have to open one.
 | [web/home.html](web/home.html) | The idle screen the kiosk sits on. Also single-file. |
 | [deploy/pi/](deploy/pi/) | Provisioning (`setup.sh` — Pi *and* plain Debian), systemd units, tmpfs profile snapshots, and `update.sh` — the release-gated auto-updater with rollback. |
 | [deploy/pi/update-over-ssh.md](deploy/pi/update-over-ssh.md) | The runbook for a Pi already on the wall: ship a tag, flip a setting, verify, roll back, read the logs before they're gone. |
+| [deploy/pi/smoke-on-the-pi.md](deploy/pi/smoke-on-the-pi.md) | Driving the real browser on the real box: what the smoke suite proves, why the agent has to be stopped first, and what each failure means. |
 | [deploy/linux.md](deploy/linux.md) | Running the display on a Debian box instead of a Pi, and why it goes on the Proxmox host rather than in a guest. |
 | [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1) | The tray client. Pure PowerShell + WinForms so it runs on a box with no checkout and no Python. |
 | [tests/](tests/) | pytest, one file per surface. No browser needed unless `ROOM_SMOKE=1`. |
@@ -492,5 +493,6 @@ that is there. They open one kiosk window for about half a minute:
 ROOM_BROWSER=chromium ROOM_SMOKE=1 pytest tests/test_smoke.py -q
 ```
 
-Run them on the Pi after an update — [deploy/pi/update-over-ssh.md
-§8](deploy/pi/update-over-ssh.md) is the whole procedure.
+On the Pi they need the agent stopped first — it holds the debug port, and the
+tests refuse to start rather than silently drive the live display.
+[deploy/pi/smoke-on-the-pi.md](deploy/pi/smoke-on-the-pi.md) is the walkthrough.

@@ -97,6 +97,24 @@ def kiosk(tmp_path_factory):
     except RuntimeError as e:
         pytest.skip(str(e))
 
+    # Refuse to start on a debug port somebody else already holds. On the Pi
+    # that is the live agent's kiosk, and without this check the failure is
+    # silent and destructive: launch() cannot bind the port, wait_ready()
+    # succeeds against the *running* browser instead, and every test below then
+    # drives the real display -- navigating it away, clicking on it, typing into
+    # it -- before teardown asserts the thing has been shut down.
+    #
+    # A failure, not a skip. "Your display is in the way" is something to go and
+    # fix, not something to quietly not test.
+    try:
+        browser._get(9222, "/json/version", latch=False)
+    except OSError:
+        pass                                    # nothing there: ours to use
+    else:
+        pytest.fail("debug port 9222 is already in use — almost certainly the "
+                    "live agent. Stop it first: systemctl --user stop "
+                    "display-agent  (see deploy/pi/smoke-on-the-pi.md)")
+
     tmp = tmp_path_factory.mktemp("smoke")
     cfg = tmp / "config.toml"
     cfg.write_text(f'token = "{TOKEN}"\nhome_url = "about:blank"\n'
