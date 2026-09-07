@@ -45,7 +45,25 @@
   #show:hover { filter: brightness(1.1); background: var(--accent); }
   #more { font-size: 1.1rem; line-height: 1; padding: .45rem .6rem; }
 
-  /* --- the stage ---------------------------------------------------------- */
+  /* --- the working area: capture, and the rail beside it ------------------- */
+  /* A column of its own rather than a dock floating over the picture. The media
+     dock can overlay because it is only there while something is playing; these
+     are always on, and permanently covering a strip of the screen you are
+     trying to read is the opposite of the point. */
+  #work { display: grid; grid-template-columns: 1fr auto; gap: .75rem;
+          min-height: 0; }
+  #rail { display: flex; flex-direction: column; gap: .35rem; width: 4.4rem;
+          padding: .45rem; border: 1px solid var(--line); border-radius: .5rem;
+          overflow: auto; }
+  #rail button { padding: .4rem 0; font-size: 1rem; line-height: 1.15; }
+  #rail button[aria-pressed=true] { background: var(--dim); border-color: currentColor;
+                                    font-weight: 600; }
+  #rail .cap { font-size: .6rem; text-transform: uppercase; letter-spacing: .07em;
+               opacity: .5; text-align: center; margin: .35rem 0 .1rem; }
+  #rail hr { border: 0; border-top: 1px solid var(--line); margin: .2rem 0; width: 100%; }
+  #speed { width: 100%; margin: .1rem 0 0; }
+  #speedval { font: .62rem ui-monospace, monospace; opacity: .55; text-align: center; }
+
   #stage {
     position: relative; background: var(--bezel); border-radius: .5rem;
     display: grid; place-items: center; overflow: hidden; min-height: 0;
@@ -156,6 +174,7 @@
   </div>
 </header>
 
+<div id="work">
 <!-- The capture is the page. Drop a file or paste a link anywhere on it. -->
 <main id="stage">
   <div id="empty">
@@ -180,6 +199,37 @@
     <span id="dockstate"></span>
   </div>
 </main>
+
+<!-- Everything that moves the page without replacing it. Kept out of the menu
+     because these are the ones you press repeatedly: reading a long PDF is ten
+     presses of ▼, and ten trips through a command palette is not that. -->
+<aside id="rail">
+  <div id="scrollgrp">
+    <p class="cap">Scroll</p>
+    <button type="button" id="top" title="Jump to top (Home)" aria-label="Top">⤒</button>
+    <button type="button" id="up" title="Up a screenful (PgUp)" aria-label="Up">▲</button>
+    <button type="button" id="down" title="Down a screenful (PgDn)" aria-label="Down">▼</button>
+    <button type="button" id="bottom" title="Jump to bottom (End)" aria-label="Bottom">⤓</button>
+    <button type="button" id="auto" aria-pressed="false"
+            title="Scroll slowly and continuously" aria-label="Auto-scroll">⏬</button>
+    <label for="speed" class="cap">Speed</label>
+    <input id="speed" type="range" min="10" max="120" value="40">
+    <div id="speedval"></div>
+  </div>
+  <div id="wingrp">
+    <hr>
+    <p class="cap">Window</p>
+    <button type="button" id="aside" title="Minimize the kiosk — frees the Pi's desktop"
+            aria-label="Set aside">⊟</button>
+    <button type="button" id="full" title="Back to fullscreen on its monitor"
+            aria-label="Fullscreen">⛶</button>
+  </div>
+  <hr>
+  <p class="cap">Display</p>
+  <button type="button" id="power" title="Turn the monitors off"
+          aria-label="Display power">◐</button>
+</aside>
+</div>
 
 <footer id="foot">
   <label for="typed" hidden>Type into the focused field</label>
@@ -223,10 +273,6 @@
             title="Clear position and size so xrandr wins again">Re-detect layout</button>
   </div>
   <p class="note" id="cfgnote"></p>
-
-  <h2>Scrolling</h2>
-  <label for="speed">Step size, and auto-scroll speed</label>
-  <input id="speed" type="range" min="10" max="120" value="40">
 
   <div id="extbox">
     <h2>Extensions</h2>
@@ -529,6 +575,14 @@ function drawCapabilities(kind) {
   if (!can("input")) $("#shots").classList.remove("live");
   $("#extbox").hidden = !can("extensions");
 
+  // The rail, group by group. Display power needs no CDP, so a firefox agent
+  // still gets that one — and the rail stays rather than vanishing entirely,
+  // which would read as a broken page rather than a limited browser.
+  $("#scrollgrp").hidden = !can("scroll") && !can("autoscroll");
+  for (const id of ["#top", "#up", "#down", "#bottom"]) $(id).hidden = !can("scroll");
+  $("#auto").hidden = !can("autoscroll");
+  $("#wingrp").hidden = !can("window");
+
   const missing = ["scroll", "autoscroll", "media", "screens", "window",
                    "extensions", "screenshot"].filter(f => !can(f));
   $("#cap").textContent = missing.length
@@ -538,6 +592,9 @@ function drawCapabilities(kind) {
 }
 
 function drawScreens() {
+  // Reported by the agent, not remembered here: the nightly restart drops a
+  // running autoscroll, and a button left latched on would go on claiming it.
+  $("#auto").setAttribute("aria-pressed", String(autoscrolling()));
   // One monitor: the picker is noise. So is a picker on a browser that can only
   // ever drive the first screen.
   $("#screens").hidden = screens.length < 2 || !can("screens");
@@ -582,6 +639,8 @@ async function refresh() {
     // A dark display is the one state the page can't show by naming a url, and
     // the one most likely to be mistaken for "the Pi is broken".
     awake = s.awake !== false;
+    $("#power").setAttribute("aria-pressed", String(!awake));
+    $("#power").title = awake ? "Turn the monitors off" : "Wake the monitors";
     $("#dot").className = s.browser === "ok" ? (awake ? "awake" : "") : "bad";
     $("#dot").title = s.browser === "ok"
       ? (awake ? "display awake" : "display asleep — anything you send wakes it")
@@ -640,6 +699,53 @@ const scroll = body => can("scroll") && act(() => api("/v1/scroll", body));
 const page = () => Number($("#speed").value) * 15;   // a screenful-ish per press
 const autoscrolling = () => screens.some(s => s.name === target && s.autoscroll);
 
+// --- the actions --------------------------------------------------------------
+// Named once, because the rail and the command menu are two front doors onto the
+// same set: a button that drifts from its palette entry is a bug nobody notices
+// until the two disagree.
+const ACT = {
+  top: () => scroll({ to: "top" }),
+  up: () => scroll({ dy: -page() }),
+  down: () => scroll({ dy: page() }),
+  bottom: () => scroll({ to: "bottom" }),
+  auto: () => act(() => api("/v1/autoscroll", {
+    action: autoscrolling() ? "stop" : "start",
+    speed: Number($("#speed").value),
+  })),
+  // Two commands, not a toggle: the page never learns that someone minimized the
+  // window from the Pi's own keyboard, so a toggle would lie half the time.
+  aside: () => act(() => api("/v1/window", { state: "minimized" })),
+  full: () => act(() => api("/v1/window", { state: "fullscreen" })),
+  power: () => act(() => req("/v1/display", {
+    // Not api(): /v1/display takes no screen — the monitors sleep together.
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...auth() },
+    body: JSON.stringify({ action: awake ? "off" : "on" }),
+  })),
+  home: () => act(() => api("/v1/home")),
+  reload: () => act(() => api("/v1/reload")),
+};
+
+// Written out rather than looped over a list of names. A loop reads better and
+// is eight lines shorter, but `$("#" + name)` is invisible to the check in
+// tests/test_web.py that every id on the page is really wired to something —
+// and that check has already caught two renames.
+$("#top").onclick = ACT.top;
+$("#up").onclick = ACT.up;
+$("#down").onclick = ACT.down;
+$("#bottom").onclick = ACT.bottom;
+$("#auto").onclick = ACT.auto;
+$("#aside").onclick = ACT.aside;
+$("#full").onclick = ACT.full;
+$("#power").onclick = ACT.power;
+$("#home").onclick = ACT.home;
+$("#reload").onclick = ACT.reload;
+
+$("#speed").oninput = () => {
+  $("#speedval").textContent = $("#speed").value + " px";
+  localStorage.speed = $("#speed").value;
+};
+
 // --- the command menu --------------------------------------------------------
 // Everything that is not "put this on the wall" lives here: one list, opened by
 // the ⋮ button or Ctrl-K, filtered by typing. A command is {label, when, run} —
@@ -648,30 +754,22 @@ const autoscrolling = () => screens.some(s => s.name === target && s.autoscroll)
 function commands() {
   const saved = store.get();
   return [
-    { label: awake ? "Turn the display off" : "Wake the display", run: togglePower },
+    { label: awake ? "Turn the display off" : "Wake the display", run: ACT.power },
     { label: "Capture the screen", keys: "⟳", when: () => can("screenshot"), run: look },
-    { label: "Reload the page", run: () => act(() => api("/v1/reload")) },
-    { label: "Back to the home page", run: () => act(() => api("/v1/home")) },
+    { label: "Reload the page", run: ACT.reload },
+    { label: "Back to the home page", run: ACT.home },
 
     { sep: "Scroll", when: () => can("scroll") },
-    { label: "Scroll to top", keys: "Home", when: () => can("scroll"),
-      run: () => scroll({ to: "top" }) },
+    { label: "Scroll to top", keys: "Home", when: () => can("scroll"), run: ACT.top },
     { label: "Scroll to bottom", keys: "End", when: () => can("scroll"),
-      run: () => scroll({ to: "bottom" }) },
+      run: ACT.bottom },
     { label: autoscrolling() ? "Stop auto-scrolling" : "Start auto-scrolling",
-      when: () => can("autoscroll"),
-      run: () => act(() => api("/v1/autoscroll", {
-        action: autoscrolling() ? "stop" : "start",
-        speed: Number($("#speed").value),
-      })) },
+      when: () => can("autoscroll"), run: ACT.auto },
 
     { sep: "Window", when: () => can("window") },
-    // Two commands, not a toggle: the page never learns that someone minimized
-    // the window from the Pi's own keyboard, so a toggle would lie half the time.
-    { label: "Set the kiosk aside", when: () => can("window"),
-      run: () => act(() => api("/v1/window", { state: "minimized" })) },
+    { label: "Set the kiosk aside", when: () => can("window"), run: ACT.aside },
     { label: "Put the kiosk back fullscreen", when: () => can("window"),
-      run: () => act(() => api("/v1/window", { state: "fullscreen" })) },
+      run: ACT.full },
 
     { sep: "Links" },
     { label: "Send a file…", run: () => $("#pick").click() },
@@ -739,13 +837,6 @@ function saveLink() {
   if (url && !store.get().includes(url)) store.set([...store.get(), url]);
 }
 
-const togglePower = () => act(() => req("/v1/display", {
-  // Not api(): /v1/display takes no screen — the monitors sleep together.
-  method: "POST",
-  headers: { "Content-Type": "application/json", ...auth() },
-  body: JSON.stringify({ action: awake ? "off" : "on" }),
-}));
-
 $("#more").onclick = openMenu;
 $("#filter").oninput = drawMenu;
 $("#filter").onkeydown = e => {
@@ -758,8 +849,6 @@ $("#filter").onkeydown = e => {
 // --- wiring ------------------------------------------------------------------
 
 $("#go").onsubmit = e => { e.preventDefault(); show($("#url").value); };
-$("#home").onclick = () => act(() => api("/v1/home"));
-$("#reload").onclick = () => act(() => api("/v1/reload"));
 $("#look").onclick = look;
 $("#recapture").onclick = look;
 $("#sendtext").onclick = () => sendTyped(false);
@@ -949,6 +1038,10 @@ $("#savecfg").onclick = () => saveSettings(readSettings());
 $("#redetect").onclick = () =>
   saveSettings(readSettings().map(s => ({ ...s, position: "", size: "" })));
 $("#closesetup").onclick = () => $("#setup").close();
+
+// The scroll step is a per-controller preference, not something the agent owns.
+$("#speed").value = localStorage.speed || 40;
+$("#speed").oninput();
 
 if (localStorage.token) refresh();
 else askToken("paste the agent token to get started");
