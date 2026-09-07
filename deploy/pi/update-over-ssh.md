@@ -1,8 +1,22 @@
 # Updating the Pi over SSH
 
-> **Where:** on the Pi, over SSH, as the user that owns the graphical session —
-> except §3, which is on your own machine. Commands here use absolute paths or
-> carry their own `cd`, so any block works from whatever directory you land in.
+> **This runbook spans two machines.** Every block below starts with a comment
+> saying which one, so no block depends on the one before it:
+>
+> - `# on the Pi` — over SSH, as the user that owns the graphical session. Any
+>   directory: those blocks use absolute paths or carry their own `cd`.
+> - `# on your machine` — your desk. `roomctl` and `scp` work from any
+>   directory; `git` (§3) needs your **CrossDrop clone**, so those blocks carry a
+>   `cd`.
+>
+> `roomctl` is on PATH only where you ran `pip install -e .` from the repo root
+> ([README.md, "Controlling a display"](../../README.md)) — activate that venv
+> first if it is in one.
+> It finds its Pi through `roomctl/targets.toml` beside the package, not through
+> your current directory. Files it writes (`shot -o wall.png`) land wherever you
+> ran it.
+>
+> On the Pi:
 >
 > | Path | What lives there |
 > |---|---|
@@ -24,14 +38,16 @@ room.
 ## 1. Getting in
 
 ```sh
+# on your machine — any directory
+tailscale status | grep -i pi     # if you forgot the address
 ssh room@<pi-tailnet-ip>          # or: tailscale ssh room@<hostname>
-tailscale status | grep -i pi     # from your desk, if you forgot the address
 ```
 
 **The one trap, first**, because everything below depends on it. The agent is a
 systemd *user* unit, and an SSH session is not the graphical one:
 
 ```sh
+# on the Pi
 systemctl --user status display-agent
 ```
 
@@ -39,6 +55,7 @@ If that says `Failed to connect to bus`, the session did not inherit the user
 manager. Export it and it works for the rest of the session:
 
 ```sh
+# on the Pi
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus
 ```
@@ -66,17 +83,18 @@ browser by hand) needs `DISPLAY=:0` in front of it.
 Updates are **release-gated**. The Pi deploys the highest `v*` tag and nothing
 else, so pushing to `main` changes nothing on the wall until you say so.
 
-From your machine:
-
 ```sh
+# on your machine, from your CrossDrop clone
+cd ~/src/CrossDrop                          # wherever you cloned it
 git push                                    # wait for CI green
 git tag v1.3.0 && git push --tags
 ```
 
 If `room-display-update.timer` is enabled the Pi picks it up within ~30 min
-(`OnUnitActiveSec=30min`, plus up to 5 min of jitter). Check from your desk:
+(`OnUnitActiveSec=30min`, plus up to 5 min of jitter). Check it landed:
 
 ```sh
+# on your machine — any directory
 roomctl status | jq -r .version             # v1.3.0 once it has landed
 ```
 
@@ -84,6 +102,7 @@ Not enabled yet? That is deliberate — handing a Pi the right to replace its ow
 code is a decision, not a side effect of running `setup.sh`:
 
 ```sh
+# on the Pi
 systemctl --user enable --now room-display-update.timer
 systemctl --user list-timers room-display-update.timer
 ```
@@ -93,6 +112,7 @@ systemctl --user list-timers room-display-update.timer
 ## 4. Don't wait for the timer
 
 ```sh
+# on the Pi
 systemctl --user start room-display-update
 journalctl --user -u room-display-update -f          # watch it decide
 ```
@@ -116,6 +136,7 @@ A tag that failed the live check is latched, so the timer stops re-deploying it
 every 30 minutes and restarting the kiosk twice a cycle:
 
 ```sh
+# on the Pi
 ls -a /opt/room-display/releases/ | grep failed
 #  .failed-v1.3.0
 #  .failed-v1.3.0.jpg      <- what the wall was showing when it failed
@@ -125,12 +146,15 @@ Copy the picture to your machine and look at it — that is usually the whole
 diagnosis:
 
 ```sh
+# on your machine — the .jpg lands in the directory you run this from
+cd ~/Downloads
 scp room@<pi>:/opt/room-display/releases/.failed-v1.3.0.jpg .
 ```
 
 Then fix the cause, and clear the latch to let it try again:
 
 ```sh
+# on the Pi
 rm /opt/room-display/releases/.failed-v1.3.0
 systemctl --user start room-display-update
 ```
@@ -146,6 +170,7 @@ deliberately cannot write it (`root:<user> 640`). It needs `sudo` and a restart
 — nothing here is picked up live.
 
 ```sh
+# on the Pi — absolute path, any directory
 sudo nano /etc/room-display/config.toml
 systemctl --user restart display-agent
 ```
@@ -160,6 +185,7 @@ enabled = true
 then restart, and confirm the agent is actually offering it:
 
 ```sh
+# on your machine — any directory
 roomctl status | jq -r '.supports | join(" ")'
 #  navigate scroll autoscroll media screens window extensions screenshot inspect input
 ```
@@ -181,6 +207,7 @@ first tag is deployed there is nothing to roll back to, so this path has no
 safety net — prefer §3 once you have tags.
 
 ```sh
+# on the Pi — absolute paths, any directory
 git -C /opt/room-display/current pull --ff-only
 /opt/room-display/current/.venv/bin/pip install -q -r \
     /opt/room-display/current/agent/requirements.txt
@@ -192,6 +219,7 @@ up. This is the same gate `update.sh` uses, it binds no port and launches no
 browser, so it is safe with the kiosk live:
 
 ```sh
+# on the Pi
 cd /opt/room-display/current \
   && ROOM_CONFIG=/etc/room-display/config.toml .venv/bin/python -m agent selfcheck
 ```
@@ -206,6 +234,7 @@ restart** — you would be trading a working display for a boot loop.
 From your desk, not from the Pi — the point is that it answers over the tailnet:
 
 ```sh
+# on your machine — any directory; wall.png lands in it
 roomctl status | jq '{version, browser, error, awake}'
 roomctl shot -o wall.png                 # and actually look at it
 ```
@@ -228,6 +257,7 @@ aimed. **Stop the agent first**; it holds the debug port the tests need, and
 they refuse to start otherwise:
 
 ```sh
+# on the Pi — run from /opt/room-display/current, not /etc/room-display
 systemctl --user stop display-agent
 cd /opt/room-display/current
 DISPLAY=:0 ROOM_BROWSER=chromium ROOM_SMOKE=1 \
@@ -249,17 +279,24 @@ came up *healthy* but is wrong — a bad home page, a broken layout — which no
 automatic check can catch.
 
 ```sh
+# on the Pi — absolute paths, any directory. Do NOT cd into `current` first:
+# it is the symlink you are about to move out from under yourself.
 ls -1 /opt/room-display/releases/          # what is available
 readlink /opt/room-display/current         # what is running
 
 ln -sfn /opt/room-display/releases/v1.2.0 /opt/room-display/current
 systemctl --user restart display-agent
+```
+
+```sh
+# on your machine — any directory
 roomctl status | jq -r .version
 ```
 
 Then stop the timer putting the bad one straight back:
 
 ```sh
+# on the Pi
 systemctl --user stop room-display-update.timer
 touch /opt/room-display/releases/.failed-v1.3.0     # or delete the tag upstream
 ```
@@ -282,6 +319,7 @@ logins or your screen settings. Those live outside the release tree:
 ## 10. When the wall is wrong but SSH works
 
 ```sh
+# on the Pi — any directory
 journalctl --user -u display-agent -n 100 --no-pager      # this boot
 journalctl --user -u display-agent -f                     # follow
 journalctl --user -u display-agent | grep /v1/            # what was asked of it
@@ -298,6 +336,7 @@ the box, or you lose the evidence.
 Things worth trying before a restart, all from your desk:
 
 ```sh
+# on your machine — any directory
 roomctl inspect | jq '{title, error_page, url}'   # is it a crash page?
 roomctl reload                                    # re-navigate
 roomctl home
@@ -309,6 +348,7 @@ A restart of the agent relaunches the browser and is nearly always the fix for a
 wedged kiosk. It costs the current page, and any running autoscroll:
 
 ```sh
+# on the Pi
 systemctl --user restart display-agent
 ```
 
