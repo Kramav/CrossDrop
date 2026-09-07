@@ -122,6 +122,54 @@ def test_a_failed_launch_keeps_retrying(tmp_path, monkeypatch):
         assert c.get("/v1/status", headers=H).json()["browser"] == "ok"
 
 
+def test_a_dead_external_home_page_still_leaves_every_screen_navigated(monkeypatch):
+    """_home_when_ready waited on the first http home_url of *any* host, then
+    returned without navigating if it never answered. So one screen whose home
+    was an external site being down left the *other* screen -- the one whose
+    home is this agent's own /home -- parked on the "can't be reached" page this
+    function exists to prevent, with no retry after.
+
+    Now the wait is best-effort and only ever for our own page.
+    """
+    cfg = {"server": {"host": "127.0.0.1", "port": 8080},
+           "display": {"restore_within_minutes": 0},
+           "screens": [{"name": "left", "home_url": "http://192.0.2.1/dashboard"},
+                       {"name": "right", "home_url": "http://127.0.0.1:8080/home"}]}
+    sent, tries = [], []
+    monkeypatch.setattr(appmod.display, "claim", lambda: True)
+    monkeypatch.setattr(appmod.browser, "navigate",
+                        lambda cfg, url, screen: sent.append((screen, url)))
+
+    def refuse(url, timeout=None):
+        tries.append(url)
+        raise appmod.httpx.ConnectError("nothing listening")
+
+    monkeypatch.setattr(appmod.httpx, "get", refuse)
+    monkeypatch.setattr(appmod.time, "sleep", lambda s: None)   # no real minute
+
+    appmod._home_when_ready(cfg)
+    assert len(tries) == 60, "gave up early, or stopped waiting altogether"
+    assert sent == [("left", "http://192.0.2.1/dashboard"),
+                    ("right", "http://127.0.0.1:8080/home")]
+
+
+def test_the_probe_is_our_own_page_not_whatever_sorts_first(monkeypatch):
+    """The docstring always said "wait for the port". It waited for a host that
+    could be anybody's -- on the Pi, an unreachable dashboard would have been
+    probed sixty times while the agent's own port came up in milliseconds."""
+    cfg = {"server": {"host": "127.0.0.1", "port": 8080},
+           "display": {"restore_within_minutes": 0},
+           "screens": [{"name": "left", "home_url": "http://192.0.2.1/dashboard"},
+                       {"name": "right", "home_url": "http://10.0.0.5:8080/home"}]}
+    probed = []
+    monkeypatch.setattr(appmod.display, "claim", lambda: True)
+    monkeypatch.setattr(appmod.browser, "navigate", lambda *a: None)
+    monkeypatch.setattr(appmod.httpx, "get",
+                        lambda url, timeout=None: probed.append(url))
+    appmod._home_when_ready(cfg)
+    assert probed == ["http://10.0.0.5:8080/home"]
+
+
 def test_error_falls_back_to_whatever_the_socket_said(client, no_browser):
     """No launch was attempted here (autolaunch is off), so there is no launch
     error to report -- but the browser is still absent, and saying so beats a
@@ -164,6 +212,41 @@ def test_a_working_browser_reports_no_error(client, monkeypatch):
                         lambda cfg, screen=None: "https://x/")
     s = client.get("/v1/status", headers=H).json()
     assert s["browser"] == "ok" and s["error"] == ""
+
+
+def test_two_threads_never_share_the_bidi_socket(monkeypatch):
+    """Firefox hands out one BiDi session per browser and will not replace it,
+    so there is exactly one websocket -- and every browser route is `def`, i.e.
+    on the threadpool. Two concurrent requests sent and recv()'d on it at once:
+    the id-matching loop in _connect() means one thread eats the other's reply
+    and the loser blocks to its 15s timeout. `session.new` could race too, and
+    the losing socket is the one Firefox never hands back.
+    """
+    from agent import browser
+
+    inside, overlapped, results = [], [], []
+
+    def call(method, params=None):
+        inside.append(method)
+        overlapped.extend(inside[1:])       # anything here beside us
+        time.sleep(0.02)                    # long enough to be caught at it
+        inside.remove(method)
+        return {"echo": method}
+
+    fake_ws = type("WS", (), {"close": lambda self: None})()
+    monkeypatch.setattr(browser, "_bidi_conns", {9222: (fake_ws, call)})
+
+    threads = [threading.Thread(
+        target=lambda i=i: results.append(browser._bidi(9222, f"m{i}")))
+        for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    assert overlapped == [], f"two calls were on the socket at once: {overlapped}"
+    # And nobody got somebody else's answer.
+    assert sorted(r["echo"] for r in results) == ["m0", "m1", "m2", "m3"]
 
 
 # --- autoscroll restart must not orphan the run that replaced it ------------

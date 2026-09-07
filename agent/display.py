@@ -1,11 +1,9 @@
 """Monitor power, as opposed to browser.py's page control.
 
-The Pi has no keyboard or mouse, so anything that blanks the screen and wakes
-only on *input* is a trap: the only cure left is unplugging the box. So the agent
-takes DPMS off the session's hands — automatic timeouts zeroed, power driven
-explicitly — and every /v1 call that touches a screen wakes the display first.
-The thing that turns the monitors back on is the same thing you already use to
-put something on them.
+The Pi has no keyboard, so a screen that blanks and wakes only on *input* is a
+trap curable by unplugging the box. The agent takes DPMS off the session
+instead — automatic timeouts zeroed, power driven explicitly — and every /v1
+call that touches a screen wakes it first.
 
 X11 only, because that is what the Pi runs (Xorg + openbox under lightdm).
 """
@@ -41,10 +39,9 @@ _content: dict[str, bool] = {}                  # screen name -> showing somethi
 
 
 def _run(argv: list[str]) -> str | None:
-    """Run an X tool, or None if it isn't usable. Never raises: a missing tool or
-    a session that moved out from under us must cost the display power feature,
-    not the kiosk. update.sh ships code without re-running setup.sh, so this
-    module has to assume the box may not match what it was installed on."""
+    """Run an X tool, or None if it isn't usable. Never raises: update.sh ships
+    code without re-running setup.sh, so a missing tool or a session that moved
+    must cost the display power feature, not the kiosk."""
     global _ok
     if _ok is None:
         _ok = bool(shutil.which("xset") and os.environ.get("DISPLAY"))
@@ -63,13 +60,10 @@ def _run(argv: list[str]) -> str | None:
 def _claim_dpms() -> bool:
     """Zero the session's own blanking timeouts. True if X accepted all of it.
 
-    DPMS stays *enabled* — `force off`/`force on` need it — but with every
-    automatic timeout zeroed, so nothing sleeps unless this agent says so. The
-    `+dpms` matters: `raspi-config nonint do_blanking` disables DPMS outright on
-    X11, which would leave `force off` a no-op. Correct in either order.
-
-    A list, not a generator: all four have to be attempted, and `all()` over a
-    generator would stop at the first one X refused.
+    DPMS stays *enabled* — `force off`/`force on` need it. The `+dpms` matters:
+    `raspi-config nonint do_blanking` disables DPMS outright on X11, which would
+    leave `force off` a no-op. A list, not a generator: all four have to be
+    attempted, and `all()` would stop at the first one X refused.
     """
     global _claimed
     attempts = [_run(["xset", *args]) is not None
@@ -82,19 +76,16 @@ def _claim_dpms() -> bool:
 def claim() -> bool:
     """Take ownership of display power for this session. True if X accepted.
 
-    Whether it worked is the caller's business because this runs at startup,
-    where X may simply not be up yet. Silently losing it leaves the session's
-    own blanking timeouts in place — and a monitor that sleeps on its own, on a
-    box with no keyboard, is exactly the trap this module exists to avoid.
-    watch() retries until it lands.
+    Whether it worked is the caller's business: this runs at startup, where X
+    may not be up yet, and silently losing it leaves the session's own blanking
+    timeouts in place. watch() retries until it lands.
     """
     global _on
     ok = _claim_dpms()
-    # Sync our idea of the state to reality: the display may well be dark right
-    # now (that is the bug this feature exists for), and without this the first
-    # touch() would see no transition and leave it dark. Startup only — the
-    # retry in watch() must never do this, or re-claiming after a successful
-    # `POST /v1/display off` would light the room back up.
+    # Sync to reality: the display may well be dark right now (that is the bug
+    # this feature exists for), and without this the first touch() sees no
+    # transition and leaves it dark. Startup only — watch()'s retry must never
+    # do this, or re-claiming would undo a deliberate `POST /v1/display off`.
     _on = False
     power(True)
     return ok
@@ -104,11 +95,9 @@ def power(on: bool) -> None:
     """Turn the display on or off. Whole display, both monitors.
 
     ponytail: no per-monitor control, because X11 has none — `xrandr --prop`
-    reports zero DPMS properties on either output. Per-monitor means
-    `xrandr --output HDMI-2 --off`, which drops the CRTC, reflows the layout and
-    costs a browser.place() plus the scroll position on wake. Under wlroots this
-    would be `wlopm --off <output>` and would be per-monitor for free — see
-    PLAN.md §7 future considerations.
+    reports zero DPMS properties on either output, and `--output X --off` drops
+    the CRTC, reflowing the layout and costing a browser.place() plus the scroll
+    position on wake. Under wlroots this is `wlopm --off <output>` and free.
     """
     global _on
     if on == _on:
@@ -123,12 +112,9 @@ def awake() -> bool:
 
 
 def detect() -> list[dict]:
-    """The monitors X actually has, left to right.
-
-    `xrandr --listmonitors` gives name, size and position on one line, which is
-    exactly the three things a [[screen]] block needs — so the agent can read
-    the layout instead of being told it.
-    """
+    """The monitors X actually has, left to right. `xrandr --listmonitors` gives
+    name, size and position on one line — exactly what a [[screen]] block needs,
+    so the agent reads the layout instead of being told it."""
     out = _run(["xrandr", "--listmonitors"])
     found = [{"output": m[1], "position": f"{m[4]},{m[5]}", "size": f"{m[2]}x{m[3]}"}
              for m in (_MONITOR.match(ln) for ln in (out or "").splitlines()) if m]
@@ -136,12 +122,9 @@ def detect() -> list[dict]:
 
 
 def touch(screen: dict, url: str | None = None) -> None:
-    """Record activity on `screen` and wake the display.
-
-    `url` tells us whether the screen is showing something or sitting on its own
-    home page — recorded here, at navigate time, so the idle check never has to
-    ask the browser anything.
-    """
+    """Record activity on `screen` and wake the display. `url` says whether the
+    screen is showing something or sitting on its home page — recorded here, at
+    navigate time, so the idle check never has to ask the browser anything."""
     _last[screen["name"]] = time.monotonic()
     if url is not None:
         _content[screen["name"]] = url != screen["home_url"]
@@ -150,8 +133,8 @@ def touch(screen: dict, url: str | None = None) -> None:
 
 def last_active(name: str) -> float:
     """Last activity on `name` as a unix timestamp. `_last` is monotonic, which
-    means nothing to the *next* process — this is the form that survives a
-    restart, which is what the restore-on-start check compares against."""
+    means nothing to the *next* process; this is the form that survives a
+    restart, and restore-on-start compares against it."""
     return time.time() - (time.monotonic() - _last.get(name, time.monotonic()))
 
 
@@ -170,11 +153,9 @@ def watch(cfg: dict) -> threading.Event:
         while not stop.wait(TICK):
             with contextlib.suppress(Exception):
                 # Keep asking until X takes it. claim() runs while the agent is
-                # starting, which on a slow boot is before the session exists;
-                # an attempt lost there used to be lost for good, leaving the
-                # session's own blanking timeouts to put the monitors to sleep
-                # with nothing able to wake them. Power is deliberately not
-                # touched here — see claim().
+                # starting, which on a slow boot is before the session exists,
+                # and an attempt lost there used to be lost for good. Power is
+                # deliberately not touched here — see claim().
                 if not _claimed:
                     _claim_dpms()
                 if _all_idle(cfg):
@@ -186,8 +167,8 @@ def watch(cfg: dict) -> threading.Event:
 
 def _all_idle(cfg: dict) -> bool:
     """All monitors sleep together (see power()), so one busy screen keeps the
-    display up — which is also the behaviour you want when a second monitor is
-    holding a reference open beside the one you're reading."""
+    display up — which is what you want when a second monitor holds a reference
+    open beside the one you're reading."""
     d = cfg.get("display") or DEFAULTS
     now = time.monotonic()
     for s in cfg["screens"]:

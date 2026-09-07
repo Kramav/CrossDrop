@@ -46,3 +46,42 @@ jobs:
       # `python -m`, not bare `pytest`: the agent package is imported from the
       # repo root and only -m puts the working directory on sys.path.
       - run: python -m pytest -q
+
+  # browser.py is the riskiest file in the repo and every test that speaks real
+  # CDP was skipped in CI, so the protocol code was only ever exercised by hand.
+  # Two comments in that file record bugs found *only* on the Pi -- inspect()
+  # 503ing on chrome-error:// is the one that made update.sh's rollback gate
+  # guard nothing, and it "passed against desktop Chrome every time".
+  #
+  # Its own job, not a matrix step: a headless kiosk is the flakiest thing here,
+  # and a red X on it should read as "go and look", not block the unit suite
+  # from reporting. It still gates a tag -- that is the point.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r agent/requirements.txt && pip install -e .
+      # The runner already ships Google Chrome; browser._exe looks for
+      # `chromium` on PATH, so one symlink beats an apt or snap install that
+      # would be slower and, for chromium on Ubuntu, a snap transitional package.
+      - name: chromium on PATH
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+          sudo ln -sf "$(command -v google-chrome)" /usr/local/bin/chromium
+          # Ubuntu 24.04 AppArmor-blocks unprivileged user namespaces, which is
+          # what Chromium's own sandbox is built on -- it dies at startup rather
+          # than running unsandboxed. Relaxing it beats --no-sandbox: the tests
+          # would then be exercising a configuration no Pi ever runs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          # Not a formality: the kiosk fixture *skips* when it cannot find a
+          # binary, and a silent skip is indistinguishable from a pass. That is
+          # how this whole gap lasted. Fail here instead, loudly.
+          chromium --version
+      - name: real browser over CDP
+        env:
+          ROOM_SMOKE: '1'
+          ROOM_BROWSER: chromium
+        run: xvfb-run -a python -m pytest -q -s tests/test_smoke.py

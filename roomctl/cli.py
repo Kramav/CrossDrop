@@ -84,18 +84,18 @@ def main(argv: list[str] | None = None) -> int:
 
     a = p.parse_args(argv)
 
-    def do_extension():
+    def do_extension(c):
         if a.action == "install":
             if not a.what:
                 raise RuntimeError("extension install needs at least one id")
-            return roomctl.extensions(a.target, install=a.what)
+            return c.extensions(install=a.what)
         if a.action == "remove":
             if len(a.what) != 1:
                 raise RuntimeError("extension remove takes exactly one id")
-            return roomctl.extensions(a.target, remove=a.what[0])
-        return roomctl.extensions(a.target)
+            return c.extensions(remove=a.what[0])
+        return c.extensions()
 
-    def do_shot():
+    def do_shot(c):
         region = None
         if a.region:
             try:
@@ -103,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError:
                 raise RuntimeError(f"--region must be x,y,width,height, got {a.region!r}")
             region = {"x": x, "y": y, "width": w, "height": h}
-        r = roomctl.screenshot(a.target, a.screen, region, a.format, a.quality)
+        r = c.screenshot(a.screen, region, a.format, a.quality)
         # The image never goes to stdout. Every other command prints the agent's
         # reply verbatim so it pipes into jq, and a megabyte of base64 would
         # make that useless -- and dumping raw bytes into a terminal is worse.
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         r["bytes"] = len(image)
         return r
 
-    def do_click():
+    def do_click(c):
         do = "double" if a.double else "right" if a.right else "click"
         if len(a.where) == 2 and all(w.lstrip("-").isdigit() for w in a.where):
             act = {"do": do, "x": int(a.where[0]), "y": int(a.where[1])}
@@ -123,38 +123,39 @@ def main(argv: list[str] | None = None) -> int:
             act = {"do": do, "selector": a.where[0]}
         else:
             raise RuntimeError("click takes a selector, or two numbers: X Y")
-        return roomctl.input([act], a.target, a.screen)
+        return c.input([act], a.screen)
 
-    def do_key():
+    def do_key(c):
         *mods, key = a.combo.split("+")
-        return roomctl.input([{"do": "key", "key": key, "modifiers": mods}],
-                             a.target, a.screen)
+        return c.input([{"do": "key", "key": key, "modifiers": mods}], a.screen)
 
-    def do_scroll():
+    def do_scroll(c):
         if a.top or a.bottom:
-            return roomctl.scroll(a.target, a.screen, to="top" if a.top else "bottom")
-        return roomctl.scroll(a.target, a.screen, dy=-a.dy if a.up else a.dy)
+            return c.scroll(a.screen, to="top" if a.top else "bottom")
+        return c.scroll(a.screen, dy=-a.dy if a.up else a.dy)
 
+    # Straight onto roomctl.Client — there is no by-name wrapper layer any more,
+    # so a new endpoint is a Client method and a line here, not three places.
     try:
-        result = {
-            "status": lambda: roomctl.status(a.target),
-            "screens": lambda: roomctl.screens(a.target),
-            "reload": lambda: roomctl.reload(a.target, a.screen),
-            "home": lambda: roomctl.home(a.target, a.screen),
-            "navigate": lambda: roomctl.navigate(a.url, a.target, a.screen),
-            "upload": lambda: roomctl.upload(a.path, a.target, a.screen),
-            "extension": do_extension,
-            "window": lambda: roomctl.window(a.state, a.target, a.screen),
-            "shot": do_shot,
-            "inspect": lambda: roomctl.inspect(a.target, a.screen),
-            "click": do_click,
-            "type": lambda: roomctl.input([{"do": "type", "text": a.text}],
-                                          a.target, a.screen),
-            "key": do_key,
-            "scroll": do_scroll,
-            "autoscroll": lambda: roomctl.autoscroll(a.action, a.target, a.screen, a.speed),
-            "media": lambda: roomctl.media(a.action, a.target, a.screen, a.value),
-        }[a.cmd]()
+        with roomctl.client(a.target) as c:
+            result = {
+                "status": lambda: c.status(),
+                "screens": lambda: c.screens(),
+                "reload": lambda: c.reload(a.screen),
+                "home": lambda: c.home(a.screen),
+                "navigate": lambda: c.navigate(a.url, a.screen),
+                "upload": lambda: c.upload(a.path, a.screen),
+                "extension": lambda: do_extension(c),
+                "window": lambda: c.window(a.state, a.screen),
+                "shot": lambda: do_shot(c),
+                "inspect": lambda: c.inspect(a.screen),
+                "click": lambda: do_click(c),
+                "type": lambda: c.input([{"do": "type", "text": a.text}], a.screen),
+                "key": lambda: do_key(c),
+                "scroll": lambda: do_scroll(c),
+                "autoscroll": lambda: c.autoscroll(a.action, a.screen, a.speed),
+                "media": lambda: c.media(a.action, a.screen, a.value),
+            }[a.cmd]()
     except (RuntimeError, OSError) as e:
         print(f"roomctl: {e}", file=sys.stderr)
         return 1

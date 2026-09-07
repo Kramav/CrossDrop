@@ -18,10 +18,17 @@ from agent import browser, extensions
 AUTH = {"Authorization": "Bearer t"}
 
 
-def crx(members=None, header=b"Cr24\x03\x00\x00\x00garbage-header-bytes"):
-    """A CRX3: a header, then a zip. The header is why we can't just unzip it."""
+def crx(members=None, header=b"Cr24\x03\x00\x00\x00garbage-header-bytes",
+        compress=False):
+    """A CRX3: a header, then a zip. The header is why we can't just unzip it.
+
+    Stored by default, so a member's size on the wire is its size on disk and a
+    test asserting on either reads the number it wrote. `compress=True` is for
+    the one case where the two must differ -- the zip bomb.
+    """
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED if compress
+                         else zipfile.ZIP_STORED) as z:
         for name, data in (members or {
                 "manifest.json": '{"name": "uBlock Test", "manifest_version": 3}',
                 "sw.js": "// x",
@@ -85,6 +92,22 @@ def test_oversized_download_refused(tmp_path, monkeypatch):
     with pytest.raises(extensions.TooBig):
         extensions.install(str(tmp_path), ID, _open=opener(crx() + b"\0" * 2048))
     assert extensions.scan(str(tmp_path)) == []
+
+
+def test_a_zip_bomb_is_refused_before_it_is_written(tmp_path, monkeypatch):
+    """The download cap bounds the *compressed* bytes. Extraction was unbounded,
+    so a well-compressed CRX under the cap wrote gigabytes onto the SD card --
+    the storage this whole design exists to spare."""
+    monkeypatch.setattr(extensions, "MAX_MB", 1)
+    # 8 MB of zeros compresses to a few KB, so the download cap never fires.
+    blob = crx({"manifest.json": '{"name": "x"}', "bomb.bin": "\0" * (8 << 20)},
+               compress=True)
+    assert len(blob) < 1 << 20, "the download cap would have caught this"
+    with pytest.raises(extensions.TooBig, match="unpacks"):
+        extensions.install(str(tmp_path), ID, _open=opener(blob))
+    assert extensions.scan(str(tmp_path)) == []
+    # Nothing part-written either: the check runs before extractall.
+    assert not any(p.rglob("bomb.bin") for p in tmp_path.iterdir())
 
 
 def test_not_an_extension_leaves_nothing_behind(tmp_path):
@@ -222,12 +245,12 @@ def test_needs_a_token(client):
     assert client.get("/v1/extensions").status_code == 401
 
 
-def test_cli_install_takes_several_ids(monkeypatch, capsys):
+def test_cli_install_takes_several_ids(monkeypatch, capsys, cli_target):
     import roomctl
     from roomctl import cli
     seen = {}
-    monkeypatch.setattr(roomctl, "extensions",
-                        lambda target=None, **kw: seen.update(kw) or {"ok": True})
+    monkeypatch.setattr(roomctl.Client, "extensions",
+                        lambda self, **kw: seen.update(kw) or {"ok": True})
     assert cli.main(["extension", "install", ID, ID2]) == 0
     assert seen["install"] == [ID, ID2]
     assert cli.main(["extension", "remove", ID]) == 0

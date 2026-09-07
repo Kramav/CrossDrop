@@ -108,6 +108,31 @@ def test_files_route_sends_nosniff(client):
     file_id = storage.save(client.app.state.cfg, "ok.txt", [b"hi"])
     r = client.get(f"/files/{file_id}")
     assert r.headers["x-content-type-options"] == "nosniff"
+    # And the structural half: an opaque origin cannot read the UI's
+    # localStorage whatever anyone adds to storage.TYPES later. allow-scripts is
+    # deliberate -- a bare `sandbox` renders Chromium's PDF viewer blank.
+    csp = r.headers["content-security-policy"]
+    assert "sandbox" in csp and "allow-same-origin" not in csp, csp
+
+
+def test_nothing_in_types_can_execute():
+    """The load-bearing half of the /files boundary, and the half that does not
+    depend on a browser honouring a header.
+
+    The CSP is defence in depth against a *future* TYPES entry, and it ships as
+    `sandbox allow-scripts` because a bare `sandbox` is believed to render
+    Chromium's PDF viewer blank -- believed, not measured. So the claim the
+    boundary actually rests on is this one: nothing served from /files is a
+    script-bearing document, and adding one has to fail here first.
+    """
+    executes = {"text/html", "application/xhtml+xml", "image/svg+xml",
+                "text/xml", "application/xml", "text/javascript",
+                "application/javascript", "application/ecmascript"}
+    served = {t.split(";")[0].strip() for t in storage.TYPES.values()}
+    assert not served & executes, (
+        f"{served & executes} would run in the same origin as the web UI's "
+        f"bearer token. Add it only with the CSP sandbox verified on a real "
+        f"browser -- see NEXT-STEPS.md.")
 
 
 def test_storage_caps_and_sweeps(tmp_path):
@@ -147,6 +172,31 @@ def test_a_sweep_with_nothing_to_spare_still_prunes(tmp_path):
         storage.save(cfg, f"f{i}.txt", [b"hi"])
     storage.sweep(cfg)
     assert len(list(tmp_path.glob("*"))) == 1
+
+
+def test_a_file_that_vanishes_mid_sweep_is_not_a_500(tmp_path, monkeypatch):
+    """Two uploads sweep at once, so a file can go between the glob and the
+    stat. save() re-raises anything from sweep(), so the FileNotFoundError came
+    back as a 500 on an upload that was perfectly valid."""
+    cfg = {"upload": {"dir": str(tmp_path), "max_mb": 1, "keep": 1}}
+    for i in range(3):
+        storage.save(cfg, f"f{i}.txt", [b"hi"])
+
+    real = Path.glob
+
+    def racing(self, pat):
+        """Yield each path, then delete the next one before it is stat()ed —
+        exactly what the other upload's sweep does."""
+        found = list(real(self, pat))
+        for i, p in enumerate(found):
+            if i == 0 and len(found) > 1:
+                found[1].unlink()
+            yield p
+
+    monkeypatch.setattr(Path, "glob", racing)
+    storage.sweep(cfg)                              # raised FileNotFoundError
+    monkeypatch.undo()
+    assert storage.save(cfg, "after.txt", [b"hi"])   # and uploads still work
 
 
 def test_keep_zero_still_serves_the_file_just_uploaded(tmp_path):

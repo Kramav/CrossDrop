@@ -2,10 +2,19 @@
 # /etc/room-display/config.toml and is pointed at with ROOM_CONFIG.
 
 token = "change-me"          # bearer token for every /v1 route
-home_url = "/home"           # page the kiosk opens on launch. "/home" is the
-                             # agent's own idle screen; on the Pi make it the
-                             # full tailnet url, e.g. http://100.x.y.z:8080/home
-                             # ("about:blank" is still valid — a white screen.)
+home_url = "/home"           # page the kiosk opens on launch. http, https,
+                             # "about:blank" (a white screen), or a path -- a
+                             # path is this agent's own page and is resolved
+                             # against [server] below, so "/home" becomes
+                             # http://127.0.0.1:8080/home. Anything else is
+                             # refused at startup rather than handed to the
+                             # browser as-is.
+                             #
+                             # On the Pi write the full tailnet url,
+                             # e.g. http://100.x.y.z:8080/home -- its systemd
+                             # unit passes --host "$(tailscale ip -4)" and never
+                             # reads [server], so the resolved 127.0.0.1 form
+                             # would point at a port nothing is listening on.
 
 # One [[screen]] per monitor -- but you probably don't need any. Omit the lot and
 # the agent reads `xrandr --listmonitors` and makes one screen per connected

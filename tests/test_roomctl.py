@@ -47,26 +47,27 @@ def agent(tmp_path, monkeypatch):
 
 
 def test_status_via_default_target(agent):
-    s = roomctl.status()
+    with roomctl.client() as c:
+        s = c.status()
     assert s["up"] is True
     assert s["browser"] == "down", s      # no browser launched, and it says so
 
 
 def test_bad_token_is_a_clean_error(agent):
     agent.write_text(agent.read_text(encoding="utf-8").replace(TOKEN, "wrong"), encoding="utf-8")
-    with pytest.raises(RuntimeError, match="401"):
-        roomctl.status()
+    with pytest.raises(RuntimeError, match="401"), roomctl.client() as c:
+        c.status()
 
 
 def test_unknown_target_names_the_real_ones(agent):
     with pytest.raises(RuntimeError, match="unknown target 'kitchen'.*study"):
-        roomctl.status("kitchen")
+        roomctl.client("kitchen")
 
 
 def test_missing_targets_file_says_what_to_do(tmp_path, monkeypatch):
     monkeypatch.setenv("ROOMCTL_TARGETS", str(tmp_path / "nope.toml"))
     with pytest.raises(RuntimeError, match="targets.example.toml"):
-        roomctl.status()
+        roomctl.client()
 
 
 def test_cli_prints_json_and_exits_zero(agent, capsys):

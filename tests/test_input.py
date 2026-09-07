@@ -490,10 +490,11 @@ def test_a_stopped_sequence_is_logged_as_a_warning(client, cdp, caplog):
 
 # --- the client and the CLI -------------------------------------------------
 
-def test_the_cli_clicks_a_selector_or_a_point(client, monkeypatch, capsys):
+def test_the_cli_clicks_a_selector_or_a_point(client, monkeypatch, capsys,
+                                              cli_target):
     sent = []
-    monkeypatch.setattr(roomctl, "input",
-                        lambda actions, *a, **k: sent.append(actions) or {"ok": True})
+    monkeypatch.setattr(roomctl.Client, "input",
+                        lambda self, actions, *a, **k: sent.append(actions) or {"ok": True})
     assert cli.main(["click", "#login"]) == 0
     assert cli.main(["click", "812", "442"]) == 0
     assert cli.main(["click", "--right", "#x"]) == 0
@@ -503,10 +504,10 @@ def test_the_cli_clicks_a_selector_or_a_point(client, monkeypatch, capsys):
     capsys.readouterr()
 
 
-def test_the_cli_splits_a_key_combo(client, monkeypatch, capsys):
+def test_the_cli_splits_a_key_combo(client, monkeypatch, capsys, cli_target):
     sent = []
-    monkeypatch.setattr(roomctl, "input",
-                        lambda actions, *a, **k: sent.append(actions) or {"ok": True})
+    monkeypatch.setattr(roomctl.Client, "input",
+                        lambda self, actions, *a, **k: sent.append(actions) or {"ok": True})
     assert cli.main(["key", "ctrl+shift+a"]) == 0
     assert sent == [[{"do": "key", "key": "a", "modifiers": ["ctrl", "shift"]}]]
     capsys.readouterr()

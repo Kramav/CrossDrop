@@ -245,13 +245,14 @@ def test_the_client_decodes_to_real_bytes(client, monkeypatch):
 
 
 def test_the_cli_writes_the_file_and_keeps_stdout_pipeable(client, monkeypatch,
-                                                           tmp_path, capsys):
+                                                           tmp_path, capsys,
+                                                           cli_target):
     """Every other command prints the agent's reply verbatim so it pipes into
     jq. A megabyte of base64 would make that useless, so the image goes to the
     file and only what is worth reading goes to stdout."""
-    monkeypatch.setattr(roomctl, "screenshot",
-                        lambda *a, **k: client.post("/v1/screenshot", headers=H,
-                                                    json={}).json())
+    monkeypatch.setattr(roomctl.Client, "screenshot",
+                        lambda self, *a, **k: client.post("/v1/screenshot", headers=H,
+                                                          json={}).json())
     out = tmp_path / "wall.png"
     assert cli.main(["shot", "-o", str(out)]) == 0
     assert out.read_bytes() == base64.b64decode(PIXEL)

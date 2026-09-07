@@ -238,96 +238,18 @@ class Client:
 
 
 def client(target: str | None = None) -> Client:
-    """A Client for a named target from targets.toml."""
+    """A Client for a named target from targets.toml.
+
+        with roomctl.client("study") as c:
+            c.navigate("https://example.com")
+
+    This replaced fourteen module-level functions (`roomctl.status()`,
+    `roomctl.navigate(url, target)`, …) that each did exactly
+    `with client(target) as c: return c.method(...)`. Every new endpoint was
+    written three times — Client method, module function, CLI entry — and the
+    middle one only ever reordered arguments. Two lines here do the same job,
+    and the CLI now holds one connection for a command instead of dialling
+    inside every lambda.
+    """
     e = resolve(target)
     return Client(e["url"], e["token"])
-
-
-# The by-name API: same signatures it has always had, one connection per call.
-# `Client` is the one to hold if you are calling more than once.
-def status(target: str | None = None) -> dict:
-    with client(target) as c:
-        return c.status()
-
-
-def screens(target: str | None = None) -> dict:
-    with client(target) as c:
-        return c.screens()
-
-
-def navigate(url: str, target: str | None = None, screen: str | None = None) -> dict:
-    with client(target) as c:
-        return c.navigate(url, screen)
-
-
-def upload(path: str | Path, target: str | None = None,
-           screen: str | None = None, navigate: bool = True) -> dict:
-    with client(target) as c:
-        return c.upload(path, screen, navigate)
-
-
-def reload(target: str | None = None, screen: str | None = None) -> dict:
-    with client(target) as c:
-        return c.reload(screen)
-
-
-def home(target: str | None = None, screen: str | None = None) -> dict:
-    with client(target) as c:
-        return c.home(screen)
-
-
-def window(state: str, target: str | None = None, screen: str | None = None) -> dict:
-    """normal / minimized / fullscreen. Minimized frees the Pi's desktop without
-    stopping the agent; fullscreen puts the kiosk back."""
-    with client(target) as c:
-        return c.window(state, screen)
-
-
-def extensions(target: str | None = None, install: list[str] | None = None,
-               remove: str | None = None) -> dict:
-    """List, install (Web Store ids) or remove a kiosk extension. Nothing is live
-    until the browser restarts -- the reply says so in `pending_restart`."""
-    with client(target) as c:
-        return c.extensions(install, remove)
-
-
-def screenshot(target: str | None = None, screen: str | None = None,
-               region: dict | None = None, format: str = "png",
-               quality: int = 80) -> dict:
-    """What the screen is actually showing. `image` is base64."""
-    with client(target) as c:
-        return c.screenshot(screen, region, format, quality)
-
-
-def inspect(target: str | None = None, screen: str | None = None) -> dict:
-    """What the page says about itself — no image, no field values."""
-    with client(target) as c:
-        return c.inspect(screen)
-
-
-def input(actions: list[dict], target: str | None = None,
-          screen: str | None = None, deadline_ms: int | None = None) -> dict:
-    """Click, drag, type and press keys, in order. 501 unless the agent's
-    config.toml has `[interact] enabled = true`."""
-    with client(target) as c:
-        return c.input(actions, screen, deadline_ms)
-
-
-def scroll(target: str | None = None, screen: str | None = None,
-           dy: int = 600, to: str | None = None) -> dict:
-    with client(target) as c:
-        return c.scroll(screen, dy, to)
-
-
-def autoscroll(action: str, target: str | None = None, screen: str | None = None,
-               speed: int = 40) -> dict:
-    with client(target) as c:
-        return c.autoscroll(action, screen, speed)
-
-
-def media(action: str = "state", target: str | None = None, screen: str | None = None,
-          value: int = 0) -> dict:
-    """play / pause / toggle / mute / unmute / seek (seconds) / volume (0-100),
-    or "state" to just ask. 404s when the page has no video or audio."""
-    with client(target) as c:
-        return c.media(action, screen, value)

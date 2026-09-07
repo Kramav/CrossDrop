@@ -77,6 +77,19 @@ def test_firefox_advertises_only_what_it_can_do():
     assert "media" in browser.supports({"browser": {"kind": "chromium"}})
 
 
+def test_the_guard_reads_the_table_rather_than_naming_a_browser():
+    """There used to be six hand-copied `if kind == "firefox": raise` blocks
+    kept in step with SUPPORTS by hand. _require() reads the table instead, so
+    adding a capability to it is the whole change."""
+    ff = {"browser": {"kind": "firefox"}}
+    browser._require(ff, "navigate")                    # listed: no raise
+    with pytest.raises(NotImplementedError, match="scroll needs CDP"):
+        browser._require(ff, "scroll")
+    # An unknown kind takes the CDP path everywhere else in browser.py, so it
+    # gets the CDP answer here too rather than a conservative lie.
+    browser._require({"browser": {"kind": "brave"}}, "screenshot")
+
+
 def test_every_cdp_only_capability_has_a_guard():
     """SUPPORTS is hand-maintained beside the NotImplementedErrors it describes.
     If a capability is listed for chromium and withheld from firefox, calling it
@@ -227,9 +240,16 @@ def test_a_box_that_is_off_is_not_the_same_as_a_box_that_said_no():
     assert e.value.status == 0
 
 
-def test_the_named_target_api_is_unchanged(live, tmp_path, monkeypatch):
+def test_a_named_target_still_needs_no_url_or_token(live, tmp_path, monkeypatch):
+    """`client(name)` is what is left of the by-name API: targets.toml supplies
+    the url and the token, and the only entry point is a Client."""
     targets = tmp_path / "targets.toml"
     targets.write_text(f'[study]\nurl = "{live}"\ntoken = "{TOKEN}"\n', encoding="utf-8")
     monkeypatch.setenv("ROOMCTL_TARGETS", str(targets))
-    assert roomctl.status()["up"] is True
-    assert roomctl.status("study")["up"] is True
+    with roomctl.client() as c:             # the only target, so it is the default
+        assert c.status()["up"] is True
+    with roomctl.client("study") as c:
+        assert c.status()["up"] is True
+    # The wrapper layer is gone, and staying gone is the point of the finding:
+    # every endpoint used to be written a third time here for no gain.
+    assert not hasattr(roomctl, "navigate"), "the by-name layer came back"

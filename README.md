@@ -226,7 +226,20 @@ except roomctl.NotFound:      # 404: no such screen or file, nothing playing
 ```
 
 `roomctl.client("study")` builds one from a named target if you do want
-`targets.toml`. The by-name functions (`roomctl.status()`, …) are unchanged.
+`targets.toml`:
+
+```python
+with roomctl.client("study") as c:      # url + token out of targets.toml
+    c.home(screen="all")
+```
+
+> **Breaking, v1.3.0:** the by-name module functions (`roomctl.status(target)`,
+> `roomctl.navigate(url, target, screen)`, …) are gone. Each was one line of
+> `with client(target) as c: return c.method(...)` with the arguments in a
+> different order, and every new endpoint had to be written in three places.
+> Replace `roomctl.navigate(url, "study")` with
+> `with roomctl.client("study") as c: c.navigate(url)`. `roomctl.Client` and
+> `roomctl.client` are unchanged, and the `roomctl` CLI is unaffected.
 
 ## Video and audio
 
@@ -437,9 +450,18 @@ Three things to know if the caller is a program rather than a person:
 restart timer drops any running autoscroll, and a poller has no other way to
 notice.
 
-**`up` is not a health check.** It is always `true` and means "this agent
-answered", which the HTTP 200 already told you. It stays because `/v1` is frozen.
-**`browser` and `error` are the fields that carry news** — check those.
+### Two frozen warts
+
+Both are wrong, both stay, because `/v1` is frozen and a client that reads them
+would change behaviour the day they were fixed.
+
+- **`up` is not a health check.** It is always `true` and means "this agent
+  answered", which the HTTP 200 already told you. **`browser` and `error` are
+  the fields that carry news** — check those.
+- **`/v1/autoscroll` puts a screen *name* in `current_url`.** It reuses the
+  `navigate` reply shape but fills it with the last targeted screen's name, and
+  leaves `screens` empty — unlike every other fan-out route. Read the status
+  code; `GET /v1/screens` carries the real per-screen `autoscroll` flag.
 
 **The agent outlives a browser that will not start.** No binary, a debug port
 that never comes up, an X session slower than the agent — none of them stop it

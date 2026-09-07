@@ -23,10 +23,9 @@ import websocket
 
 from . import extensions
 
-# A child of app.py's "room" logger, so it inherits the level ROOM_LOG sets and
-# lands in the same journal. The print()s elsewhere in this file predate that and
-# are startup notices rather than diagnostics; this one is something you go
-# looking for after a screen has behaved oddly.
+# A child of app.py's "room" logger: same level, same journal. The print()s
+# elsewhere here are startup notices; this is what you go looking for after a
+# screen has behaved oddly.
 log = logging.getLogger("room.browser")
 
 CANDIDATES = {
@@ -49,14 +48,15 @@ CANDIDATES = {
 }
 
 
-# What each backend can actually do, reported by /v1/status as `supports`. A
-# program checks this once instead of discovering the shape of the API by
-# collecting 501s -- and the dev box ships firefox while the Pi ships chromium,
-# so the two really do expose different APIs.
+# What each backend can do, reported by /v1/status as `supports`, so a program
+# checks once instead of discovering the API by collecting 501s. The dev box
+# ships firefox and the Pi chromium, so these really are different APIs.
 #
-# Every name absent here has a matching NotImplementedError below; keep the two
-# in step. Routes that never touch the browser (display, upload) are not listed:
-# they work on every backend, so there is nothing to check.
+# The table is also the *enforcement*: _require() reads it, so a name missing
+# here 501s without anyone writing the check. It replaced six hand-copied
+# `if kind == "firefox": raise` blocks -- a sync nobody could see going wrong.
+#
+# Routes that never touch the browser (display, upload) are not listed.
 _CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window", "extensions",
              "screenshot", "inspect", "input")
 SUPPORTS = {
@@ -68,14 +68,25 @@ SUPPORTS = {
 }
 
 
-def interactive(cfg: dict) -> bool:
-    """Is `POST /v1/input` switched on? Off unless config.toml says otherwise.
+def _require(cfg: dict, feature: str) -> None:
+    """501 unless this backend does `feature`. Reads SUPPORTS, so the table and
+    the refusal can never drift apart.
 
-    It is the only route that acts *as* whoever the kiosk is logged in as, so it
-    is the one thing here that ships off. Install-time and file-only, in the
-    config the agent cannot write (root:<user> 640) -- a switch the API can turn
-    on for itself is not a switch.
+    Not supports(): that one also hides `input` when [interact] is off, which is
+    the route's own check and a different answer (app.py names the config key).
     """
+    kind = cfg["browser"]["kind"]
+    # Unknown kinds take the CDP path everywhere else in this file.
+    if feature not in SUPPORTS.get(kind, SUPPORTS["chromium"]):
+        raise NotImplementedError(
+            f"{feature} needs CDP; use kind = \"chromium\" or \"edge\"")
+
+
+def interactive(cfg: dict) -> bool:
+    """Is `POST /v1/input` switched on? Off unless config.toml says otherwise --
+    it is the only route that acts *as* whoever the kiosk is logged in as. File
+    only, in the config the agent cannot write (root:<user> 640): a switch the
+    API can turn on for itself is not a switch."""
     return bool((cfg.get("interact") or {}).get("enabled"))
 
 
@@ -112,9 +123,9 @@ def screens(cfg: dict) -> list[dict]:
 def launch(cfg: dict) -> subprocess.Popen:
     """Start the kiosk browser and block until its debug port answers.
 
-    One browser, one profile, one debug port -- and one window per screen. Two
-    browser instances would double the RAM on a tmpfs profile and, worse, split
-    your logins across two cookie stores (PLAN.md §6 SSO note).
+    One browser, one profile, one debug port, one window per screen. Two
+    instances would double the RAM on a tmpfs profile and split your logins
+    across two cookie stores (PLAN.md §6 SSO note).
     """
     b = cfg["browser"]
     kind, port = b["kind"], b["debug_port"]
@@ -130,35 +141,30 @@ def launch(cfg: dict) -> subprocess.Popen:
     else:
         argv = [_exe(kind, b["path"]), f"--remote-debugging-port={port}",
                 # No --remote-allow-origins=*. Chrome >= 111 blocks CDP
-                # websockets carrying an Origin header specifically to stop page
-                # content reaching the debug port — and the page here is
-                # arbitrary, by design. We send no Origin at all (_rpc passes
-                # suppress_origin=True unconditionally), so the flag bought
+                # websockets carrying an Origin specifically to keep page
+                # content off the debug port, and the page here is arbitrary by
+                # design. _rpc sends no Origin at all, so the flag bought
                 # nothing and disabled that defense for every rendered page.
                 f"--user-data-dir={profile}", "--kiosk",
-                # Never touch the system keyring. Chromium's default on Linux is
-                # libsecret, and under desktop autologin the login keyring is
-                # locked (nobody typed a password), so it puts up a modal unlock
-                # dialog over the kiosk — on a Pi with no keyboard, forever.
-                # "basic" is Chromium's own store; ignored on Windows.
+                # Never the system keyring: under desktop autologin the login
+                # keyring is locked (nobody typed a password), so libsecret puts
+                # a modal unlock dialog over the kiosk, forever. "basic" is
+                # Chromium's own store; ignored on Windows.
                 "--password-store=basic",
                 # Same class of problem: after a power cut Chromium offers to
                 # restore the last session in a bubble nobody can dismiss.
                 "--disable-session-crashed-bubble",
-                # Phase 6 puts the profile on tmpfs, so this cache is RAM the Pi
-                # cannot get back. Uncapped, Chromium sizes it from free space
-                # and eventually fills /run/user/<uid>, taking the kiosk with it.
+                # The profile is on tmpfs, so this cache is RAM. Uncapped,
+                # Chromium sizes it from free space and fills /run/user/<uid>.
                 f"--disk-cache-size={b['disk_cache_mb'] * 1024 * 1024}",
-                # A pushed video should start playing. Chromium's default blocks
-                # autoplay with sound until someone clicks, and nobody can click
-                # this box. /v1/media sends userGesture anyway, so this only
-                # covers the case of arriving on a page that autoplays.
+                # Chromium blocks autoplay with sound until someone clicks, and
+                # nobody can click this box. /v1/media sends userGesture anyway,
+                # so this only covers arriving on a page that autoplays.
                 "--autoplay-policy=no-user-gesture-required",
                 "--no-first-run", "--no-default-browser-check"]
-        # Unpacked extensions, because the kiosk has no UI to install one through
-        # and Debian's Chromium ignores ExtensionInstallForcelist (deploy/pi/
-        # README.md §10). A directory, not a list of paths, so installing one is
-        # a file operation and never a config edit -- see install-extension.sh.
+        # Unpacked, because the kiosk has no install UI and Debian's Chromium
+        # ignores ExtensionInstallForcelist (deploy/pi/README.md §10). A
+        # directory, so installing one is a file operation, not a config edit.
         _loaded[:] = extensions.scan(b.get("extensions_dir", ""))
         if _loaded:
             print(f"browser: loading {len(_loaded)} extension(s): "
@@ -171,9 +177,9 @@ def launch(cfg: dict) -> subprocess.Popen:
                      # the extension silently stops loading -- check the argv
                      # against `chromium --help` before assuming the path is wrong.
                      "--disable-features=DisableLoadExtensionCommandLineSwitch"]
-        # Wayland gives the compositor final say on window position and Chromium
-        # ignores --window-position there. Under XWayland the move is an X11
-        # configure request, which labwc honours. See deploy/pi/README.md.
+        # Wayland gives the compositor final say on position and Chromium
+        # ignores --window-position there; under XWayland the move is an X11
+        # configure request, which labwc honours. deploy/pi/README.md.
         if len(scr) > 1:
             argv += ["--ozone-platform=x11"]
         if scr[0]["position"]:
@@ -186,10 +192,9 @@ def launch(cfg: dict) -> subprocess.Popen:
 
     _targets.clear()
     if len(scr) > 1 or scr[0]["position"]:
-        # Window 1 exists already (--kiosk put it wherever the compositor liked),
-        # so it is *moved* rather than opened. Without this its `position` would
-        # silently do nothing and the only way to choose its monitor would be to
-        # reorder the config until it guessed right.
+        # Window 1 already exists (--kiosk put it wherever the compositor
+        # liked), so it is *moved*. Without this its `position` does nothing and
+        # choosing its monitor means reordering the config until it guesses.
         place(cfg, scr[0])
     for s in scr[1:]:
         open_window(cfg, s)
@@ -197,9 +202,8 @@ def launch(cfg: dict) -> subprocess.Popen:
 
 
 def _pair(value: str, sep: str, field: str) -> tuple[int, int]:
-    """Parse "1366,0" / "2560x1440". A typo here breaks the kiosk at boot on a
-    box with no keyboard, so it fails with the offending value, not a ValueError
-    from deep inside a generator."""
+    """Parse "1366,0" / "2560x1440". A typo breaks the kiosk at boot on a box
+    with no keyboard, so the error names the offending value."""
     try:
         a, b = value.split(sep)
         return int(a), int(b)
@@ -213,14 +217,12 @@ def _place(call, target_id: str, position: str, size: str = "") -> None:
     if not position:
         return
     x, y = _pair(position, ",", "position")
-    # Sized to the monitor when we know it: the window is briefly visible between
-    # the move and the fullscreen, and an 800x600 box on a 1440p panel is a
-    # conspicuous flash at every boot. Cosmetic only -- fullscreen overrides it.
+    # Sized to the monitor when we know it: the window is briefly visible
+    # between the move and the fullscreen. Cosmetic -- fullscreen overrides.
     w, h = _pair(size, "x", "size") if size else (800, 600)
     win = call("Browser.getWindowForTarget", {"targetId": target_id})["windowId"]
     # Move first, fullscreen second: Chromium refuses to move a window that is
-    # already fullscreen, so the order here is the whole trick. Setting "normal"
-    # is also what un-fullscreens a --kiosk window so it *can* be moved.
+    # already fullscreen, and "normal" is what un-fullscreens a --kiosk one.
     call("Browser.setWindowBounds", {"windowId": win, "bounds": {
         "left": x, "top": y, "width": w, "height": h, "windowState": "normal"}})
     # ponytail: let the move land before asking for fullscreen. CDP returns as
@@ -235,7 +237,7 @@ def _place(call, target_id: str, position: str, size: str = "") -> None:
 
 def place(cfg: dict, screen: dict) -> str:
     """Move the window already belonging to `screen` onto its monitor."""
-    _require_cdp(cfg)
+    _require(cfg, "screens")
     port = cfg["browser"]["debug_port"]
     page = _cdp_page(cfg, screen["name"])
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
@@ -249,21 +251,19 @@ WINDOW_STATES = ("normal", "minimized", "fullscreen")
 def window(cfg: dict, screen: dict, state: str) -> str:
     """Put one screen's kiosk window aside, or back.
 
-    The escape hatch from --kiosk: with the window minimized the Pi's own
-    desktop is reachable without stopping the agent, which is otherwise the
-    only way in and costs you the session.
+    The escape hatch from --kiosk: minimized, the Pi's own desktop is reachable
+    without stopping the agent, which is otherwise the only way in.
 
-    "fullscreen" goes via "normal" for the same reason _place() does --
-    Chromium will not transition straight out of minimized, and a --kiosk
-    window has to be un-fullscreened before its bounds can change.
+    "fullscreen" goes via "normal" for the same reason _place() does: Chromium
+    will not transition straight out of minimized, and a --kiosk window has to
+    be un-fullscreened before its bounds can change.
 
-    ponytail: fire-and-forget, the agent does not track where the window went.
-    So a navigate to a minimized window renders offscreen until someone asks
-    for fullscreen again (or the nightly restart does). Read windowState back
-    out of Browser.getWindowForTarget and carry it in ScreenOut if that ever
-    needs to be visible -- it costs a CDP roundtrip on every status poll.
+    ponytail: fire-and-forget, so a navigate to a minimized window renders
+    offscreen until someone asks for fullscreen again. Read windowState back out
+    of Browser.getWindowForTarget and carry it in ScreenOut if that has to be
+    visible -- it costs a CDP roundtrip on every status poll.
     """
-    _require_cdp(cfg)
+    _require(cfg, "window")
     if state not in WINDOW_STATES:
         raise ValueError(f"state must be one of {', '.join(WINDOW_STATES)}")
     page = _cdp_page(cfg, screen["name"])
@@ -286,7 +286,7 @@ def window(cfg: dict, screen: dict, state: str) -> str:
 
 def open_window(cfg: dict, screen: dict) -> str:
     """Open a fullscreen window for `screen` and return its CDP target id."""
-    _require_cdp(cfg)
+    _require(cfg, "screens")
     port = cfg["browser"]["debug_port"]
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
         tid = call("Target.createTarget",
@@ -296,20 +296,13 @@ def open_window(cfg: dict, screen: dict) -> str:
     return tid
 
 
-def _require_cdp(cfg: dict) -> None:
-    if cfg["browser"]["kind"] == "firefox":
-        raise NotImplementedError(
-            "multiple screens need CDP; use kind = \"chromium\" or \"edge\"")
-
-
 def _require_addressable(cfg: dict, screen: str | None) -> None:
     """Refuse a screen Firefox cannot actually reach.
 
-    One BiDi session per browser means one addressable window, so the `screen`
-    argument has nowhere to go on this backend. Silently driving the first
-    monitor instead is the worst available answer: a caller asking for `all`
-    gets two successes and one changed monitor, and nothing anywhere says so.
-    Fail, and let it surface as a 501 the same way scroll and media do.
+    One BiDi session per browser means one addressable window, so `screen` has
+    nowhere to go here. Driving the first monitor instead is the worst answer: a
+    caller asking for `all` gets two successes and one changed monitor, and
+    nothing says so. Fail, as a 501, the same way scroll and media do.
     """
     first = screens(cfg)[0]["name"]
     if screen and screen != first:
@@ -318,14 +311,13 @@ def _require_addressable(cfg: dict, screen: str | None) -> None:
 
 
 def stop(cfg: dict, proc: subprocess.Popen) -> None:
-    """Shut the browser down *and its children*. Both Firefox and Chromium fork a
-    process tree; terminating the launcher alone leaves a fullscreen kiosk on
-    screen and the debug port held — on a box with no keyboard, forever.
+    """Shut the browser down *and its children*. Both browsers fork a process
+    tree, and terminating the launcher alone leaves a fullscreen kiosk on screen
+    and the debug port held — on a box with no keyboard, forever.
 
-    Ask over the debug protocol first, because the pid is not a reliable handle:
-    on Windows the msedge/chrome launcher exits the moment it hands off (poll()
-    returns 0 with the browser very much alive), so `taskkill /T` walks a tree
-    that is no longer rooted at that pid and every process survives.
+    Over the debug protocol first, because the pid is not a reliable handle: on
+    Windows the msedge/chrome launcher exits the moment it hands off, so
+    `taskkill /T` walks a tree no longer rooted at that pid.
     """
     b = cfg["browser"]
     kind, port = b["kind"], b["debug_port"]
@@ -351,8 +343,8 @@ def stop(cfg: dict, proc: subprocess.Popen) -> None:
 
 
 def _wait_gone(kind: str, port: int, timeout: float = 10.0) -> bool:
-    """True once the debug port stops answering — the browser is really down.
-    The port, not the pid, is what the next agent start collides with."""
+    """True once the debug port stops answering. The port, not the pid, is what
+    the next agent start collides with."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -386,9 +378,8 @@ def navigate(cfg: dict, url: str, screen: str | None = None) -> str:
     if b["kind"] == "firefox":
         _require_addressable(cfg, screen)
         port = b["debug_port"]
-        # "interactive", not "none": we want /v1/navigate to mean the page really
-        # committed, and it matches CDP's Page.navigate, which returns after commit.
-        # A page slower than the 15s socket timeout surfaces as a 503.
+        # "interactive", not "none", so /v1/navigate means the page committed --
+        # matching CDP's Page.navigate. Slower than the 15s timeout is a 503.
         _bidi(port, "browsingContext.navigate",
               {"context": _top_context(port)["context"], "url": url,
                "wait": "interactive"})
@@ -419,13 +410,11 @@ def scroll(cfg: dict, screen: str | None = None, dy: int = 0,
            to: str | None = None) -> None:
     """Scroll one screen. `to` jumps to top/bottom, otherwise `dy` pixels.
 
-    Synthesised as a real wheel event, not `window.scrollBy`: Chromium's PDF
-    viewer is a plugin that ignores scripted window scrolling, and showing a PDF
-    is half of what this display is for.
+    A real wheel event, not `window.scrollBy`: Chromium's PDF viewer is a plugin
+    that ignores scripted window scrolling, and a PDF is half of what this
+    display is for.
     """
-    if cfg["browser"]["kind"] == "firefox":
-        raise NotImplementedError(
-            "scroll needs CDP; use kind = \"chromium\" or \"edge\"")
+    _require(cfg, "scroll")
     if to is not None and to not in _JUMP:
         raise ValueError(f"to must be one of {sorted(_JUMP)}")
     page = _cdp_page(cfg, screen)
@@ -440,11 +429,9 @@ def scroll(cfg: dict, screen: str | None = None, dy: int = 0,
 
 AUTOSCROLL_TICK = 0.1
 
-# Seconds of scrolling per synthesised gesture. The whole trade: longer means
-# fewer round-trips, shorter means `stop` bites sooner, because a gesture runs
-# to completion before we look at the event again. Override with
-# ROOM_GESTURE_SECS — how smooth this looks is a property of the panel and the
-# GPU, not of the code, so it is worth being able to tune without a deploy.
+# Seconds of scrolling per synthesised gesture: longer means fewer round-trips,
+# shorter means `stop` bites sooner, since a gesture runs to completion first.
+# Tunable, because how smooth this looks is a property of the panel and GPU.
 GESTURE_SECS = float(os.getenv("ROOM_GESTURE_SECS", "0.5"))
 
 
@@ -452,29 +439,21 @@ def autoscroll(cfg: dict, screen: str | None, speed: int,
                stop: threading.Event) -> None:
     """Scroll one screen `speed` pixels a tick until `stop` is set.
 
-    Smoothness is the point. Ten wheel events a second is ten visible steps a
-    second, and shrinking the step only trades stepping for ten times the
-    round-trips on a Pi that is already rendering the page being scrolled.
+    Smoothness is the point. Ten wheel events a second is ten visible steps;
     Input.synthesizeScrollGesture hands the whole movement to Chromium, which
-    interpolates it at the compositor's frame rate — smoother *and* cheaper, two
-    calls a second instead of ten.
+    interpolates it at the compositor's frame rate — smoother *and* two calls a
+    second instead of ten, on a Pi already busy rendering the page.
 
-    `speed` still means pixels per AUTOSCROLL_TICK, so the CLI flag and the web
-    UI slider keep the values they always had; the gesture API is told pixels
-    per second.
+    `speed` is still pixels per AUTOSCROLL_TICK, so the CLI flag and the UI
+    slider keep their values; the gesture API is told pixels per second.
 
-    One connection for the whole run, not one per tick (PLAN.md §11 finding 5).
-    The viewport centre is read once for the same reason: a fullscreen kiosk
-    window does not resize.
-
-    A window that closes under us kills the socket and ends the run, where the
-    old shape would have reconnected to whatever target replaced it. That is the
-    better answer — the only things that change a target are a navigation, which
-    already stops autoscroll deliberately, and the window going away.
+    One connection for the whole run, not one per tick (PLAN.md §11 finding 5),
+    and the viewport centre read once — a fullscreen kiosk does not resize. A
+    window closing under us kills the socket and ends the run, which is right:
+    the only other thing that changes a target is a navigation, and that already
+    stops autoscroll deliberately.
     """
-    if cfg["browser"]["kind"] == "firefox":
-        raise NotImplementedError(
-            "autoscroll needs CDP; use kind = \"chromium\" or \"edge\"")
+    _require(cfg, "autoscroll")
     page = _cdp_page(cfg, screen)
     with _rpc(page["webSocketDebuggerUrl"]) as call:
         x, y = _viewport_centre(call)
@@ -497,17 +476,15 @@ def autoscroll(cfg: dict, screen: str | None, speed: int,
                         # No momentum: a wall display should stop where it stops.
                         "preventFling": True})
                 except RuntimeError as e:
-                    # The gesture API is experimental; an old build may not have
-                    # it. Drop to wheel ticks for the rest of the run rather
-                    # than ending an autoscroll someone asked for.
+                    # Experimental API; an old build may not have it. Drop to
+                    # wheel ticks rather than end a scroll someone asked for.
                     print(f"autoscroll: no smooth gesture ({e}); "
                           f"falling back to wheel ticks", flush=True)
                     smooth = False
                     continue
-                # The call returns when the gesture finishes, so normally there
-                # is nothing left to wait for. If a target ignored it and
-                # answered instantly, this is what stops the loop spinning at
-                # 100% CPU on the Pi.
+                # The call returns when the gesture finishes, so normally
+                # nothing is left to wait for. This is what stops a target that
+                # answered instantly spinning the loop at 100% CPU.
                 left = GESTURE_SECS - (time.monotonic() - started)
                 if left > 0 and stop.wait(left):
                     break
@@ -520,25 +497,23 @@ def autoscroll(cfg: dict, screen: str | None, speed: int,
 
 
 # --- input ------------------------------------------------------------------
-# Click and type, for the one thing this display genuinely cannot do otherwise:
-# the Pi has no keyboard, so an expired SSO login or a consent wall is a page
-# nobody can get past (PLAN.md §6 "SSO expiry").
+# Click and type, for the one thing this display cannot do otherwise: no
+# keyboard, so an expired SSO login or a consent wall is a page nobody can get
+# past (PLAN.md §6 "SSO expiry").
 #
-# Everything here is dispatched into one CDP *target* -- the same connection
-# navigate uses. It reaches that window's renderer and nothing else: it cannot
-# alt-tab, cannot reach the window manager, cannot close the kiosk, and cannot
-# type into any other application. That is the boundary, and it is a property of
-# the transport rather than a rule anyone has to remember.
+# Everything goes into one CDP *target* -- the connection navigate uses. It
+# reaches that window's renderer and nothing else: no alt-tab, no window
+# manager, no other application. The boundary is a property of the transport
+# rather than a rule anyone has to remember.
 
 INPUT_ACTIONS = ("click", "double", "right", "move", "drag", "type", "key", "wait")
 
 # Modifier bits, as CDP wants them.
 _MODIFIERS = {"alt": 1, "ctrl": 2, "control": 2, "meta": 4, "cmd": 4, "shift": 8}
 
-# The named keys worth having: everything a login form or a PDF viewer needs.
+# Everything a login form or a PDF viewer needs, as
 # name -> (windowsVirtualKeyCode, key, text). A single printable character is
-# handled separately; anything else is refused rather than guessed at, because a
-# key that silently does nothing is worse than one that says it is unsupported.
+# handled separately; anything else is refused rather than guessed at.
 _KEYS = {
     "Enter": (13, "Enter", "\r"), "Tab": (9, "Tab", "\t"),
     "Escape": (27, "Escape", ""), "Backspace": (8, "Backspace", ""),
@@ -551,9 +526,9 @@ _KEYS = {
 
 _BUTTONS = {"click": ("left", 1), "double": ("left", 2), "right": ("right", 1)}
 
-# Find an element and give back where to click it. scrollIntoView first: an
-# element below the fold has coordinates outside the viewport, and dispatching a
-# click at those lands on nothing at all while reporting success.
+# Where to click an element. scrollIntoView first: one below the fold has
+# coordinates outside the viewport, and a click there hits nothing while
+# reporting success.
 _FIND_JS = """(() => {
   const el = document.querySelector(%(selector)s);
   if (!el) return null;
@@ -606,10 +581,9 @@ def _key_spec(key: str, modifiers: list) -> dict:
 def _check(a: dict) -> None:
     """Everything about one action that can be wrong without asking the browser.
 
-    Run over the whole list before any of it executes, because there is no undo:
-    a typo in action 3 must not be discovered after actions 1 and 2 have already
-    clicked something and typed into it. `/v1/extensions` sets the precedent --
-    the caller's typo is total, a runtime failure is per-item.
+    Run over the whole list before any of it executes: there is no undo, and a
+    typo in action 3 must not be found after 1 and 2 have clicked something and
+    typed into it. Same rule as /v1/extensions -- a typo is total.
     """
     do = a.get("do")
     if do not in INPUT_ACTIONS:
@@ -651,9 +625,8 @@ def _act(call, a: dict) -> dict:
         x0, y0 = _point(a.get("from"), "from")
         x1, y1 = _point(a.get("to"), "to")
         _mouse(call, "mousePressed", x0, y0)
-        # Intermediate moves, not just press-then-release: HTML5 drag and drop
-        # and every canvas app want to see the pointer travel, and a single jump
-        # is routinely ignored as a stray click.
+        # Intermediate moves: HTML5 drag-and-drop and canvas apps want to see
+        # the pointer travel, and a single jump reads as a stray click.
         for i in range(1, 6):
             _mouse(call, "mouseMoved", x0 + (x1 - x0) * i // 5,
                    y0 + (y1 - y0) * i // 5)
@@ -662,8 +635,8 @@ def _act(call, a: dict) -> dict:
 
     if do == "type":
         # insertText, not a key event per character: one round trip instead of
-        # two per letter, and it still fires beforeinput/input, which is what a
-        # framework-controlled field actually listens for.
+        # two per letter, and it still fires the beforeinput/input a
+        # framework-controlled field listens for.
         call("Input.insertText", {"text": a["text"]})
         return {}
 
@@ -702,25 +675,20 @@ def input(cfg: dict, screen: str | None, actions: list[dict],
           deadline: float | None = None) -> list[dict]:
     """Run `actions` against one screen, in order, over one connection.
 
-    A list rather than a route per verb: a login is click, type, click, type,
-    click, and as five requests that is five websockets to the debug port and
-    five chances to interleave with something else. One request is one
-    connection, one ordering, and one audit record.
+    A list rather than a route per verb: a login is five actions, and as five
+    requests that is five websockets and five chances to interleave. One
+    request is one connection, one ordering, one audit record.
 
-    **Stops at the first failure.** Half a login sequence is the dangerous case:
-    if the click that focuses the password box missed, the next action would
-    type the password into whatever does have focus. The result list says which
-    action stopped it.
+    **Stops at the first failure**, because if the click that focuses the
+    password box missed, the next action types the password into whatever does
+    have focus. The result list says which action stopped it.
 
-    `deadline` is a time.monotonic() value. Checked between actions, so a long
+    `deadline` is a time.monotonic() value, checked between actions so a long
     list cannot hold a threadpool thread indefinitely.
     """
-    if cfg["browser"]["kind"] == "firefox":
-        # BiDi has input.performActions, so this is unwritten rather than
-        # impossible -- but the Pi runs chromium and the dev box is the only
-        # firefox. Same 501 as scroll and media.
-        raise NotImplementedError(
-            "input needs CDP; use kind = \"chromium\" or \"edge\"")
+    # BiDi has input.performActions, so on firefox this is unwritten rather than
+    # impossible -- but the Pi runs chromium. Same 501 as scroll and media.
+    _require(cfg, "input")
     if not actions:
         raise ValueError("no actions")
     for i, a in enumerate(actions):
@@ -752,14 +720,12 @@ def input(cfg: dict, screen: str | None, actions: list[dict],
 
 MEDIA_ACTIONS = ("state", "play", "pause", "toggle", "mute", "unmute", "seek", "volume")
 
-# Whatever the page is playing, driven through the element itself — there is no
-# CDP "media" domain to ask, and every player worth showing on a wall is an
-# HTML5 <video>/<audio> underneath its own controls.
+# Driven through the element itself: there is no CDP "media" domain, and every
+# player worth showing on a wall is an HTML5 <video>/<audio> underneath.
 #
-# ponytail: top frame, main world, no shadow DOM. A site that embeds its player
-# in a cross-origin <iframe> (an embedded YouTube, not youtube.com itself) has no
-# media element here and reports nothing playing. Reaching those needs a per-frame
-# execution context, i.e. Runtime.enable and event handling in _connect().
+# ponytail: top frame, main world, no shadow DOM -- a cross-origin <iframe>
+# player (embedded YouTube, not youtube.com) reports nothing playing. Reaching
+# those needs a per-frame execution context: Runtime.enable and events.
 _MEDIA_JS = """(() => {
   const els = [...document.querySelectorAll('video, audio')];
   // Biggest first: a page with an autoplaying banner clip beside the real video
@@ -788,9 +754,7 @@ def media(cfg: dict, screen: str | None = None, action: str = "state",
 
     `state` only reports. `seek` takes seconds (negative rewinds), `volume` 0-100.
     """
-    if cfg["browser"]["kind"] == "firefox":
-        raise NotImplementedError(
-            "media control needs CDP; use kind = \"chromium\" or \"edge\"")
+    _require(cfg, "media")
     if action not in MEDIA_ACTIONS:
         raise ValueError(f"action must be one of {', '.join(MEDIA_ACTIONS)}")
     page = _cdp_page(cfg, screen)
@@ -801,9 +765,9 @@ def media(cfg: dict, screen: str | None = None, action: str = "state",
 
 
 def _viewport(call) -> tuple[int, int]:
-    """The window's CSS-pixel viewport. The fallback is a guess, and is only
-    ever better than nothing: 800x600 keeps a scroll off the PDF sidebar and
-    gives a screenshot a plausible clip rather than an exception."""
+    """The window's CSS-pixel viewport. The 800x600 fallback is a guess that
+    keeps a scroll off the PDF sidebar and gives a screenshot a clip rather than
+    an exception."""
     with contextlib.suppress(Exception):        # older builds, odd targets
         v = call("Page.getLayoutMetrics").get("cssLayoutViewport") or {}
         w, h = v.get("clientWidth"), v.get("clientHeight")
@@ -824,31 +788,24 @@ def screenshot(cfg: dict, screen: str | None = None, region: dict | None = None,
                format: str = "png", quality: int = 80) -> dict:
     """Capture what one screen's window is showing. Returns base64 image + size.
 
-    Exists because /v1/navigate reports the url we *sent*: a redirect, a login
-    wall, a consent banner or an "Aw, Snap!" all look like success from every
-    other route in this API. This is the read-back that a url cannot be.
+    The read-back a url cannot be: /v1/navigate reports what we *sent*, so a
+    redirect, a login wall or an "Aw, Snap!" looks like success everywhere else.
 
-    The clip is always sent, always at `scale: 1`, and that is the whole
-    coordinate contract: without a clip Chromium captures at the device pixel
-    ratio, so a 1920-wide viewport on a HiDPI panel comes back 3840 wide and
-    anything mapping image pixels back onto the page is off by a factor of two.
-    Pinned this way, **image pixels are CSS pixels** and the returned
-    width/height are the same space Input.dispatchMouseEvent takes.
+    The clip is always sent, always at `scale: 1` — that is the whole coordinate
+    contract. Without it Chromium captures at the device pixel ratio, so a
+    1920-wide viewport on a HiDPI panel comes back 3840 wide and every mapping
+    back onto the page is off by two. Pinned, **image pixels are CSS pixels**,
+    the same space Input.dispatchMouseEvent takes.
 
-    `region` is clamped to the viewport rather than rejected — an off-by-a-bit
-    rect is worth a slightly smaller picture, not a 422 — so the returned
-    width/height are what you got, which need not be what you asked for.
+    `region` is clamped rather than rejected, so the returned width/height are
+    what you got, not necessarily what you asked for.
 
-    This is a page capture, not a screen capture: it renders the frame tree of
-    one browser target and can no more see the box's desktop, its other windows
-    or its taskbar than Page.navigate can drive them.
+    A page capture, not a screen capture: it renders one browser target's frame
+    tree and can no more see the desktop than Page.navigate can drive it.
     """
-    if cfg["browser"]["kind"] == "firefox":
-        # BiDi does have browsingContext.captureScreenshot, so this one is not
-        # impossible on Firefox the way scroll and media are -- it is just not
-        # written, and the Pi runs chromium. Same 501 either way.
-        raise NotImplementedError(
-            "screenshot needs CDP; use kind = \"chromium\" or \"edge\"")
+    # BiDi does have browsingContext.captureScreenshot, so on firefox this is
+    # unwritten rather than impossible. Same 501 either way.
+    _require(cfg, "screenshot")
     if format not in SCREENSHOT_FORMATS:
         raise ValueError(f"format must be one of {', '.join(SCREENSHOT_FORMATS)}")
     if not 1 <= quality <= 100:
@@ -873,13 +830,10 @@ def screenshot(cfg: dict, screen: str | None = None, region: dict | None = None,
             "url": page.get("url") or "about:blank", "title": page.get("title") or ""}
 
 
-# Structured page state, for a caller that cannot look at a picture. A
-# screenshot answers "what is wrong" for a person; this answers it for eve, for
-# update.sh, and for anything deciding whether to retry.
-#
-# Deliberately reports no field *values*. Naming a password box is how a caller
-# knows where to type; handing back what is in it turns a diagnostic route into
-# a credential leak.
+# Structured page state, for a caller that cannot look at a picture -- eve,
+# update.sh, anything deciding whether to retry. No field *values*, ever:
+# naming a password box is how a caller knows where to type, returning what is
+# in it turns a diagnostic route into a credential leak.
 _INSPECT_JS = """(() => {
   const visible = el => {
     const r = el.getBoundingClientRect();
@@ -922,9 +876,7 @@ def inspect(cfg: dict, screen: str | None = None) -> dict:
     The machine-readable half of `screenshot`: a program cannot look at a
     picture, and `scroll_y` moving is the only proof an autoscroll is running.
     """
-    if cfg["browser"]["kind"] == "firefox":
-        raise NotImplementedError(
-            "inspect needs CDP; use kind = \"chromium\" or \"edge\"")
+    _require(cfg, "inspect")
     page = _cdp_page(cfg, screen)
     # Off the target listing, so these two survive a page we cannot run script
     # on -- which is the whole point of what follows.
@@ -936,16 +888,14 @@ def inspect(cfg: dict, screen: str | None = None) -> dict:
         with _rpc(page["webSocketDebuggerUrl"]) as call:
             out.update(_evaluate(call, _INSPECT_JS, "inspect") or {})
     except Exception as e:
-        # A page we cannot ask is the one this route most needs to describe, not
-        # the one it should fail on. Debian's Chromium refuses Runtime.evaluate
-        # on chrome-error:// where Google's allows it, and the old shape raised
-        # here -- so /v1/inspect 503'd on exactly the page it exists to detect,
-        # `error_page` could never come back true, and update.sh's rollback gate
-        # was guarding nothing. Found by the smoke suite on the Pi, having
-        # passed against desktop Chrome every time.
-        #
-        # ready_state stays "unknown", which is how a caller tells "the page
-        # says it is still loading" from "the page would not answer at all".
+        # A page we cannot ask is the one this route most needs to describe.
+        # Debian's Chromium refuses Runtime.evaluate on chrome-error:// where
+        # Google's allows it, and raising here meant /v1/inspect 503'd on
+        # exactly the page it exists to detect: `error_page` could never come
+        # back true and update.sh's rollback gate guarded nothing. Found by the
+        # smoke suite on the Pi, having passed against desktop Chrome every
+        # time. ready_state stays "unknown", which is how a caller tells "still
+        # loading" from "would not answer at all".
         log.warning("inspect: no script on %s (%s); reporting what the target "
                     "listing knows", url, e)
     # The second witness, and now reachable: a page that failed to load may have
@@ -956,8 +906,7 @@ def inspect(cfg: dict, screen: str | None = None) -> dict:
 
 def _evaluate(call, expression: str, what: str):
     """Run a page script and return its value, or raise with the page's own
-    message. Every JS-bearing route funnels through here so a thrown TypeError
-    surfaces as a failure rather than as a silent None."""
+    message -- so a thrown TypeError is a failure, not a silent None."""
     r = call("Runtime.evaluate", {"expression": expression, "returnByValue": True,
                                   # Chromium refuses play(), and some focus
                                   # handling, on a page nobody has interacted
@@ -985,31 +934,28 @@ def _clip(region: dict | None, vw: int, vh: int) -> tuple[int, int, int, int]:
 
 
 def close() -> None:
-    """Release BiDi sessions. A browser we didn't launch outlives the agent, and
+    """Release BiDi sessions: a browser we didn't launch outlives the agent, and
     Firefox won't hand out a second session while the first is open."""
-    for port, (ws, call) in list(_bidi_conns.items()):
-        del _bidi_conns[port]
-        for shutdown in (lambda: call("session.end"), ws.close):
-            with contextlib.suppress(Exception):
-                shutdown()
+    with _bidi_lock:
+        for port, (ws, call) in list(_bidi_conns.items()):
+            del _bidi_conns[port]
+            for shutdown in (lambda: call("session.end"), ws.close):
+                with contextlib.suppress(Exception):
+                    shutdown()
 
 
 # --- plumbing ---------------------------------------------------------------
 
-# How long to keep refusing after the debug port has failed us once. The case
-# this exists for is not a browser that has *gone* -- a closed port refuses
-# instantly -- but one that is wedged and still holding it, which is what
-# Chromium does while it thrashes on memory. Then every call pays the full
-# socket timeout: 5s for the HTTP probe, 15s for a websocket, and `screen: all`
-# multiplies it by the monitor count.
+# How long to keep refusing after the debug port has failed once. Not for a
+# browser that has *gone* -- a closed port refuses instantly -- but one wedged
+# and still holding it, which is what Chromium does while it thrashes on memory.
+# Then every call pays the full socket timeout (5s HTTP, 15s websocket, times
+# the monitor count for `screen: all`), a controller polling /v1/status every
+# 15s stacks them faster than they drain, and FastAPI's 40-thread pool runs out
+# -- a wedged browser taking the *agent* down with it, which is the one thing
+# the degraded-boot design exists to prevent.
 #
-# A controller polling /v1/status every 15s stacks those up faster than they
-# drain, one threadpool thread per screen per poll, and FastAPI's pool is 40 --
-# so a wedged browser quietly takes the *agent* down with it, which is the one
-# thing the whole degraded-boot design exists to prevent.
-#
-# The window is deliberately short: this is a fast-fail latch, not a circuit
-# breaker with a state machine. Being wrong costs one round trip.
+# A fast-fail latch, not a circuit breaker: being wrong costs one round trip.
 DEAD_COOLDOWN = float(os.getenv("ROOM_DEAD_COOLDOWN", "5"))
 _dead_until = 0.0
 
@@ -1027,10 +973,9 @@ def _mark(alive: bool) -> None:
 
 
 def _get(port: int, path: str, latch: bool = True):
-    """GET the debug port. `latch=False` for the callers whose whole job is to
-    keep asking a port that is not answering yet -- wait_ready() polls during a
-    launch, and a fast-fail there would turn a 0.3s poll into a 5s one and leave
-    the kiosk sitting dark for five seconds after it was ready."""
+    """GET the debug port. `latch=False` for callers whose job is to keep asking
+    a port that is not answering yet: wait_ready() polls during a launch, and a
+    fast-fail there turns a 0.3s poll into a 5s one."""
     if latch:
         _refuse_if_dead(port)
     try:
@@ -1051,7 +996,7 @@ def _connect(ws_url: str):
     try:
         ws = websocket.create_connection(ws_url, timeout=15, suppress_origin=True)
     except Exception:
-        # The port answered /json a moment ago or we would not have a url, so a
+        # The port answered /json a moment ago or we would have no url, so a
         # websocket that will not open is the deeper kind of wedged.
         _mark(alive=False)
         raise
@@ -1093,22 +1038,19 @@ _targets: dict[str, str] = {}
 _loaded: list[str] = []
 
 
-# Targets that are pages but can never be one of *our* windows. Both of these
-# are type "page" in /json, and each one shifts the index of everything after
-# it -- which mattered because the fallback below used to map screens to windows
-# by position in this list, so one stray target silently moved every screen one
-# place along, then cached the wrong answer so it stayed wrong.
+# Targets that are type "page" in /json but can never be one of *our* windows.
+# Each stray one shifts the index of everything after it, and _identify() below
+# maps screens to windows by list position -- so one of these silently moved
+# every screen one place along, then cached the wrong answer.
 #
-# Only these two, and only because a kiosk window provably cannot be showing
-# them: /v1/navigate allows http and https alone, and `home_url` is validated
-# the same way, so nothing can steer a window here.
+# Only these two, and only because a kiosk window provably cannot show them:
+# /v1/navigate allows http and https alone and `home_url` is validated the same
+# way (app.py `_home_url`), so nothing can steer a window here.
 #
-# `chrome-error://` is deliberately NOT in this list, though it looks like it
-# belongs: that is our own window having failed to load, which is exactly the
-# state /v1/inspect exists to report and update.sh rolls a release back on.
-# Filtering it would lose the window at the moment it most needs describing.
-# `chrome://` is out for a weaker version of the same reason -- a crash-restored
-# new-tab page can be a real window, and dropping it would strand the screen.
+# `chrome-error://` is deliberately NOT here: that is our own window having
+# failed to load, which is what /v1/inspect exists to report and update.sh rolls
+# back on. `chrome://` is out for a weaker version of the same reason -- a
+# crash-restored new-tab page can be a real window.
 _NOT_OURS = ("devtools://", "chrome-extension://")
 
 
@@ -1140,14 +1082,13 @@ def _cdp_page(cfg: dict, screen: str | None = None) -> dict:
 def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
     """Which window belongs to `name`, when there is no mapping yet.
 
-    Reached on the first call after a launch, after a window has been closed and
+    Reached on the first call after a launch, after a window is closed and
     reopened, and whenever we are driving a browser we did not start.
 
-    List order is the answer only when it can be: it is the order the windows
-    were opened in, so it holds exactly while there are as many windows as
-    screens. When there are not, position in a list means nothing at all, and
-    guessing sends the next click -- or the next typed password -- to whichever
-    monitor happened to sort into that slot.
+    List order is the order the windows were opened in, so it is the answer
+    exactly while there are as many windows as screens. When there are not,
+    position means nothing, and guessing sends the next click -- or the next
+    typed password -- to whichever monitor sorted into that slot.
     """
     names = [s["name"] for s in scr]
     i = names.index(name) if name in names else 0
@@ -1197,22 +1138,32 @@ def _bidi_url(port: int) -> str:
 # closes, so a session per call fails from the second call on. Hold the socket.
 _bidi_conns: dict[int, tuple] = {}
 
+# ...and it is *one* socket, shared: every browser route is `def`, so two
+# Firefox requests would send and recv() on it at once, and the id-matching loop
+# in _connect() means one thread eats the other's reply while the loser blocks
+# to its 15s timeout. Two could also race session.new and leak the losing
+# socket, which is the one Firefox will not replace. Serialised instead -- BiDi
+# here is the dev box, where one request at a time costs nothing.
+_bidi_lock = threading.Lock()
+
 
 def _bidi(port: int, method: str, params: dict | None = None) -> dict:
     """Call a BiDi method on the long-lived session, reconnecting once if stale."""
-    for final in (False, True):
-        ws, call = _bidi_conns.get(port) or _bidi_connect(port)
-        try:
-            return call(method, params)
-        except (OSError, websocket.WebSocketException):
-            _bidi_conns.pop(port, None)
-            with contextlib.suppress(Exception):
-                ws.close()
-            if final:
-                raise
+    with _bidi_lock:
+        for final in (False, True):
+            ws, call = _bidi_conns.get(port) or _bidi_connect(port)
+            try:
+                return call(method, params)
+            except (OSError, websocket.WebSocketException):
+                _bidi_conns.pop(port, None)
+                with contextlib.suppress(Exception):
+                    ws.close()
+                if final:
+                    raise
 
 
 def _bidi_connect(port: int) -> tuple:
+    # Callers hold _bidi_lock; close() is the only other toucher and takes it too.
     ws, call = _connect(_bidi_url(port))
     try:
         # ponytail: if this says "session not created", a previous agent died

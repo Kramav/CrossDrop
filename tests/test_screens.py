@@ -8,6 +8,7 @@ the right protocol call — and none of that needs a browser to check.
 import contextlib
 import threading
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -511,6 +512,46 @@ home_url = "http://100.1.2.3:8080/home?screen=chosen"
     assert cfg["screens"][0]["home_url"].count("screen=") == 1
 
 
+def test_a_path_home_url_resolves_to_this_agent(tmp_path):
+    """There used to be three definitions of home_url: config.example.toml
+    shipped "/home", PUT /v1/settings 422'd exactly that, and /v1/home handed it
+    to Page.navigate unchecked. One now, in load_config -- a path means this
+    agent's own page, resolved against [server]."""
+    p = tmp_path / "config.toml"
+    p.write_text('token = "t"\nhome_url = "/home"\n'
+                 '[server]\nhost = "100.1.2.3"\nport = 9000\n'
+                 '[browser]\nautolaunch = false\nkind = "chromium"\n',
+                 encoding="utf-8")
+    cfg = appmod.load_config(p)
+    assert cfg["screens"][0]["home_url"].startswith("http://100.1.2.3:9000/home")
+    # And it is the same shape /v1/navigate accepts, so ?screen= still lands.
+    assert cfg["screens"][0]["home_url"].endswith("?screen=main")
+
+
+def test_the_shipped_example_config_is_loadable(tmp_path):
+    """config.example.toml is copied verbatim on a fresh install. It shipped a
+    home_url that PUT /v1/settings rejected and Page.navigate could not use."""
+    example = (Path(__file__).parent.parent / "agent/config.example.toml"
+               ).read_text(encoding="utf-8")
+    p = tmp_path / "config.toml"
+    p.write_text(example.replace('token = "change-me"', 'token = "t"'),
+                 encoding="utf-8")
+    cfg = appmod.load_config(p)
+    assert cfg["screens"][0]["home_url"].startswith(("http://", "https://"))
+
+
+@pytest.mark.parametrize("url", ["file:///etc/passwd", "javascript:alert(1)",
+                                 "data:text/html,x"])
+def test_an_unusable_home_url_is_refused_at_load(tmp_path, url):
+    """Not left for Page.navigate to shrug at: /v1/navigate has always enforced
+    http/https, and home_url was the one way round it."""
+    p = tmp_path / "config.toml"
+    p.write_text(f'token = "t"\nhome_url = "{url}"\n'
+                 '[browser]\nautolaunch = false\n', encoding="utf-8")
+    with pytest.raises(RuntimeError, match="home_url"):
+        appmod.load_config(p)
+
+
 def test_unnamed_screens_get_names(tmp_path):
     cfg = appmod.load_config(write_cfg(tmp_path, "[[screen]]\n[[screen]]\n"))
     assert [s["name"] for s in cfg["screens"]] == ["main", "screen2"]
@@ -612,14 +653,14 @@ def test_bad_window_state_is_422(client):
 # --- roomctl ----------------------------------------------------------------
 
 @pytest.fixture
-def spy(monkeypatch):
+def spy(monkeypatch, cli_target):
     seen = {}
 
-    def fake(target=None, screen=None, **kw):
-        seen.update(target=target, screen=screen, **kw)
+    def fake(self, screen=None, **kw):
+        seen.update(screen=screen, **kw)
         return {"ok": True}
 
-    monkeypatch.setattr(roomctl, "scroll", fake)
+    monkeypatch.setattr(roomctl.Client, "scroll", fake)
     return seen
 
 

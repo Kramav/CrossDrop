@@ -1,0 +1,18 @@
+# What the agent actually depends on. Edit this file, never requirements.txt --
+# that one is the lock, and every consumer (CI, setup.sh, update.sh) installs it.
+#
+#   uv pip compile --universal --python-version 3.11 --no-header \
+#       -o agent/requirements.txt agent/requirements.in
+#
+# --universal, because one file has to install on three platforms: the Pi
+# (aarch64 Linux), CI (x86_64 Linux, 3.11 and 3.13) and a Windows dev box. It
+# emits environment markers instead of resolving for whoever ran it, so uvloop
+# is pinned for Linux and colorama for Windows in the same file.
+fastapi
+uvicorn[standard]
+websocket-client
+python-multipart
+# httpx is runtime, not test-only: _home_when_ready() polls the agent's own port
+# with it before sending each screen to its home page.
+httpx
+pytest

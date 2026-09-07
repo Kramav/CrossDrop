@@ -99,6 +99,27 @@ def test_extra_saved_screens_are_ignored(store):
     assert len(cfg["screens"]) == 2
 
 
+# --- merge ------------------------------------------------------------------
+
+def test_a_save_keeps_screens_the_editor_could_not_see(store):
+    """save() rewrites the file whole, and the editor only ever sees the
+    monitors detected *now*. Unplug one, restart, save — and the other screen's
+    name and home_url used to be gone for good."""
+    settings.save({"screens": [{"name": "left", "home_url": "http://a/"},
+                               {"name": "right", "home_url": "http://b/"}]})
+    merged = settings.merge_screens([{"name": "renamed", "home_url": "http://c/"}])
+    assert merged["screens"] == [{"name": "renamed", "home_url": "http://c/"},
+                                 {"name": "right", "home_url": "http://b/"}]
+
+
+def test_a_longer_edit_still_wins(store):
+    """Plugging a monitor back in is the other direction: the new row is kept,
+    not clipped to what happened to be on disk."""
+    settings.save({"screens": [{"name": "only"}]})
+    merged = settings.merge_screens([{"name": "a"}, {"name": "b"}])
+    assert [s["name"] for s in merged["screens"]] == ["a", "b"]
+
+
 # --- the routes -------------------------------------------------------------
 
 def put(client, screens):
@@ -173,6 +194,27 @@ def test_blank_position_is_saved_as_a_reset(client, store):
     assert json.loads(store.read_text())["screens"][1]["position"] == ""
     # Nothing to place, so no note about a window that was never asked to move.
     assert r.json()["note"] == ""
+
+
+def test_an_unplugged_monitor_does_not_delete_its_saved_screen(tmp_path, store,
+                                                               monkeypatch):
+    """The whole path, not just the merge: two screens saved, one monitor
+    unplugged, one edit made through a UI that can now only show one screen."""
+    settings.save({"screens": [
+        {"name": "left", "home_url": HOME, "position": "", "size": ""},
+        {"name": "right", "home_url": "http://other/", "position": "", "size": ""}]})
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
+                   '[browser]\nkind = "chromium"\nautolaunch = false\n'
+                   '[[screen]]\nname = "left"\n', encoding="utf-8")
+    monkeypatch.setenv("ROOM_CONFIG", str(cfg))
+    with TestClient(app) as c:
+        r = c.put("/v1/settings", headers=AUTH,
+                  json={"screens": [{"name": "Samsung", "home_url": HOME}]})
+        assert r.status_code == 200, r.text
+    saved = json.loads(store.read_text())["screens"]
+    assert [s["name"] for s in saved] == ["Samsung", "right"]
+    assert saved[1]["home_url"] == "http://other/", "the unplugged screen was dropped"
 
 
 def test_settings_survive_a_reload(client, store):

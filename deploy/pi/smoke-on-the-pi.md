@@ -221,5 +221,20 @@ cleanly. Clear it with the `pkill` above before starting the agent.
 - **The rollback.** `update.sh`'s health gate and its failure screenshot are a
   separate drill: tag a deliberately broken commit on the spare Pi and watch it
   come back. See [update-over-ssh.md](update-over-ssh.md) §5.
+- **Tag signing end to end.** `tests/test_deploy.py` runs the real script
+  against a real repo and proves `VERIFY_TAG=1` *refuses* an unsigned tag and
+  latches it — but nothing anywhere proves a correctly signed tag is
+  **accepted**, because that needs a key in the updating user's keyring. Before
+  you turn it on for a Pi that matters, run one deploy by hand from the Pi and
+  watch it print `signature ok`:
+
+  ```sh
+  # on the Pi, from anywhere -- the script takes its paths from the environment
+  sudo -u "$USER" VERIFY_TAG=1 /opt/room-display/current/deploy/pi/update.sh
+  ```
+
+  A tag you signed prints `<tag> signature ok` and deploys. If it refuses, the
+  signer's public key is not in that user's GnuPG keyring, and every Pi with
+  `VERIFY_TAG=1` will sit on its current release until it is.
 - **Multi-monitor placement.** The smoke config declares a single screen, so
   window placement across two panels is still verified by looking.

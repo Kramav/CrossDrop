@@ -165,16 +165,18 @@ def test_polling_state_does_not_wake_the_display(client, cdp, monkeypatch):
 
 # --- roomctl ----------------------------------------------------------------
 
-def test_cli_negative_seek(monkeypatch, capsys):
+def test_cli_negative_seek(monkeypatch, capsys, cli_target):
     seen = {}
-    monkeypatch.setattr(roomctl, "media", lambda *a, **k: seen.update(args=a) or {"ok": 1})
+    monkeypatch.setattr(roomctl.Client, "media",
+                        lambda self, *a, **k: seen.update(args=a) or {"ok": 1})
     # argparse only reads "-30" as a value because no option looks like a number.
     assert cli.main(["media", "seek", "-30"]) == 0
-    assert seen["args"] == ("seek", None, None, -30)
+    assert seen["args"] == ("seek", None, -30)      # action, screen, value
 
 
-def test_cli_media_defaults_to_state(monkeypatch, capsys):
+def test_cli_media_defaults_to_state(monkeypatch, capsys, cli_target):
     seen = {}
-    monkeypatch.setattr(roomctl, "media", lambda *a, **k: seen.update(args=a) or {"ok": 1})
+    monkeypatch.setattr(roomctl.Client, "media",
+                        lambda self, *a, **k: seen.update(args=a) or {"ok": 1})
     assert cli.main(["--screen", "right", "media"]) == 0
-    assert seen["args"] == ("state", None, "right", 0)
+    assert seen["args"] == ("state", "right", 0)

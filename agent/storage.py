@@ -4,13 +4,14 @@ On the Pi this directory is tmpfs, so it is RAM: every file here costs memory
 until reboot. Hence the size cap and the keep-newest-N sweep.
 """
 
+import contextlib
 import re
 import secrets
 from pathlib import Path
 
-# Extension -> the type we will serve it as. We never echo the client's
-# Content-Type; a .pdf full of HTML must still reach the browser as a PDF.
-# No SVG: it is a script-bearing document, and /files is unauthenticated.
+# Extension -> the type we serve it as; the client's Content-Type is never
+# echoed. No SVG: it is a script-bearing document and /files is unauthenticated
+# (app.py's CSP sandbox is the structural half of the same defence).
 TYPES = {
     ".pdf": "application/pdf",
     ".png": "image/png",
@@ -19,9 +20,8 @@ TYPES = {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".txt": "text/plain; charset=utf-8",
-    # Clips, not films: this directory is tmpfs, so an upload is RAM the Pi does
-    # not get back until the sweep. upload.max_mb is the guard — raise it
-    # knowing what it costs, and push long video as a URL instead.
+    # Clips, not films: tmpfs, so an upload is RAM until the sweep. Raise
+    # upload.max_mb knowing that; push long video as a URL instead.
     ".mp4": "video/mp4",
     ".webm": "video/webm",
     ".mp3": "audio/mpeg",
@@ -43,8 +43,8 @@ class BadType(Exception):
 def save(cfg: dict, filename: str, chunks) -> str:
     """Stream `chunks` to the store, return the id. Raises TooBig / BadType."""
     up = cfg["upload"]
-    # The client's filename is never used as a path — only its extension, and
-    # only if it is on the allowlist. That is the whole of filename sanitising.
+    # The client's filename is never a path — only its extension, and only from
+    # the allowlist. That is the whole of filename sanitising.
     ext = Path(filename or "").suffix.lower()
     if ext not in TYPES:
         raise BadType(f"{ext or filename!r} not allowed; try {', '.join(sorted(TYPES))}")
@@ -54,11 +54,9 @@ def save(cfg: dict, filename: str, chunks) -> str:
     file_id = secrets.token_urlsafe(12) + ext
     dest, cap, written = d / file_id, up["max_mb"] * 1024 * 1024, 0
 
-    # Sweep *before* the write as well as after. This directory is tmpfs, so a
-    # full one makes the write raise ENOSPC — and if the only sweep ran after a
-    # successful write, nothing would ever free that space again and every
-    # future upload would 500. Making room first is what stops one full tmpfs
-    # from wedging uploads until someone SSHes in.
+    # Before the write as well as after: a full tmpfs makes the write ENOSPC,
+    # and a sweep that only ran after a *successful* write would never free the
+    # space again -- one full tmpfs wedging uploads until someone SSHes in.
     sweep(cfg)
 
     try:
@@ -72,8 +70,7 @@ def save(cfg: dict, filename: str, chunks) -> str:
         dest.unlink(missing_ok=True)  # never leave a partial file in RAM
         raise
 
-    # Never the one we just wrote: the caller is about to hand its url to the
-    # kiosk, and a concurrent burst of uploads must not delete it in between.
+    # Never the one we just wrote: its url is about to go to the kiosk.
     sweep(cfg, spare=file_id)
     return file_id
 
@@ -98,19 +95,22 @@ def sweep(cfg: dict, spare: str | None = None) -> None:
     ponytail: crude, but this is RAM on a box nobody logs into — an age- or
     byte-budget policy if that ever bites.
 
-    Floored at 1. `keep = 0` reads like "this is a display, not a filestore,
-    hold nothing" — but the file just uploaded has to survive long enough for
-    the kiosk to GET it, and `files[:-0 or None]` is `files[:None]`, i.e. every
-    file including that one. Uploads would 404 on the display instead.
+    Three things that each cost a 404 on the wall for a file that uploaded
+    perfectly, so none of them is incidental:
 
-    `spare` exists for the same reason one step further out. Mtime order says
-    which file is newest, not which one somebody is waiting for: `keep`
-    concurrent uploads landing while yours is still being fetched would sweep
-    it, and the display would show a 404 for a file that uploaded perfectly.
-    The one being served is named explicitly rather than inferred from a clock.
+      - `keep` is floored at 1. `files[:-0 or None]` is `files[:None]` — every
+        file, including the one the kiosk is about to fetch.
+      - `spare` is named, not inferred from a clock. Mtime says which file is
+        newest, not which one somebody is waiting for.
+      - a file that vanishes between the glob and the stat is skipped. Two
+        uploads sweep concurrently, and save() re-raises this as a 500.
     """
     keep = max(1, cfg["upload"]["keep"])
-    files = sorted(Path(cfg["upload"]["dir"]).glob("*"), key=lambda p: p.stat().st_mtime)
-    for old in files[:-keep]:
+    files = []
+    for p in Path(cfg["upload"]["dir"]).glob("*"):
+        with contextlib.suppress(OSError):          # swept by a concurrent upload
+            files.append((p.stat().st_mtime, p))
+    files.sort(key=lambda t: t[0])
+    for _, old in files[:-keep]:
         if old.name != spare:
             old.unlink(missing_ok=True)

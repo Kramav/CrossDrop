@@ -23,49 +23,38 @@ DEFAULTS = {
     "debug_port": 9222, "disk_cache_mb": 100, "extensions_dir": "",
 }
 UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 5}
-# POST /v1/input, off unless config.toml turns it on. It is the only route that
-# acts *as* whoever the kiosk is logged in as, which is the line worth a switch;
-# everything else here either shows something or reads something back. Kept in
-# config.toml rather than settings.json on purpose -- that file is root-owned and
-# the agent cannot write it, and a switch the API can flip for itself is not one.
+# POST /v1/input, off unless config.toml turns it on: the only route that acts
+# *as* whoever the kiosk is logged in as. In config.toml and not settings.json
+# because a switch the API can flip for itself is not a switch.
 INTERACT_DEFAULTS = {"enabled": False, "max_actions": 40, "deadline_ms": 30_000}
-# Where to bind. Empty host = loopback, which is the safe default anywhere that
-# is not the Pi; the Pi's config sets its tailnet address (PLAN.md §10 — never
-# 0.0.0.0). This lives here rather than only in the systemd unit so that
-# something other than systemd can start the agent.
+# Where to bind. Loopback by default; the Pi sets its tailnet address (PLAN.md
+# §10 — never 0.0.0.0). Here and not only in the systemd unit, so something
+# other than systemd can start the agent.
 SERVER_DEFAULTS = {"host": "127.0.0.1", "port": 8080}
 SCREEN_DEFAULTS = {"name": "", "position": "", "size": "", "home_url": ""}
 
-# The agent's own log. Goes to stderr, which under display-agent.service is
-# journald: `journalctl --user -u display-agent`. There was no log at all before
-# this -- six print() calls, none of them about a request -- so "the wall was
-# showing the wrong thing at 9am" had no way of being answered after the fact.
+# To stderr, which under display-agent.service is journald:
+# `journalctl --user -u display-agent`. Without it "the wall was showing the
+# wrong thing at 9am" had no way of being answered after the fact.
 log = logging.getLogger("room")
 
-# First gap between kiosk launch attempts; it doubles up to five minutes. Long
-# enough not to spin against a box that will never have a browser, short enough
-# that "the compositor was not up yet" clears itself while you are still looking
-# at the wall. Override with ROOM_LAUNCH_RETRY, the same way browser.py exposes
-# PLACE_SETTLE -- how slow a session is to come up is a property of the box.
+# First gap between kiosk launch attempts; doubles to five minutes. Overridable
+# because how slow a session is to come up is a property of the box, not the
+# code -- same as browser.py's PLACE_SETTLE.
 LAUNCH_RETRY_SECS = float(os.getenv("ROOM_LAUNCH_RETRY", "5"))
 
 
 def setup_logging() -> None:
     """Give the root logger a handler, once, and set the level on ours only.
 
-    uvicorn configures its own named loggers and leaves root alone, so without a
-    handler here everything below WARNING falls through to logging.lastResort
-    and is silently dropped. basicConfig is a no-op if a handler already exists,
-    which is what makes this safe to call from a lifespan that tests run
-    repeatedly.
+    uvicorn leaves root alone, so without a handler everything below WARNING
+    falls through to logging.lastResort and is dropped. basicConfig is a no-op
+    if a handler exists, so a lifespan the tests run repeatedly is safe.
 
-    The level goes on `room` rather than on root deliberately: root at INFO also
-    turns on every library that logs at INFO, and httpx alone narrates one line
-    per request -- including the once-a-second poll in _home_when_ready(). On a
-    Pi whose journal is 32M and in RAM (deploy/pi/journald-volatile.conf) that
-    is our own audit trail evicted by somebody else's chatter.
-
-    ROOM_LOG=DEBUG adds the reads -- every status poll and every /files fetch.
+    The level goes on `room`, not root: root at INFO turns on every library at
+    INFO, and httpx alone narrates one line per request. On a Pi whose journal
+    is 32M and in RAM (deploy/pi/journald-volatile.conf) that is our own audit
+    trail evicted by somebody else's chatter. ROOM_LOG=DEBUG adds the reads.
     """
     logging.basicConfig(level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -87,21 +76,17 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         cfg["upload"]["dir"] = str(path.parent / "uploads")
     if not cfg.get("token"):
         raise RuntimeError(f"{path}: token is required")
-    # Not fatal, deliberately: a bad token must never be the reason a display
-    # with no keyboard fails to boot. But an HTTP header is latin-1, so a token
-    # with a non-ASCII character in it cannot be *sent* -- every request would
-    # 401 forever and the config would look perfectly fine to whoever wrote it.
-    # Say so once, in the journal, where the answer is.
+    # Warn, never raise: a bad token must not be why a keyboard-less display
+    # fails to boot. But an HTTP header is latin-1, so a non-ASCII token cannot
+    # be *sent* -- every request 401s while the config looks perfectly fine.
     if not str(cfg["token"]).isascii():
         log.warning("%s: token has non-ASCII characters in it, so it can never "
                     "be sent in an Authorization header -- every request will "
                     "401. Use hex or base64: openssl rand -hex 32", path)
 
-    # No [[screen]] blocks -> ask X what monitors exist, so a fresh install drives
-    # every connected screen without anyone editing a config file. Explicit blocks
-    # always win, so this changes nothing for a config that has them. Nothing
-    # detected (Windows, no DISPLAY) -> one screen called "main", exactly the
-    # single-monitor behaviour every existing config already has.
+    # No [[screen]] blocks -> ask X, so a fresh install drives every connected
+    # monitor with no config edit. Explicit blocks win; nothing detected
+    # (Windows, no DISPLAY) -> one screen called "main", as it always was.
     blocks = cfg.get("screen") or [
         {"name": d["output"], "position": d["position"], "size": d["size"]}
         for d in display.detect()
@@ -112,11 +97,10 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     settings.apply(cfg)
     for i, s in enumerate(cfg["screens"]):
         s["name"] = s["name"] or ("main" if i == 0 else f"screen{i + 1}")
-        s["home_url"] = s["home_url"] or cfg.get("home_url", "about:blank")
-        # The idle page names the monitor it is on, and the url is the only way
-        # it can know: every window shares one profile and one debug port, so
-        # there is nothing else to tell them apart client-side.
-        # Match on the path: a url ending "?x=1" still points at /home.
+        s["home_url"] = _home_url(cfg, s["home_url"] or cfg.get("home_url", "about:blank"))
+        # The idle page names its monitor, and the url is the only way it can
+        # know -- every window shares one profile and one debug port. Match on
+        # the path: a url ending "?x=1" still points at /home.
         u = urlparse(s["home_url"])
         if u.path.rstrip("/").endswith("/home"):
             # Re-stamp, never just append: renaming a screen has to move the
@@ -131,20 +115,34 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     return cfg
 
 
+def _home_url(cfg: dict, url: str) -> str:
+    """The one definition of `home_url` -- there used to be three, and they
+    disagreed. A path is resolved against where we bind, so "/home" really is
+    this agent's idle page; anything else has to be http, https or about:, the
+    allowlist /v1/navigate has always had (PLAN.md §10). Raising matches the
+    checks either side, and selfcheck runs this before a release is swapped in.
+    """
+    if url.startswith("/"):
+        srv = cfg["server"]
+        return f"http://{srv['host'] or '127.0.0.1'}:{srv['port']}{url}"
+    if not url.startswith(("http://", "https://", "about:")):
+        raise RuntimeError(
+            f"home_url {url!r} must be http, https, about:blank, or a path "
+            f"like \"/home\" for this agent's own idle page")
+    return url
+
+
 def swap_config(cfg: dict, fresh: dict) -> None:
     """Replace the contents of `cfg` with `fresh`, in place.
 
-    In place, not reassigned: display.watch() closed over this dict at startup
-    and would otherwise read a stale config forever.
+    In place, not reassigned: display.watch() closed over this dict at startup.
 
-    Overwrite first and drop stale keys after, so no key present in both configs
-    is ever *absent*. Every browser route is `def` and runs on the threadpool,
-    so a concurrent request really can read this dict mid-swap; `clear()` then
-    `update()` left it empty in between, and a reader landing there got a
-    KeyError and a 500 out of a route that had done nothing wrong. Each dict
-    operation is atomic on its own, so the worst a reader sees now is one key
-    from the old config beside one from the new -- and between two loads of the
-    same file those differ only in the screen fields the caller just validated.
+    Overwrite first, drop stale keys after, so no key present in both configs is
+    ever *absent*. Browser routes are `def`, so a concurrent request really can
+    read this mid-swap; `clear()` then `update()` left it empty in between and a
+    reader got a KeyError and a 500 out of a route that had done nothing wrong.
+    Each dict operation is atomic, so the worst seen now is one key from the old
+    config beside one from the new.
     """
     cfg.update(fresh)
     for stale in set(cfg) - set(fresh):
@@ -172,34 +170,26 @@ def targets(cfg: dict, name: str | None) -> list[dict]:
 async def lifespan(app: FastAPI):
     setup_logging()
     app.state.cfg = cfg = load_config()
-    # Reported by /v1/status. A controller polling us cannot otherwise tell "your
-    # autoscroll is still running" from "the 04:00 restart timer fired and threw
-    # it away" — autoscroll state is deliberately not persisted.
+    # Reported by /v1/status: autoscroll state is not persisted, so this is how
+    # a poller tells "still running" from "the 04:00 restart threw it away".
     app.state.started_at = time.time()
-    # We own the kiosk only if we started it — a no-input box must not be left
-    # with an orphaned fullscreen window after the agent stops.
-    # ROOM_SELFCHECK: `python -m agent selfcheck` boots this app in-process to
-    # prove a new release can start, while the live kiosk is still running the
-    # old one. It must never launch a second browser onto that port or screen.
+    # We own the kiosk only if we started it. ROOM_SELFCHECK boots this app
+    # beside the *live* kiosk to prove a new release starts, so it must never
+    # launch a second browser onto that port or screen.
     launch = cfg["browser"]["autolaunch"] and not os.getenv("ROOM_SELFCHECK")
-    # The kiosk process, once we have one. On app.state rather than a local
-    # because _launch() below fills it in from another thread.
+    # On app.state, not a local: _launch() fills it in from another thread.
     app.state.proc = None
     app.state.launch_error = ""
     app.state.stopping = threading.Event()
     watching = None
     if launch:
-        # Only when we own the kiosk: selfcheck boots this app beside a running
-        # instance, and must not reach out and blank the real monitors.
-        # The launch itself runs on the thread below, off the startup path:
-        # lifespan blocks the port from binding, and update.sh rolls the release
-        # back if /v1/status doesn't answer within 30s of the restart.
+        # Only when we own the kiosk -- selfcheck must not blank real monitors.
         watching = display.watch(cfg)
-        # The event is handed over, not looked up. Reading app.state.stopping on
-        # each pass meant a thread from a *previous* lifespan saw the next one's
-        # fresh, unset event and carried on launching browsers for an agent that
-        # had already stopped. One process only ever has one lifespan, so this
-        # never bit in production -- it bit the test suite, which starts dozens.
+        # Handed over, not looked up: reading app.state.stopping each pass let a
+        # thread from a *previous* lifespan see the next one's fresh event and
+        # go on launching browsers for an agent that had stopped. The launch
+        # runs here, off the startup path, because lifespan blocks the port from
+        # binding and update.sh rolls back if /v1/status is silent for 30s.
         threading.Thread(target=_launch, args=(cfg, app.state.stopping),
                          daemon=True).start()
     yield
@@ -218,17 +208,10 @@ async def lifespan(app: FastAPI):
 def _launch(cfg: dict, stopping: threading.Event) -> None:
     """Start the kiosk browser, then put each screen on its home page.
 
-    Retries, and never lets the failure out. Launching used to happen inline in
-    lifespan, so anything that raised — no browser binary, a debug port that
-    never came up, an X session slower than we are — took uvicorn down with it.
-    systemd restarts us, the next try fails the same way, and the /v1/status that
-    would have named the cause is down for every one of those attempts. On a box
-    with no keyboard that is the difference between reading the error from your
-    desk and driving over to plug a keyboard in.
-
-    So: the API comes up regardless, `/v1/status` reports `error`, and we keep
-    trying in the background — which is also what makes the genuinely transient
-    case (the compositor is not up yet) heal itself without a restart.
+    Retries, and never lets the failure out. Inline in lifespan, anything that
+    raised took uvicorn down with it -- and the /v1/status that would have named
+    the cause with it. So the API comes up regardless, reports `error`, and the
+    transient case (the compositor is not up yet) heals itself.
     """
     delay = LAUNCH_RETRY_SECS
     while not stopping.is_set():
@@ -242,11 +225,9 @@ def _launch(cfg: dict, stopping: threading.Event) -> None:
             delay = min(delay * 2, 300.0)   # backs off to 5 min, then stays there
             continue
         app.state.launch_error = ""
-        # Shutdown may have run while launch() was inside its 30s wait_ready(),
-        # in which case it saw proc as None and left the browser alone. Nobody
-        # else is going to take it down, and an orphaned fullscreen kiosk on a
-        # box with no keyboard is the failure this whole module is arranged
-        # around. Both sides stopping it is harmless; neither is not.
+        # Shutdown may have run while launch() sat in its 30s wait_ready(),
+        # seen proc as None and left the browser alone. Both sides stopping it
+        # is harmless; neither is an orphaned fullscreen kiosk, forever.
         if stopping.is_set():
             browser.stop(cfg, app.state.proc)
             return
@@ -256,25 +237,28 @@ def _launch(cfg: dict, stopping: threading.Event) -> None:
 
 
 def _home_when_ready(cfg: dict) -> None:
-    """Send each screen to its home page once we are actually serving it.
+    """Send each screen to its home page, waiting first for our *own* port.
 
-    uvicorn runs this lifespan *before* it binds the socket, so a kiosk pointed
-    at the agent's own /home during launch renders "can't be reached" and stays
-    there. Wait for the port, then navigate.
+    uvicorn binds the socket *after* this lifespan, so a kiosk pointed at our
+    own /home during launch renders "can't be reached" and stays there. The
+    probe is therefore a home_url pointing at our /home -- on the Pi the full
+    tailnet url, since the unit passes `--host $(tailscale ip -4)` and
+    [server].host is not what it bound.
+
+    It used to probe the first http url of *any* host, then return without
+    navigating if it never answered -- so an external home being down left the
+    screen this exists to protect on the error page. Best-effort now, and every
+    screen is navigated either way.
     """
     display.claim()          # take DPMS off the session before anything can blank
-    urls = [s["home_url"] for s in cfg["screens"]]
-    probe = next((u for u in urls if u.startswith(("http://", "https://"))), None)
-    if not probe:
-        return                                  # about:blank et al: nothing to wait for
-    for _ in range(60):
+    probe = next((s["home_url"] for s in cfg["screens"]
+                  if urlparse(s["home_url"]).path.rstrip("/").endswith("/home")), None)
+    for _ in range(60 if probe else 0):
         try:
             httpx.get(probe, timeout=2)
             break
         except httpx.HTTPError:
             time.sleep(1)
-    else:
-        return
     shown = {}
     with contextlib.suppress(Exception):    # a mangled last.json costs the
         shown = _restorable(cfg)            # restore, never the boot
@@ -284,11 +268,9 @@ def _home_when_ready(cfg: dict) -> None:
 
 
 def _save_shown(cfg: dict) -> None:
-    """Record what each screen is showing, for the next start to put back.
-
-    Once, at shutdown, rather than on every navigate: on the Pi this file is on
-    the SD card, and not writing to that is most of what Phase 6 is about.
-    """
+    """What each screen is showing, for the next start to put back. Once, at
+    shutdown: this file is on the SD card, and not writing to that is most of
+    what Phase 6 is about."""
     out = {}
     for s in cfg["screens"]:
         with contextlib.suppress(Exception):
@@ -302,10 +284,9 @@ def _save_shown(cfg: dict) -> None:
 def _restorable(cfg: dict) -> dict[str, str]:
     """Screen name -> the url it was showing, for screens still worth restoring.
 
-    The nightly restart (deploy/pi/room-display-restart.timer) is there to stop
-    Chromium running the Pi out of memory, but it must not quietly clear the
-    wall: something put up at 5pm should still be up in the morning. Something
-    from last week should not — that is what the window is for.
+    The nightly restart (deploy/pi/room-display-restart.timer) stops Chromium
+    running the Pi out of memory, but must not clear the wall: something put up
+    at 5pm should still be up in the morning, something from last week not.
     """
     minutes = cfg["display"]["restore_within_minutes"]
     if not minutes:
@@ -338,16 +319,14 @@ _bearer = HTTPBearer(auto_error=True)
 async def access_log(request: Request, call_next):
     """One line per request: what was asked, of what, and how it went.
 
-    Mutations at INFO, reads at DEBUG. A web UI polls /v1/status every 15s and
-    the kiosk polls /home-status, so logging reads at INFO would bury the one
-    navigate you are actually looking for under a few thousand lines a day --
-    on a Pi whose journal is capped at 32M and lives in RAM
-    (deploy/pi/journald-volatile.conf).
+    Mutations at INFO, reads at DEBUG -- the UI polls /v1/status every 15s and
+    the kiosk polls /home-status, so reads at INFO would bury the one navigate
+    you are looking for under thousands of lines a day, in a 32M journal that
+    lives in RAM (deploy/pi/journald-volatile.conf).
 
-    The body is deliberately not read: consuming it here would starve the route
-    of it, and re-injecting a stream to log a screen name is not worth the class
-    of bug it invites. Route plus status code says enough -- a 503 on
-    /v1/navigate and a 501 on /v1/scroll are each only one thing.
+    The body is deliberately not read: consuming it here starves the route, and
+    re-injecting a stream to log a screen name is not worth the bugs. Route plus
+    status code says enough.
     """
     started = time.monotonic()
     try:
@@ -363,12 +342,10 @@ async def access_log(request: Request, call_next):
 
 
 def auth(app_cfg: HTTPAuthorizationCredentials = Depends(_bearer)) -> None:
-    # Compared as bytes. compare_digest refuses two str arguments unless both
-    # are pure ASCII, so a token with any non-ASCII character in it -- which
-    # nothing stops you putting in config.toml -- raised TypeError out of the
-    # dependency and surfaced as a 500. A wrong token has to be a 401 whatever
-    # it is made of, and a 500 here reads as "the agent is broken" while you
-    # stare at a token that is merely wrong.
+    # Bytes, not str: compare_digest refuses two str arguments unless both are
+    # pure ASCII, so a non-ASCII token in config.toml raised TypeError out of
+    # the dependency and surfaced as a 500. A wrong token has to be a 401
+    # whatever it is made of, not "the agent is broken".
     if not secrets.compare_digest(app_cfg.credentials.encode("utf-8"),
                                   str(app.state.cfg["token"]).encode("utf-8")):
         raise HTTPException(401, "bad token")
@@ -579,12 +556,10 @@ class SettingsOut(BaseModel):
 
 
 class Status(BaseModel):
-    # Always true, and kept because /v1 is frozen and something out there may
-    # read it. It means "this agent answered", which the 200 already told you --
-    # it is not a health check and never was. `browser` and `error` are the
-    # fields that carry news. Left as-is rather than redefined: a client that
-    # does branch on it would silently change behaviour the day we made it
-    # honest, which is worse than a field that is merely useless.
+    # Always true, and useless: it means "this agent answered", which the 200
+    # already told you. Kept because /v1 is frozen -- a client that does branch
+    # on it would change behaviour the day we made it honest. `browser` and
+    # `error` carry the news; README lists it as a frozen wart.
     up: bool
     current_url: str | None
     browser: str
@@ -607,12 +582,11 @@ class Status(BaseModel):
 
 
 # --- autoscroll -------------------------------------------------------------
-# A stop Event per screen, not an asyncio task: browser.py is blocking, the
-# routes already run in a threadpool, and an Event can be set from any thread --
-# including from _go(), which has to stop a scroll the moment the page changes.
+# A stop Event per screen, not an asyncio task: browser.py is blocking, routes
+# already run in a threadpool, and an Event can be set from any thread --
+# including _go(), which stops a scroll the moment the page changes.
 _autoscroll: dict[str, threading.Event] = {}
-# Guards the dict against the restart race: a finishing run must not delete the
-# entry belonging to the run that replaced it. See _autoscroll_start.
+# Guards the dict against the restart race -- see _autoscroll_start.
 _autoscroll_lock = threading.Lock()
 
 
@@ -634,13 +608,11 @@ def _autoscroll_start(cfg: dict, name: str, speed: int) -> None:
         # for the whole run rather than opening one per tick.
         with contextlib.suppress(Exception):    # browser gone, screen closed
             browser.autoscroll(cfg, name, speed, stop)
-        # Only if the entry is still *ours*. A second start stops this run and
-        # installs its own event under the same name; popping unconditionally
-        # deleted that one, which left the new run scrolling with nothing left
-        # holding its stop event. `/v1/autoscroll stop` then popped nothing, the
-        # navigate guard in _navigate_one() stopped nothing, and the display
-        # went on scrolling every page it was sent -- the exact haunting that
-        # guard exists to prevent, curable only by restarting the agent.
+        # Only if the entry is still *ours*. A second start installs its own
+        # event under the same name, and popping unconditionally deleted that
+        # one -- leaving the new run scrolling with nothing holding its stop
+        # event, so `stop` popped nothing and the display went on scrolling
+        # every page it was sent until the agent was restarted.
         with _autoscroll_lock:
             if _autoscroll.get(name) is stop:
                 del _autoscroll[name]
@@ -652,8 +624,7 @@ def _autoscroll_start(cfg: dict, name: str, speed: int) -> None:
 # blocking websocket I/O, and on the event loop it starves uvicorn hard enough
 # that the BiDi handshake fails. Sync routes get FastAPI's threadpool.
 def _http(e: Exception) -> HTTPException:
-    """The one place browser failures become status codes. Was repeated inline in
-    every route; a fan-out has to raise the same codes from a helper."""
+    """The one place browser failures become status codes."""
     if isinstance(e, NotImplementedError):
         return HTTPException(501, str(e))
     if isinstance(e, ValueError):
@@ -667,14 +638,10 @@ _BROWSER_ERRORS = (NotImplementedError, ValueError, OSError, RuntimeError)
 def _fanout(screen: str | None, do) -> NavigateOut:
     """Run `do(s)` per targeted screen and report what each one did.
 
-    One named screen keeps raising: one screen, one verdict, and every client
-    written before this already handles that. `screen: "all"` must not — the loop
-    is not atomic, so raising partway leaves some monitors changed and tells the
-    caller nothing about which ones. Collect instead, and let `screens` carry the
-    per-screen truth that a single `current_url` cannot.
-
-    Every screen failing is still a 503: the request accomplished nothing, and
-    that is what it has always meant.
+    One named screen keeps raising: one screen, one verdict, and every older
+    client already handles that. `screen: "all"` must not — the loop is not
+    atomic, so raising partway changes some monitors and tells the caller
+    nothing about which. Collect instead. Every screen failing is still a 503.
     """
     picked = targets(app.state.cfg, screen)
     results: list[ScreenResult] = []
@@ -694,12 +661,11 @@ def _fanout(screen: str | None, do) -> NavigateOut:
 
 
 def _navigate_one(s: dict, url: str) -> str:
-    # Wake before navigating: pushing something to a sleeping display is how you
-    # turn it back on. This covers navigate, home, reload and upload.
+    # Wake before navigating: pushing something to a sleeping display is how
+    # you turn it back on. Covers navigate, home, reload and upload.
     display.touch(s, url)
-    # Any navigation ends an autoscroll on that screen. Without this the loop
-    # keeps scrolling whatever page lands next, which looks like a haunted
-    # display and is impossible to guess from the UI.
+    # Any navigation ends an autoscroll on that screen, or the loop keeps
+    # scrolling whatever page lands next -- a haunted display, from the UI.
     _autoscroll_stop(s["name"])
     return browser.navigate(app.state.cfg, url, s["name"])
 
@@ -751,10 +717,20 @@ def scroll(body: ScrollIn) -> NavigateOut:
 
 @app.post("/v1/autoscroll", response_model=NavigateOut, dependencies=[Depends(auth)])
 def autoscroll(body: AutoScrollIn) -> NavigateOut:
+    """Start or stop a slow continuous scroll.
+
+    **Wart, frozen:** the reply reuses NavigateOut but puts a *screen name* in
+    `current_url` -- the last screen's, with `screens` empty. Wrong, and it
+    stays wrong: /v1 is frozen and a client parsing it would change behaviour
+    the day we fixed it. Read the 200, not the body. README lists it.
+    """
     if body.action not in ("start", "stop"):
         raise HTTPException(422, "action must be 'start' or 'stop'")
     cfg = app.state.cfg
-    if body.action == "start" and cfg["browser"]["kind"] == "firefox":
+    # Checked here rather than left to browser.autoscroll: _autoscroll_start runs
+    # it on a thread that suppresses everything, so a 501 would never come back.
+    # Off the same SUPPORTS table the browser guard reads.
+    if body.action == "start" and "autoscroll" not in browser.supports(cfg):
         raise HTTPException(501, "autoscroll needs CDP; use chromium or edge")
     out = None
     for s in targets(cfg, body.screen):
@@ -780,11 +756,10 @@ def media(body: MediaIn) -> MediaOut:
         try:
             state = browser.media(cfg, s["name"], body.action, body.value)
         except _BROWSER_ERRORS as e:
-            # ponytail: media keeps raising on the first bad screen rather than
-            # collecting like _fanout. Its "all" already means "whichever screen
-            # had media", and MediaOut carries a player state, not a url, so
-            # per-screen results need a second result model. Add one when a wall
-            # really does play different things on different monitors.
+            # ponytail: raises on the first bad screen rather than collecting
+            # like _fanout -- MediaOut carries a player state, not a url, so
+            # per-screen results need a second model. Add one when a wall really
+            # does play different things on different monitors.
             raise _http(e)
         if state is not None:
             out = MediaOut(ok=True, **state)
@@ -799,20 +774,14 @@ def media(body: MediaIn) -> MediaOut:
 def screenshot(body: ScreenshotIn) -> ScreenshotOut:
     """What one screen is *actually* showing.
 
-    Every other route in this API reports the url it was given: `/v1/navigate`
-    returns what we sent, not what loaded, so a redirect, a login wall, a
-    consent banner and a crashed tab are all indistinguishable from success.
-    This is the read-back.
+    Every other route reports the url it was *given*, so a redirect, a login
+    wall, a consent banner and a crashed tab all look like success. This is the
+    read-back. POST because the body carries a region, but still a read.
 
-    POST rather than GET because the body carries a region, and because every
-    other per-screen route here is shaped `{screen, ...}`. It is still a read:
-    nothing on the display changes.
-
-    No `display.touch()`, deliberately. Looking at a screen is not "show me
-    something", and waking the panel in order to photograph it would let a
-    poller light the room all night -- the same reason `/v1/window` and
-    `media action=state` don't touch either. The page is rendered whether or not
-    the monitor is powered, so a screenshot of a sleeping display still works.
+    No `display.touch()`: waking the panel to photograph it would let a poller
+    light the room all night (same as `/v1/window` and `media action=state`).
+    The page renders whether or not the monitor is powered, so this works on a
+    sleeping display.
     """
     cfg = app.state.cfg
     # screen_of, not targets(): "all" would have to return a list of images, and
@@ -834,15 +803,13 @@ def screenshot(body: ScreenshotIn) -> ScreenshotOut:
 def inspect(screen: str | None = None) -> InspectOut:
     """What the page says about itself: title, ready state, scroll, form fields.
 
-    The machine-readable half of `/v1/screenshot` — a program cannot look at a
-    picture. `error_page` is the one a poller most needs: Chromium's own crash
-    and network pages render perfectly and answer `/v1/status` with a 200, so
-    "Aw, Snap!" is indistinguishable from success everywhere else in this API.
+    The machine-readable half of `/v1/screenshot`. `error_page` is the one a
+    poller most needs: Chromium's own crash and network pages render perfectly
+    and answer `/v1/status` with a 200.
 
-    No field *values*, ever. Naming a password box is how a caller knows where
-    to type; handing back what is in it would make this a credential leak.
-
-    A read, so no `display.touch()` — same rule as `/v1/screenshot`.
+    No field *values*, ever — naming a password box is how a caller knows where
+    to type; returning what is in it would make this a credential leak. A read,
+    so no `display.touch()`.
     """
     cfg = app.state.cfg
     s = screen_of(cfg, screen)
@@ -856,20 +823,19 @@ def inspect(screen: str | None = None) -> InspectOut:
 def send_input(body: InputIn) -> InputOut:
     """Click, drag, type and press keys on one screen, in order.
 
-    Exists for the failure this box cannot otherwise recover from: the Pi has no
-    keyboard, so an expired SSO login or a consent wall is a page nobody can get
-    past (PLAN.md §6). Everything goes into one browser target's renderer — it
-    cannot reach the window manager, the desktop, or any other application.
+    For the failure this box cannot otherwise recover from: no keyboard, so an
+    expired SSO login or a consent wall is a page nobody can get past (PLAN.md
+    §6). Everything goes into one browser target's renderer — it cannot reach
+    the window manager, the desktop, or any other application.
 
-    **Off unless `[interact] enabled = true`.** It is the only route that acts
-    *as* whoever the kiosk is logged in as. Disabled, it is absent from
-    `supports` and 501s, exactly like a capability the browser lacks.
+    **Off unless `[interact] enabled = true`**: the only route that acts *as*
+    whoever the kiosk is logged in as. Disabled, it is absent from `supports`
+    and 501s, exactly like a capability the browser lacks.
 
-    One request per sequence, not per verb: a login is five actions, and as five
-    requests that is five websockets and five chances to interleave with
-    something else. Stops at the first failure, because half a login is the
-    dangerous half — a click that missed would otherwise be followed by a
-    password typed into whatever does have focus.
+    One request per sequence, not per verb — five requests is five websockets
+    and five chances to interleave. Stops at the first failure: a click that
+    missed would otherwise be followed by a password typed into whatever does
+    have focus.
     """
     cfg = app.state.cfg
     if not browser.interactive(cfg):
@@ -927,12 +893,10 @@ def screens() -> list[ScreenOut]:
 
 
 # --- extensions -------------------------------------------------------------
-# Ad blockers, mostly. The kiosk has no UI to install one through, and this
-# build's Chromium ignores ExtensionInstallForcelist (deploy/pi/README.md §10),
-# so the agent fetches the CRX and hands Chromium an unpacked directory.
-#
-# This is the only route that writes executable code onto the box, so it takes
-# *ids* and never a url — see agent/extensions.py and PLAN.md §11.
+# Ad blockers, mostly. The kiosk has no UI to install one through and this
+# Chromium ignores ExtensionInstallForcelist (deploy/pi/README.md §10), so the
+# agent fetches the CRX itself. The only route that writes executable code onto
+# the box, so it takes *ids* and never a url — extensions.py, PLAN.md §11.
 
 def _ext_dir() -> str:
     if "extensions" not in browser.supports(app.state.cfg):
@@ -960,10 +924,9 @@ def get_extensions() -> ExtensionsOut:
 @app.post("/v1/extensions", response_model=ExtensionsOut, dependencies=[Depends(auth)])
 def install_extensions(body: ExtensionsIn) -> ExtensionsOut:
     d = _ext_dir()
-    # Every id is checked before anything is fetched: a malformed one is the
-    # caller's typo and total, so the whole request fails rather than half of it
-    # installing. Failures *after* that point are per-id — the loop is not
-    # atomic, and raising partway would install some and report none (_fanout).
+    # Every id checked before anything is fetched: a typo is total, so the
+    # request fails rather than half-installing. Failures after that are per-id
+    # -- raising partway would install some and report none (_fanout).
     for i in body.ids:
         if not extensions.ID_RE.match(i or ""):
             raise HTTPException(422, f"not an extension id: {i!r}")
@@ -992,8 +955,7 @@ def remove_extension(name: str) -> ExtensionsOut:
 
 # --- settings ---------------------------------------------------------------
 # The screens editor (PLAN.md §7, v1.1.0). Only what is safe to change while the
-# agent runs: config.toml stays the source for the token and the install-time
-# paths, and is never made agent-writable.
+# agent runs; config.toml is never made agent-writable.
 
 def _settings_out(note: str = "") -> SettingsOut:
     found = display.detect()
@@ -1042,25 +1004,25 @@ def put_settings(body: SettingsIn) -> SettingsOut:
             raise HTTPException(422, str(e))
 
     before = [(s["position"], s["size"]) for s in cfg["screens"]]
-    data = {"screens": [{"name": n, "home_url": s.home_url.strip(),
-                         "position": s.position.strip(), "size": s.size.strip()}
-                        for n, s in zip(names, body.screens)]}
+    rows = [{"name": n, "home_url": s.home_url.strip(),
+             "position": s.position.strip(), "size": s.size.strip()}
+            for n, s in zip(names, body.screens)]
     try:
-        settings.save(data)
+        # Merged, not replaced: the editor only ever sees the monitors detected
+        # right now, and a save with one unplugged must not delete the other
+        # screen's saved name and home_url. See settings.merge_screens.
+        settings.save(settings.merge_screens(rows))
     except (OSError, RuntimeError) as e:      # unwritable dir, or no resolvable home
         raise HTTPException(500, f"cannot save settings: {e}")
 
-    # Reload through load_config() rather than patching cfg field by field, so a
-    # save lands exactly where a restart would — one code path, no second
-    # implementation of the ?screen= stamping. Mutated in place, *not*
-    # reassigned: display.watch() closed over this dict at startup and would
-    # otherwise read a stale config forever.
-    #
+    # Through load_config(), not field by field, so a save lands exactly where a
+    # restart would -- no second implementation of the ?screen= stamping. In
+    # place, not reassigned: display.watch() closed over this dict.
     swap_config(cfg, load_config())
 
     # The live half, and the only reason this beats editing a file: the window
     # moves while you watch. It must not fail the request -- the settings are
-    # already saved, and a dead browser or a Firefox dev box is not a bad save.
+    # already saved, and a dead browser is not a bad save.
     note = ""
     for i, s in enumerate(cfg["screens"]):
         if (s["position"], s["size"]) == before[i] or not s["position"]:
@@ -1096,9 +1058,8 @@ def upload(request: Request, file: UploadFile,
     except storage.TooBig as e:
         raise HTTPException(413, str(e))
 
-    # Send the kiosk to the same address the uploader used. Not loopback: on the
-    # Pi we bind the tailnet interface only (PLAN.md §10), so 127.0.0.1 is not
-    # listening and every dropped file would 404 on the display.
+    # The same address the uploader used, not loopback: the Pi binds the tailnet
+    # interface only (PLAN.md §10), so 127.0.0.1 would 404 on the display.
     if navigate:
         _go(str(request.url_for("serve_file", file_id=file_id)), screen)
     return UploadOut(id=file_id, url=f"/files/{file_id}")
@@ -1112,20 +1073,26 @@ def serve_file(file_id: str) -> FileResponse:
         p = storage.path(app.state.cfg, file_id)
     except KeyError:
         raise HTTPException(404, "no such file")
-    # nosniff: we serve the type the extension claims, never the client's. This
-    # route is unauthenticated and same-origin with the web UI that holds the
+    # nosniff: we serve the type the extension claims, never the client's --
+    # this route is unauthenticated and same-origin with the web UI holding the
     # token, so a .txt talked into rendering as HTML would run there.
+    #
+    # CSP sandbox is defence in depth for whatever lands in storage.TYPES later:
+    # an opaque origin cannot reach that localStorage. `allow-scripts` because a
+    # bare `sandbox` is *believed* to render Chromium's PDF viewer blank -- not
+    # measured, so do not treat this header as the boundary. The boundary is
+    # test_nothing_in_types_can_execute: nothing served here is script-bearing.
     return FileResponse(p, media_type=storage.media_type(file_id),
                         content_disposition_type="inline",
-                        headers={"X-Content-Type-Options": "nosniff"})
+                        headers={"X-Content-Type-Options": "nosniff",
+                                 "Content-Security-Policy": "sandbox allow-scripts"})
 
 
 @app.get("/v1/status", response_model=Status, dependencies=[Depends(auth)])
 def status() -> Status:
     cfg = app.state.cfg
-    # A launch that is still failing is the better explanation, so it wins: the
-    # error off the socket would only say "connection refused" on a port nothing
-    # ever got as far as opening.
+    # A failing launch is the better explanation, so it wins: the socket error
+    # only says "connection refused" on a port nothing ever opened.
     error = getattr(app.state, "launch_error", "")
     try:
         url, state = browser.current_url(cfg), "ok"
@@ -1157,12 +1124,10 @@ def home_page() -> FileResponse:
 
 @app.get("/home-status", include_in_schema=False)
 def home_status() -> dict:
-    """What the home screen may display. Deliberately *not* /v1/status.
-
-    Anyone who can reach the agent can read this, so it reports the **host** of
-    what a screen is showing, never the full url — a link to a private document
-    is worth more than the convenience of seeing it on the idle screen.
-    """
+    """What the home screen may display. Deliberately *not* /v1/status: this is
+    unauthenticated, so it reports the **host** of what a screen is showing and
+    never the full url -- a link to a private document is worth more than the
+    convenience of seeing it on an idle screen."""
     out = []
     for s in app.state.cfg["screens"]:
         try:
@@ -1170,8 +1135,8 @@ def home_status() -> dict:
         except _BROWSER_ERRORS:
             url = None
         host = urlparse(url).hostname if url else None
-        # Sitting on its own home page is idle, not "showing" something. Without
-        # this every screen reports the agent's own host forever.
+        # Its own home page is idle, not "showing" -- otherwise every screen
+        # reports the agent's own host forever.
         if not host or urlparse(url).path.startswith("/home") \
                 or (url or "").startswith(("about:", "data:")):
             host = None

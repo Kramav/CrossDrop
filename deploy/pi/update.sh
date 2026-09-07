@@ -107,7 +107,11 @@ systemctl --user restart "$UNIT"
 # --- 6. verify against the live port ---------------------------------------
 # This is the check selfcheck cannot do: a real restart, real browser, real
 # socket. Runtime and kiosk regressions only ever show up here.
-TOKEN="$(sed -n 's|^token = "\(.*\)"|\1|p' "$CFG")"
+# head -1: a second matching line -- a commented-out old token, a [section] that
+# also has one -- would make TOKEN multi-line, the Authorization header
+# malformed, every health probe 401, and the release roll back for no reason.
+# A *false* rollback on a box with no keyboard is the expensive failure here.
+TOKEN="$(sed -n 's|^token = "\(.*\)"|\1|p' "$CFG" | head -1)"
 BASE="http://$(tailscale ip -4 | head -1):$PORT"
 URL="$BASE/v1/status"
 healthy=0

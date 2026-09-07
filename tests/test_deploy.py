@@ -11,6 +11,7 @@ was supposed to catch is on the wall.
 """
 
 import base64
+import os
 import re
 import shutil
 import subprocess
@@ -198,6 +199,67 @@ def test_tag_verification_is_opt_in_and_a_hard_gate():
     assert ".failed-$TAG" in block
     # The latch needs its directory to exist on a first-ever run.
     assert block.index('mkdir -p "$RELEASES"') < block.index('touch "$RELEASES')
+
+
+def _sh(*args, **kw):
+    """Run bash, or skip. Windows dev boxes have it via git; the Pi is bash."""
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("no bash")
+    return subprocess.run([bash, *args], capture_output=True, text=True, **kw)
+
+
+def test_the_token_is_read_as_one_line(tmp_path):
+    """update.sh's health check greps the token out of config.toml with sed. A
+    second matching line -- a commented-out old token, a [section] that has one
+    too -- made TOKEN multi-line, the Authorization header malformed, every
+    probe 401, and the release roll back for no reason at all. A *false*
+    rollback on a box with no keyboard is the expensive failure here."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('token = "real-token"\nhome_url = "/home"\n'
+                   '[old]\ntoken = "stale-token"\n', encoding="utf-8")
+    r = _sh("-c", 'sed -n \'s|^token = "\\(.*\\)"|\\1|p' + f'\' "{cfg.as_posix()}" | head -1')
+    assert r.stdout.strip() == "real-token", r.stdout
+    assert "| head -1" in UPDATE_SH, "the script itself still takes every match"
+
+
+def test_verify_tag_actually_refuses_an_unsigned_tag(tmp_path):
+    """The signing path was never run -- not in CI, not in the smoke docs -- so
+    "VERIFY_TAG=1 is a hard gate" was a claim about a string in a file. This
+    runs the real script against a real repo with a real unsigned tag.
+
+    The refusal, not the acceptance: signing needs a GPG key, and generating one
+    is slow and flaky. Refusing is the half that has to be right anyway -- an
+    accept-by-default here is push access to the repo becoming code execution on
+    every Pi within 30 minutes.
+    """
+    if not shutil.which("git"):
+        pytest.skip("no git")
+    repo, root = tmp_path / "repo", tmp_path / "root"
+    repo.mkdir()
+    # gpgsign off: a dev box with global commit signing on would otherwise fail
+    # to build the *fixture*. The tag stays lightweight either way, which is
+    # exactly what verify-tag has to refuse.
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+           "-c", "commit.gpgsign=false", "-C", str(repo)]
+    subprocess.run([*git[:1], "init", "-q", str(repo)], check=True,
+                   capture_output=True)
+    (repo / "f.txt").write_text("hi", encoding="utf-8")
+    subprocess.run([*git, "add", "-A"], check=True, capture_output=True)
+    subprocess.run([*git, "commit", "-qm", "x"], check=True, capture_output=True)
+    subprocess.run([*git, "tag", "v9.9.9"], check=True, capture_output=True)
+
+    r = _sh(str(Path(__file__).parent.parent / "deploy/pi/update.sh"),
+            env={**os.environ, "ROOT": root.as_posix(),
+                 "REPO": repo.as_posix(), "VERIFY_TAG": "1",
+                 "CFG": str(tmp_path / "nope.toml"), "PATH": os.environ["PATH"]})
+
+    assert r.returncode == 1, f"an unsigned tag was accepted\n{r.stdout}{r.stderr}"
+    assert "not a validly signed tag" in r.stderr, r.stderr
+    # Latched, or the timer redeploys the same bad tag every 30 minutes.
+    assert (root / "releases" / ".failed-v9.9.9").exists(), "no latch marker"
+    # And nothing was swapped: `current` never appeared.
+    assert not (root / "current").exists(), "a refused tag reached the swap"
 
 
 def test_the_rollback_still_latches_and_snapshots_before_it(client):
