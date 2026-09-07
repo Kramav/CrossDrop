@@ -9,14 +9,11 @@
 >   directory; `git` (§3) needs your **CrossDrop clone**, so those blocks carry a
 >   `cd`.
 >
-> `roomctl` is on PATH only where you ran `pip install -e .` from the repo root
-> ([README.md, "Controlling a display"](../../README.md)) — activate that venv
-> first if it is in one.
-> It finds its Pi through `roomctl/targets.toml` beside the package, not through
-> your current directory. Files it writes (`shot -o wall.png`) land wherever you
-> ran it.
+> `roomctl` exists only on your machine — it is the desk-side client, installed
+> with `pip install -e .` ([README.md, "Controlling a display"](../../README.md)).
+> Activate that venv first if it is in one.
 >
-> On the Pi:
+> The Pi's own layout, for reading the blocks below:
 >
 > | Path | What lives there |
 > |---|---|
@@ -29,9 +26,18 @@ A runbook for the box on the wall, from your desk. The *mechanism* — tags,
 `selfcheck`, rollback, pruning — is [README.md §11](README.md); this is the
 order you type things in.
 
+**Start at [§2](#2-which-update-do-you-want)**, the index. It will tell you
+which of the paths below you are on — and the ordinary one, §3, needs no SSH at
+all: you tag on your machine and the Pi comes and gets it.
+
 The rule behind all of it: **the Pi has no keyboard.** Everything here either
 leaves the display running or undoes itself, and nothing asks you to be in the
 room.
+
+Three words used throughout: a **tag** is what you push (`v1.3.0`); a
+**release** is the unpacked copy of that tag in `releases/v1.3.0/`; **current**
+is the symlink saying which release is running. Deploying is moving that
+symlink, and rolling back is moving it back.
 
 ---
 
@@ -68,14 +74,16 @@ browser by hand) needs `DISPLAY=:0` in front of it.
 
 ## 2. Which update do you want
 
-| You want | Go to |
-|---|---|
-| Ship code you have already tagged | §3 |
-| Ship it *now*, not in ≤30 min | §4 |
-| Retry a tag that rolled back | §5 |
-| Change a config setting only | §6 |
-| No tags yet — a plain checkout | §7 |
-| Start over — wipe and reinstall | [README.md §13](README.md#13-uninstall-or-wipe-and-reinstall) |
+| You want | Go to | SSH? |
+|---|---|---|
+| Ship code — the ordinary path | §3 | no |
+| Ship it now, without waiting ~30 min for the timer | §4 | yes |
+| Retry a tag that rolled back | §5 | yes |
+| Change a config setting only | §6 | yes |
+| No tags yet — a plain checkout | §7 | yes |
+| Put an older release back | §9 | yes |
+| The wall is wrong and you want to know why | §10 | yes |
+| Start over — wipe and reinstall | [README.md §13](README.md#13-uninstall-or-wipe-and-reinstall) | yes |
 
 ---
 
@@ -91,8 +99,10 @@ git push                                    # wait for CI green
 git tag v1.3.0 && git push --tags
 ```
 
-If `room-display-update.timer` is enabled the Pi picks it up within ~30 min
-(`OnUnitActiveSec=30min`, plus up to 5 min of jitter). Check it landed:
+That is the whole of the normal path — you never touch the Pi. If
+`room-display-update.timer` is enabled it picks the tag up within ~30 min
+(`OnUnitActiveSec=30min`, plus up to 5 min of jitter), so wait, then check it
+landed:
 
 ```sh
 # on your machine — any directory
@@ -149,7 +159,7 @@ diagnosis:
 ```sh
 # on your machine — the .jpg lands in the directory you run this from
 cd ~/Downloads
-scp room@<pi>:/opt/room-display/releases/.failed-v1.3.0.jpg .
+scp room@<pi-tailnet-ip>:/opt/room-display/releases/.failed-v1.3.0.jpg .
 ```
 
 Then fix the cause, and clear the latch to let it try again:
@@ -207,17 +217,20 @@ web UI's Settings panel, they apply live, and they survive updates
 first tag is deployed there is nothing to roll back to, so this path has no
 safety net — prefer §3 once you have tags.
 
+Three steps, in this order. **Pull and install first** — neither restarts
+anything, so the agent on the wall keeps serving from the code it already
+loaded:
+
 ```sh
 # on the Pi — absolute paths, any directory
 git -C /opt/room-display/current pull --ff-only
 /opt/room-display/current/.venv/bin/pip install -q -r \
     /opt/room-display/current/agent/requirements.txt
-systemctl --user restart display-agent
 ```
 
-Check it can even start **before** you restart, while the running agent is still
-up. This is the same gate `update.sh` uses, it binds no port and launches no
-browser, so it is safe with the kiosk live:
+**Then check the new code can even start**, while the old one is still up. This
+is the same gate `update.sh` uses; it binds no port and launches no browser, so
+it is safe with the kiosk live:
 
 ```sh
 # on the Pi
@@ -225,8 +238,17 @@ cd /opt/room-display/current \
   && ROOM_CONFIG=/etc/room-display/config.toml .venv/bin/python -m agent selfcheck
 ```
 
-Exit 0 means it loads, imports and answers `/v1/status`. Exit 1 means **do not
-restart** — you would be trading a working display for a boot loop.
+Exit 0 means it loads, imports and answers `/v1/status`. Exit 1 means **stop
+here** — restarting would trade a working display for a boot loop. The agent on
+the wall is still the old code, so nothing is broken yet; undo the pull with
+`git -C /opt/room-display/current reset --hard HEAD@{1}` and leave it running.
+
+**Only then restart**, which is the moment the wall actually changes:
+
+```sh
+# on the Pi
+systemctl --user restart display-agent
+```
 
 ---
 
@@ -289,9 +311,11 @@ ln -sfn /opt/room-display/releases/v1.2.0 /opt/room-display/current
 systemctl --user restart display-agent
 ```
 
+Confirm the old version is the one answering:
+
 ```sh
 # on your machine — any directory
-roomctl status | jq -r .version
+roomctl status | jq -r .version            # v1.2.0
 ```
 
 Then stop the timer putting the bad one straight back:
