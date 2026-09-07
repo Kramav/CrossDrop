@@ -191,9 +191,9 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 **v1.0.1 — agent-owned display power.** Done. The Pi has no keyboard, so anything that blanks the screen and wakes only on *input* can only be cured by unplugging the box. The agent claims DPMS at startup (timeouts zeroed, DPMS kept enabled) and drives power itself: idle on its home page → off after 10 min, showing a site → off after 2 h without a request, and **any `/v1` call wakes it**. `POST /v1/display` and a UI button cover leaving the room. Both monitors sleep together — X11 has no per-output power. Same commit made screens self-detecting (`xrandr --listmonitors`), so a fresh install needs no `[[screen]]` blocks written by hand. See `agent/display.py`, `deploy/pi/README.md` §8.
 
-**v1.1.1 — playback control.** Done. A room display that can show a video could not pause one: the box has no keyboard, so whatever was pushed at it played to the end or not at all. `POST /v1/media` drives the page's own `<video>`/`<audio>` through one `Runtime.evaluate` — play, pause, ±10 s, mute, volume — with CDP's `userGesture`, which is what gets past Chromium's autoplay block on a page nobody can click. The web UI reveals its transport bar only when the screen really has a media element, the tray gets Play/pause, and `roomctl media` is the CLI. Uploads accept `.mp4 .webm .mp3 .m4a .wav` under the same tmpfs cap. Not covered: players inside cross-origin iframes (no execution context there) and the Pi's own ALSA volume. See `agent/browser.py` `media()`, `tests/test_media.py`.
+**v1.1.2 — playback control.** Done. A room display that can show a video could not pause one: the box has no keyboard, so whatever was pushed at it played to the end or not at all. `POST /v1/media` drives the page's own `<video>`/`<audio>` through one `Runtime.evaluate` — play, pause, ±10 s, mute, volume — with CDP's `userGesture`, which is what gets past Chromium's autoplay block on a page nobody can click. The web UI reveals its transport bar only when the screen really has a media element, the tray gets Play/pause, and `roomctl media` is the CLI. Uploads accept `.mp4 .webm .mp3 .m4a .wav` under the same tmpfs cap. Not covered: players inside cross-origin iframes (no execution context there) and the Pi's own ALSA volume. See `agent/browser.py` `media()`, `tests/test_media.py`.
 
-**v1.1.2 — the agent survives its own browser.** Done. Three failures found by the 2026-09-06 architecture review, all of them curable only by walking into the room:
+**v1.1.7 — the agent survives its own browser.** Done. Three failures found by the 2026-09-06 architecture review, all of them curable only by walking into the room:
 
 - **A failed browser launch took the API down with it.** `browser.launch()` ran inline in `lifespan`, so no binary, a debug port that never came up, or an X session slower than the agent raised *before* uvicorn bound the port. systemd restarted us, the next attempt failed identically, and `/v1/status` — the only thing that could have named the cause — was down for every attempt. Now it launches on the existing startup thread, retries with backoff (5s → 5 min, `ROOM_LAUNCH_RETRY`), and reports the reason in a new `error` field on `/v1/status`. `browser` keeps its two original values, so a client reading `== "ok"` is unaffected. The retry is not a nicety: it is what replaces the systemd restart loop for the transient case, which was the one thing that loop got right.
 - **An autoscroll restarted on the same screen orphaned the run that replaced it.** The finishing run popped whatever sat under its screen name, which after a second start was the *new* run's stop event. That run then scrolled with nothing holding its event: `POST /v1/autoscroll stop` popped nothing, the navigate guard in `_navigate_one()` stopped nothing, and the display went on scrolling every page sent to it afterwards — the exact haunting that guard exists to prevent. A lock, and a delete conditional on the entry still being ours. Trivially reachable by double-clicking the web UI's Auto-scroll button.
@@ -201,7 +201,7 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 `tests/test_resilience.py` is the surface: the agent surviving things, as against doing them. Each fix was confirmed to fail its tests when reverted. *Accept (unrun on hardware):* rename the Chromium binary, restart the agent, and read the reason out of `roomctl status` from a controller box rather than from a keyboard.
 
-**v1.2.0 — screenshots, and two power/config fixes.** Done. Additive to the frozen `/v1`.
+**v1.1.7 — screenshots, and two power/config fixes.** Done. Additive to the frozen `/v1`.
 
 `POST /v1/screenshot` answers the thing this API could not: every other route reports the url it was *given*, so a redirect, an expired SSO login, a consent banner and a crashed tab are all indistinguishable from success. `roomctl shot -o wall.png`, `Client.screenshot()`, and `"screenshot"` in `supports` so a caller discovers it the same way it discovers everything else.
 
@@ -228,7 +228,7 @@ Three checks keep the boundary from eroding by accident, since none of it is enf
 
 *Accept (unrun on hardware):* `roomctl shot -o wall.png` against the Pi, and confirm the image matches what is on the monitor at the size reported. Nothing in the suite can prove a picture *looks* right — only that the clip, the clamp and the wake behaviour around it are correct.
 
-**v1.3.0 — inspect, input, and a rollback that can see the wall.** Done. Additive to the frozen `/v1`.
+**v1.1.8 — inspect, input, and a rollback that can see the wall.** Done. Additive to the frozen `/v1`.
 
 **`GET /v1/inspect`** is `/v1/screenshot` for a program, which cannot look at a picture: title, ready state, scroll position, form fields, and `error_page`. That last one is the point — Chromium's own crash and network pages render perfectly and answer `/v1/status` with a 200, so "Aw, Snap!" was indistinguishable from success everywhere in this API. It reports no field **values**: naming a password box is how a caller knows where to type, and handing back what is in it would turn a diagnostic into a credential leak.
 
@@ -249,7 +249,7 @@ Three checks keep the boundary from eroding by accident, since none of it is enf
 
 *Accept (unrun on hardware):* with `[interact] enabled`, put a login page on the wall, press Look, click the username box in the picture, type, and watch the next capture show the caret in the right field.
 
-**v1.1.9 — the controller became a viewport.** Done, and no server change: every route it calls already existed.
+**v1.1.12–13 — the controller became a viewport.** Done, and no server change: every route it calls already existed.
 
 The page was a form — a drop zone, then stacked fieldsets of buttons, and the screenshot bolted on underneath as one more panel. Once the capture existed that ordering was backwards: the picture of the wall is the thing you look at, and everything else is chrome around it. So the page is now an app shell — top bar, full-bleed capture, right-hand rail, bottom input bar — and the screenshot is the page rather than a feature of it.
 
@@ -375,7 +375,7 @@ per-tick websocket (see Phase 7a).
   honest fix then is an allowlist of ids in `config.toml`, which the agent
   cannot write.
 
-**v1.2.x — which window is which.** Done. `_cdp_page()` mapped screens to windows by *position in `/json`'s list*. That is the order the windows were opened in — but only while the list holds nothing but those windows, and a browser with extensions loaded does not guarantee it. One stray page target moved every screen one place along, silently, and the wrong mapping was then written into `_targets` so it stayed wrong until a restart. Tolerable when the worst case was a navigate on the wrong monitor; not tolerable now that the same path carries a click and a typed password.
+**v1.2.0 — which window is which.** Done. `_cdp_page()` mapped screens to windows by *position in `/json`'s list*. That is the order the windows were opened in — but only while the list holds nothing but those windows, and a browser with extensions loaded does not guarantee it. One stray page target moved every screen one place along, silently, and the wrong mapping was then written into `_targets` so it stayed wrong until a restart. Tolerable when the worst case was a navigate on the wrong monitor; not tolerable now that the same path carries a click and a typed password.
 
 Three changes, in order of how much they do:
 
