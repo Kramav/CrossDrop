@@ -513,6 +513,32 @@ window for the drop-zone UI:
 msedge.exe --app=http://<pi-tailnet-ip>:8080/
 ```
 
+## 13. Uninstall, or wipe and reinstall
+
+```sh
+# on the Pi
+bash /opt/room-display/current/deploy/pi/uninstall.sh
+```
+
+It prints what it will delete and waits for you to type `wipe` (`-y` skips the
+prompt). It undoes §2–§6: the user units, `/opt/room-display`,
+`/etc/room-display`, `~/.local/share/room-display`, the journald drop-in, and on
+a Debian box the tty1 autologin and the kiosk block in `~/.profile`.
+
+**That includes the bearer token, the browser logins and the screen settings.**
+A reinstall generates a new token and starts logged out of everything, so grab
+what you want to keep first:
+
+```sh
+# on your machine — lands in the directory you run this from
+scp room@<pi>:~/.local/share/room-display/settings.json .
+```
+
+Left alone deliberately: apt packages, Tailscale (your way back in), and
+raspi-config's autologin/blanking. Reinstall with the same `curl | bash` from
+§3; reboot first if the uninstaller removed a `video=` pin or the tty1
+autologin, since both are read at boot.
+
 ## Troubleshooting
 
 `journalctl --user -u display-agent -f` is the log.

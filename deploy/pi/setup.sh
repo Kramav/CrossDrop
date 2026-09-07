@@ -6,6 +6,8 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | bash
 #
+# To start over instead of re-running: deploy/pi/uninstall.sh.
+#
 # The two differ in exactly two places: the Pi has a graphical session already
 # and needs raspi-config plus a boot-config edit; the Debian box has no session
 # at all and needs one built. Everything after "== code" is identical.

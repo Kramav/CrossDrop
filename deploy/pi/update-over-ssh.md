@@ -75,6 +75,7 @@ browser by hand) needs `DISPLAY=:0` in front of it.
 | Retry a tag that rolled back | §5 |
 | Change a config setting only | §6 |
 | No tags yet — a plain checkout | §7 |
+| Start over — wipe and reinstall | [README.md §13](README.md#13-uninstall-or-wipe-and-reinstall) |
 
 ---
 

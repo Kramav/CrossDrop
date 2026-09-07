@@ -201,6 +201,45 @@ def test_tag_verification_is_opt_in_and_a_hard_gate():
     assert block.index('mkdir -p "$RELEASES"') < block.index('touch "$RELEASES')
 
 
+UNINSTALL_SH = (Path(__file__).parent.parent / "deploy/pi/uninstall.sh").read_text(
+    encoding="utf-8")
+
+
+def test_the_uninstaller_removes_exactly_the_block_the_installer_appends(tmp_path):
+    """setup.sh appends a kiosk block to ~/.profile; uninstall.sh strips it with
+    a sed range. The two live in different files and nothing else pins them
+    together — a reworded first line leaves the block behind, and the next
+    `startx` fights the reinstalled one for tty1.
+
+    Run the real sed against the real block, with a line of the user's own on
+    either side to prove the range does not eat them."""
+    block = SETUP_SH[SETUP_SH.index("# CrossDrop kiosk session"):]
+    block = block[:block.index("\nEOF") + 1]
+    prof = tmp_path / ".profile"
+    prof.write_text(f'export EDITOR=vim\n\n{block}\nexport PAGER=less\n',
+                    encoding="utf-8")
+
+    r = _sh("-c", f"sed -i '/^# CrossDrop kiosk session/,/exec startx/d' "
+                  f"'{prof.as_posix()}'")
+    assert r.returncode == 0, r.stderr
+
+    left = prof.read_text(encoding="utf-8")
+    assert "CrossDrop" not in left and "startx" not in left, left
+    assert "export EDITOR=vim" in left and "export PAGER=less" in left
+    # And the script still contains that exact sed.
+    assert "/^# CrossDrop kiosk session/,/exec startx/d" in UNINSTALL_SH
+
+
+def test_the_uninstaller_does_not_delete_itself_mid_run():
+    """It lives under /opt/room-display and deletes /opt/room-display. bash reads
+    a script as it executes, so without the copy the `rm -rf` truncates the file
+    it is running from and the rest — journald, autologin, the pin — silently
+    never happens."""
+    copy = UNINSTALL_SH.index('cp "$SELF" "$TMP"')
+    assert copy < UNINSTALL_SH.index("sudo rm -rf /opt/room-display")
+    assert 'exec env ROOM_UNINSTALL_TMP=' in UNINSTALL_SH
+
+
 def _sh(*args, **kw):
     """Run bash, or skip. Windows dev boxes have it via git; the Pi is bash."""
     bash = shutil.which("bash")
