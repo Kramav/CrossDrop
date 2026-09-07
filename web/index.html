@@ -3,206 +3,230 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Room display</title>
 <style>
-  :root { color-scheme: light dark; --line: color-mix(in srgb, currentColor 22%, transparent); }
+  :root {
+    color-scheme: light dark;
+    --line: color-mix(in srgb, currentColor 22%, transparent);
+    --dim: color-mix(in srgb, currentColor 8%, transparent);
+    /* The viewport frame is dark in both themes on purpose: it is a bezel round
+       someone else's screen, and a light one makes every capture look washed
+       out against it. */
+    --bezel: #24262b;
+    --accent: #2f6fd0;
+  }
   * { box-sizing: border-box; }
-  body { font: 16px/1.5 system-ui, sans-serif; max-width: 40rem; margin: 2rem auto;
-         padding: 0 1rem 3rem; }
-  h1 { font-size: 1.3rem; margin: 0 0 1rem; }
-  fieldset { border: 1px solid var(--line); border-radius: .6rem; padding: .8rem;
-             margin: 0 0 1rem; }
-  legend { padding: 0 .4rem; font-size: .8rem; text-transform: uppercase;
-           letter-spacing: .08em; opacity: .65; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; font: 15px/1.45 system-ui, sans-serif;
+    display: grid; grid-template-rows: auto 1fr auto; gap: .75rem;
+    padding: .75rem; overflow: hidden;
+  }
+  button, input, select { font: inherit; }
+  button { cursor: pointer; border: 1px solid var(--line); border-radius: .45rem;
+           background: transparent; padding: .45rem .7rem; }
+  button:hover:not(:disabled) { background: var(--dim); }
+  button:disabled { opacity: .4; cursor: default; }
+  .row { display: flex; gap: .4rem; align-items: center; min-width: 0; }
 
-  /* screen picker */
-  #screens { display: flex; flex-wrap: wrap; gap: .4rem; }
-  #screens button { flex: 1; min-width: 7rem; border: 1px solid var(--line);
-                    background: transparent; border-radius: .4rem; padding: .5rem;
-                    text-align: left; line-height: 1.25; }
-  #screens button[aria-pressed=true] { border-color: currentColor;
-    background: color-mix(in srgb, currentColor 12%, transparent); font-weight: 600; }
-  #screens .where { display: block; font-size: .78rem; font-weight: 400; opacity: .6;
-                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* --- top bar ------------------------------------------------------------ */
+  #bar { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+  #screens { display: flex; }
+  #screens button { border-radius: 0; margin-left: -1px; }
+  #screens button:first-child { border-radius: .45rem 0 0 .45rem; margin-left: 0; }
+  #screens button:last-child { border-radius: 0 .45rem .45rem 0; }
+  #screens button[aria-pressed=true] {
+    background: var(--dim); font-weight: 600; border-color: currentColor;
+    position: relative; z-index: 1;
+  }
+  #go { display: flex; gap: .4rem; flex: 1; min-width: 12rem; margin: 0; }
+  #url { flex: 1; min-width: 0; padding: .45rem .6rem; border-radius: .45rem;
+         border: 1px solid var(--line); background: transparent; color: inherit; }
+  #show { background: var(--accent); border-color: var(--accent); color: #fff;
+          font-weight: 600; }
+  #show:hover { filter: brightness(1.1); background: var(--accent); }
+  #more { font-size: 1.1rem; line-height: 1; padding: .45rem .6rem; }
 
-  #drop { border: 2px dashed currentColor; border-radius: .5rem; padding: 2.5rem 1rem;
-          text-align: center; opacity: .6; }
-  #drop.over { opacity: 1; background: color-mix(in srgb, currentColor 12%, transparent); }
-  #drop label { text-decoration: underline; cursor: pointer; }
-  #drop input[type=file] { position: absolute; width: 1px; height: 1px; opacity: 0; }
-
-  form { display: flex; gap: .5rem; margin: 1rem 0; }
-  input[type=url] { flex: 1; min-width: 0; padding: .5rem; font: inherit; }
-  button { padding: .5rem .9rem; font: inherit; cursor: pointer; }
-  .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
-  .row.tight { gap: .3rem; }
-  #saved { display: flex; flex-wrap: wrap; gap: .5rem; padding: 0; list-style: none; }
-  #saved button { max-width: 16rem; overflow: hidden; text-overflow: ellipsis;
-                  white-space: nowrap; }
-  #saved .x { padding: .5rem; }
-  #auto[aria-pressed=true], #mute[aria-pressed=true] {
-    background: color-mix(in srgb, currentColor 20%, transparent); font-weight: 600; }
-  #pos { font: .85rem ui-monospace, monospace; opacity: .7; }
-
-  /* screenshots. Side by side when "all" is armed, one per monitor. */
-  #shots { display: flex; flex-wrap: wrap; gap: .6rem; margin: .6rem 0 0; }
-  #shots figure { margin: 0; flex: 1 1 14rem; min-width: 0; }
-  #shots img { display: block; width: 100%; height: auto; border-radius: .4rem;
-               border: 1px solid var(--line);
-               background: color-mix(in srgb, currentColor 8%, transparent); }
-  #shots figcaption { font-size: .78rem; opacity: .7; margin-top: .3rem;
-                      overflow-wrap: anywhere; }
+  /* --- the stage ---------------------------------------------------------- */
+  #stage {
+    position: relative; background: var(--bezel); border-radius: .5rem;
+    display: grid; place-items: center; overflow: hidden; min-height: 0;
+    padding: .9rem;
+  }
+  #stage.over { outline: 2px dashed #fff; outline-offset: -6px; }
+  #shots { display: flex; gap: .5rem; margin: 0; max-width: 100%;
+           max-height: 100%; min-height: 0; }
+  #shots figure { margin: 0; min-width: 0; display: flex; }
+  #shots img { display: block; max-width: 100%; max-height: 100%;
+               object-fit: contain; background: #fff; }
   /* Something has been sent to the display since these were taken, so they are
-     pictures of the page before it. Shown dimmed rather than removed: the
-     comparison is usually the thing you wanted. */
-  #shots.stale img { opacity: .4; filter: grayscale(.5); }
-  /* Armed for input: the picture is in CSS pixels, so where you click on it is
-     where the click lands on the page. Nothing else in the UI is a target. */
+     pictures of the page before it. Dimmed rather than removed: the comparison
+     is usually the thing you wanted. */
+  #shots.stale img { opacity: .45; filter: grayscale(.4); }
+  /* Armed for input: the capture is in CSS pixels, so where you click on it is
+     where the click lands on the page. */
   #shots.live img { cursor: crosshair; }
-  #shots.live img:hover { outline: 2px solid currentColor; outline-offset: 2px; }
-  #looknote { font-size: .8rem; opacity: .7; }
-  #typebox { display: flex; gap: .4rem; align-items: center; margin-top: .5rem; }
-  #typebox input[type=text], #typebox input[type=password] { flex: 1; min-width: 0;
-    padding: .4rem; font: inherit; }
-  #typebox label { font-size: .8rem; opacity: .7; display: flex; gap: .25rem;
-                   align-items: center; }
-  #status { opacity: .7; word-break: break-all; min-height: 1.5em; }
-  kbd { font: .8em ui-monospace, monospace; border: 1px solid var(--line);
-        border-bottom-width: 2px; border-radius: .3rem; padding: 0 .3em; }
 
-  /* settings */
-  details { border: 1px solid var(--line); border-radius: .6rem; padding: .8rem; }
-  summary { cursor: pointer; font-size: .8rem; text-transform: uppercase;
-            letter-spacing: .08em; opacity: .65; }
-  details[open] summary { margin-bottom: .8rem; }
-  details h2 { font-size: .95rem; margin: 1.2rem 0 .5rem; }
-  details label { display: block; font-size: .78rem; opacity: .7; }
-  details input { width: 100%; padding: .4rem; font: inherit; }
+  #empty { color: #9aa0aa; text-align: center; padding: 2rem; max-width: 32rem; }
+  #empty p { margin: .5rem 0 0; font-size: .85rem; }
+  #look { color: #fff; border-color: #4a4f57; }
+
+  /* Overlays on the capture. */
+  #badge {
+    position: absolute; top: .9rem; left: .9rem; display: flex; gap: .5rem;
+    align-items: center; padding: .25rem .3rem .25rem .55rem; border-radius: .4rem;
+    background: #1b1d21e0; color: #cfd4dc; font: .72rem ui-monospace, monospace;
+    letter-spacing: .02em;
+  }
+  #badge button { padding: .1rem .35rem; border-color: #3a3f47; color: inherit; }
+  #badge button:hover { background: #ffffff1a; }
+  #dot { width: .55rem; height: .55rem; border-radius: .1rem; background: #6b7280; }
+  #dot.awake { background: #4a9eff; }
+  #dot.bad { background: #e5534b; }
+
+  /* The floating contextual dock: only ever present while something is playing. */
+  #dock {
+    position: absolute; bottom: 1.4rem; left: 50%; transform: translateX(-50%);
+    display: flex; gap: .5rem; align-items: center; padding: .45rem .6rem;
+    border-radius: .5rem; background: #2b2e34ee; color: #e6e9ee;
+    box-shadow: 0 6px 24px #0006; font-size: .85rem; max-width: 92%;
+    flex-wrap: wrap; justify-content: center;
+  }
+  #dock button { border-color: #454a53; color: inherit; padding: .3rem .55rem; }
+  #dock button:hover { background: #ffffff1a; }
+  #playpause { background: #3a4150; }
+  #pos { font: .8rem ui-monospace, monospace; opacity: .85; }
+  #dockstate { font: .68rem ui-monospace, monospace; letter-spacing: .08em;
+               opacity: .6; text-transform: uppercase; }
+  #vol { width: 5rem; }
+
+  /* --- bottom bar --------------------------------------------------------- */
+  #foot { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; }
+  #typed { flex: 1; min-width: 10rem; padding: .5rem .6rem; border-radius: .45rem;
+           border: 1px solid var(--line); background: transparent; color: inherit; }
+  #status { font-size: .8rem; opacity: .75; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; max-width: 22rem; }
+  .hints { display: flex; gap: .4rem; align-items: center; margin-left: auto;
+           font-size: .75rem; opacity: .55; flex-wrap: wrap; }
+  kbd { font: .72rem ui-monospace, monospace; border: 1px solid var(--line);
+        border-bottom-width: 2px; border-radius: .3rem; padding: .05rem .3rem; }
+
+  /* --- dialogs ------------------------------------------------------------ */
+  dialog { border: 1px solid var(--line); border-radius: .6rem; padding: 0;
+           background: Canvas; color: inherit; max-width: min(38rem, 94vw);
+           width: 100%; }
+  dialog::backdrop { background: #0009; }
+  .sheet { padding: 1rem; max-height: 78vh; overflow: auto; }
+  #filter { width: 100%; padding: .55rem .7rem; border: 0; border-bottom: 1px solid
+            var(--line); background: transparent; color: inherit; outline: none; }
+  #cmds { list-style: none; margin: 0; padding: .35rem; max-height: 60vh;
+          overflow: auto; }
+  #cmds button { display: flex; width: 100%; text-align: left; border: 0;
+                 border-radius: .35rem; padding: .45rem .6rem; gap: .5rem; }
+  #cmds button[aria-selected=true] { background: var(--dim); }
+  #cmds .keys { margin-left: auto; opacity: .5; font-size: .78rem; }
+  #cmds .sep { padding: .5rem .6rem .2rem; font-size: .7rem; opacity: .5;
+               text-transform: uppercase; letter-spacing: .08em; }
+
+  h2 { font-size: .95rem; margin: 1.2rem 0 .5rem; }
+  h2:first-child { margin-top: 0; }
+  .sheet label { display: block; font-size: .78rem; opacity: .7; }
+  .sheet input, .sheet textarea { width: 100%; padding: .4rem; font: inherit;
+    border: 1px solid var(--line); border-radius: .35rem; background: transparent;
+    color: inherit; }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem .6rem;
           margin-bottom: .8rem; }
   .grid .wide { grid-column: 1 / -1; }
   .note { font-size: .8rem; opacity: .7; margin: .4rem 0 0; }
-  details textarea { width: 100%; padding: .4rem; font: inherit; resize: vertical; }
   #extlist .row { justify-content: space-between; margin-bottom: .3rem; }
   #extlist .row span { font-size: .85rem; }
-  footer { margin-top: 2rem; font-size: .78rem; opacity: .5;
-           display: flex; gap: .6rem; flex-wrap: wrap; }
+  #cap { font-size: .8rem; }
 </style>
 
-<h1>Room display</h1>
-
-<fieldset>
-  <legend>Send to</legend>
+<header id="bar">
   <div id="screens"></div>
-</fieldset>
-
-<div id="drop">
-  Drop or paste a link or file here, or
-  <!-- drag-and-drop is mouse-only; the picker is the keyboard path -->
-  <label>
-    <input type="file" id="pick"
-           accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.mp4,.webm,.mp3,.m4a,.wav">
-    choose a file
-  </label>
-</div>
-
-<form id="go">
-  <label for="url" class="sr-only" hidden>URL</label>
-  <input id="url" type="url" placeholder="https://…" required>
-  <button>Show</button>
-  <button type="button" id="save" title="Save this link as a button">★</button>
-</form>
-
-<ul id="saved"></ul>
-
-<!-- Hidden until the screen actually has a video or audio element on it, so the
-     controls appear by themselves the moment someone puts a video on the wall. -->
-<fieldset id="media" hidden>
-  <legend id="media-legend">Playing</legend>
-  <div class="row tight">
-    <button type="button" id="back" title="Back 10 seconds (←)">⏪</button>
-    <button type="button" id="playpause" title="Play / pause (Space)">▶</button>
-    <button type="button" id="fwd" title="Forward 10 seconds (→)">⏩</button>
-    <button type="button" id="mute" aria-pressed="false" title="Mute">🔇</button>
-    <label>volume <input id="vol" type="range" min="0" max="100" value="100"></label>
-    <span id="pos"></span>
+  <form id="go">
+    <label for="url" hidden>URL</label>
+    <input id="url" type="url" placeholder="https://…" required>
+    <button id="show">Show</button>
+  </form>
+  <div class="row">
+    <button type="button" id="home">Home</button>
+    <button type="button" id="reload">Reload</button>
+    <button type="button" id="more" title="Everything else (Ctrl-K)"
+            aria-label="Everything else">⋮</button>
   </div>
-</fieldset>
+</header>
 
-<fieldset id="scroll-box">
-  <legend id="scroll-legend">Scroll</legend>
-  <div class="row tight">
-    <button type="button" id="top" title="Jump to top">⤒</button>
-    <button type="button" id="up" title="Up a screenful">▲</button>
-    <button type="button" id="down" title="Down a screenful">▼</button>
-    <button type="button" id="bottom" title="Jump to bottom">⤓</button>
-    <button type="button" id="auto" aria-pressed="false"
-            title="Scroll slowly and continuously">Auto-scroll</button>
-    <label>speed <input id="speed" type="range" min="10" max="120" value="40"></label>
-  </div>
-  <p style="margin:.6rem 0 0;font-size:.85rem;opacity:.65">
-    <kbd>↑</kbd> <kbd>↓</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd> <kbd>Home</kbd>
-    <kbd>End</kbd> work here too, unless you're typing in the box.
-  </p>
-</fieldset>
-
-<div class="row">
-  <button type="button" id="home">Home</button>
-  <button type="button" id="reload">Reload</button>
-  <!-- Both monitors together: X11 has no per-output power. agent/display.py -->
-  <button type="button" id="power">Display off</button>
-  <!-- The way out of --kiosk without stopping the agent: minimize frees the Pi's
-       own desktop, fullscreen puts the window back on its monitor. -->
-  <button type="button" id="aside" title="Minimize the kiosk window">Set aside</button>
-  <button type="button" id="full" title="Back to fullscreen on its monitor">Fullscreen</button>
-</div>
-
-<!-- On demand only. There is deliberately no timer in here: a screenshot happens
-     because someone asked for one, and a panel that re-fetched on an interval
-     would be a slow remote desktop, which is the one thing this is not. -->
-<fieldset id="look-box">
-  <legend id="look-legend">Screen</legend>
-  <div class="row tight">
-    <button type="button" id="look" title="Fetch what the display is showing now">
-      Look</button>
-    <button type="button" id="lookclear" hidden>Clear</button>
-    <span id="looknote"></span>
+<!-- The capture is the page. Drop a file or paste a link anywhere on it. -->
+<main id="stage">
+  <div id="empty">
+    Nothing captured yet.
+    <p><button type="button" id="look">Look at the screen</button></p>
+    <p id="cap"></p>
   </div>
   <div id="shots"></div>
-  <!-- Only when the agent has [interact] enabled. Clicking the picture clicks
-       the page: the capture is pinned to CSS pixels, so the two coordinate
-       spaces are the same one. -->
-  <div id="typebox" hidden>
-    <input id="typed" type="text" placeholder="type into the focused field…"
-           autocomplete="off" spellcheck="false">
-    <label><input id="hide" type="checkbox"> hide</label>
-    <button type="button" id="sendtext">Type</button>
-    <button type="button" id="enter" title="Press Enter">⏎</button>
+  <div id="badge" hidden>
+    <span id="dot"></span><span id="badgetext"></span>
+    <button type="button" id="recapture" title="Capture again">⟳</button>
   </div>
-</fieldset>
+  <!-- Appears by itself whenever the screen actually has a video or audio on
+       it, and goes away again when it does not. -->
+  <div id="dock" hidden>
+    <button type="button" id="back" title="Back 10 seconds (←)">⏪</button>
+    <button type="button" id="playpause" title="Play / pause (Space)">⏸</button>
+    <button type="button" id="fwd" title="Forward 10 seconds (→)">⏩</button>
+    <span id="pos"></span>
+    <button type="button" id="mute" title="Mute">🔊</button>
+    <input id="vol" type="range" min="0" max="100" value="100" title="Volume">
+    <span id="dockstate"></span>
+  </div>
+</main>
 
-<p id="status" role="status" aria-live="polite">…</p>
+<footer id="foot">
+  <label for="typed" hidden>Type into the focused field</label>
+  <input id="typed" type="text" autocomplete="off" spellcheck="false"
+         placeholder="Type into the focused field on the screen…">
+  <label class="row" style="font-size:.78rem;opacity:.7">
+    <input type="checkbox" id="hide"> hide</label>
+  <button type="button" id="sendtext">Send</button>
+  <span id="status" role="status" aria-live="polite"></span>
+  <div class="hints">
+    <span id="scrollhint" class="row">
+      <kbd>↑</kbd><kbd>↓</kbd><kbd>PgDn</kbd> scroll the screen
+    </span>
+    <span class="row"><kbd>Ctrl K</kbd> everything else</span>
+  </div>
+</footer>
 
-<!-- Why a control you expected isn't here. Hidden unless the agent's browser
-     actually withholds something — see `supports` in /v1/status. -->
-<p id="cap" hidden style="opacity:.65;font-size:.85rem"></p>
+<input type="file" id="pick" hidden
+       accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,.txt,.mp4,.webm,.mp3,.m4a,.wav">
 
-<details id="setup">
-  <summary>Settings</summary>
+<dialog id="menu">
+  <label for="filter" hidden>Filter commands</label>
+  <input id="filter" placeholder="Type to filter…" autocomplete="off">
+  <ul id="cmds"></ul>
+</dialog>
 
-  <label for="tok">Agent token — from <code>config.toml</code> on the Pi</label>
-  <div class="row tight">
-    <input id="tok" type="password" autocomplete="off" style="flex:1">
+<dialog id="setup"><div class="sheet">
+  <h2>Agent token</h2>
+  <label for="tok">From <code>config.toml</code> on the Pi</label>
+  <div class="row">
+    <input id="tok" type="password" autocomplete="off">
     <button type="button" id="savetok">Save</button>
   </div>
   <p class="note">Kept in this browser only, never sent anywhere but the agent.</p>
 
   <h2>Screens</h2>
   <div id="screencfg"></div>
-  <div class="row tight">
+  <div class="row">
     <button type="button" id="savecfg">Save screens</button>
-    <button type="button" id="redetect" title="Clear position and size so xrandr wins again">
-      Re-detect layout</button>
+    <button type="button" id="redetect"
+            title="Clear position and size so xrandr wins again">Re-detect layout</button>
   </div>
   <p class="note" id="cfgnote"></p>
+
+  <h2>Scrolling</h2>
+  <label for="speed">Step size, and auto-scroll speed</label>
+  <input id="speed" type="range" min="10" max="120" value="40">
 
   <div id="extbox">
     <h2>Extensions</h2>
@@ -210,14 +234,13 @@
     <label for="extids">Chrome Web Store ids, one per line</label>
     <textarea id="extids" rows="2" spellcheck="false"
               placeholder="ddkjiahejlhfcafbddmgiahcphecmpfh"></textarea>
-    <div class="row tight">
-      <button type="button" id="extadd">Install</button>
-    </div>
+    <div class="row"><button type="button" id="extadd">Install</button></div>
     <p class="note" id="extnote"></p>
   </div>
-</details>
 
-<footer><span id="ver"></span><span id="host"></span></footer>
+  <p class="note"><span id="ver"></span> · <span id="host"></span></p>
+  <div class="row"><button type="button" id="closesetup">Done</button></div>
+</div></dialog>
 
 <script>
 const $ = s => document.querySelector(s);
@@ -226,30 +249,27 @@ const store = { // ponytail: saved links live in this browser only; move to the 
   set: v => localStorage.saved = JSON.stringify(v),
 };
 
-// Always a real screen name once we've talked to the agent, never "". Letting
-// it stay empty meant every button silently acted on the first screen with
-// nothing in the UI saying so — which reads as "scroll is broken on that
-// monitor" rather than "you didn't pick it".
+// Always a real screen name once we've talked to the agent, never "". Letting it
+// stay empty meant every button silently acted on the first screen with nothing
+// in the UI saying so.
 let screens = [];
 let target = localStorage.screen || "";
 let awake = true;
 let media = null;                  // last known playback state, or null: nothing playing
 
 // What this agent's browser can actually do, from /v1/status. Firefox does
-// navigate and nothing else, so offering it a Scroll button is offering a 501.
+// navigate and nothing else, so offering it a Scroll command is offering a 501.
 // null = an agent too old to say, in which case assume everything: that is
 // exactly how this page behaved before `supports` existed.
 let supports = null;
 const can = f => !supports || supports.has(f);
 
-// No prompt(): a popup you can't paste into comfortably, can't correct without
-// clearing site data, and which says nothing useful when the token is wrong.
 function auth() { return { Authorization: "Bearer " + (localStorage.token || "") }; }
 
 // Open Settings and point at the token box. Called on first run and on any 401,
 // so a rejected token always lands you where you fix it.
 function askToken(why) {
-  $("#setup").open = true;
+  openSetup();
   $("#tok").focus();
   $("#status").textContent = why;
 }
@@ -282,7 +302,7 @@ async function act(fn) {
   // runs on the 15s poll, so hooking req() marked every fresh capture stale the
   // moment it was taken, and again every fifteen seconds after that.
   //
-  // act() is the honest signal -- it wraps exactly the user-initiated actions.
+  // act() is the honest signal — it wraps exactly the user-initiated actions.
   // look() and inputThen() go through it too and clear the mark themselves when
   // the replacement pictures land.
   markStale();
@@ -303,63 +323,12 @@ function send(file) {
   });
 }
 
-// --- screenshots ------------------------------------------------------------
+// --- the capture ------------------------------------------------------------
 // The read-back. /v1/navigate reports the url it was handed, so a redirect, an
 // expired login and a crashed tab all look like success from everywhere else on
-// this page; this is the one control that shows you.
+// this page; this is the one thing that shows you.
 
-// Where on the *page* a click on the *picture* landed. Its own function with no
-// DOM in it because getting this wrong misses every target by a constant factor
-// and looks exactly like the click never arriving — see tests/test_web.py.
-//
-// `rect` is where the image ended up on screen after CSS shrank it to the
-// column; `shot.width/height` are the capture's own pixels, which are CSS
-// pixels of the remote page because the capture is pinned to scale 1.
-function imagePoint(rect, shot, clientX, clientY) {
-  return {
-    x: Math.round((clientX - rect.left) * shot.width / rect.width),
-    y: Math.round((clientY - rect.top) * shot.height / rect.height),
-  };
-}
-
-// createElement + textContent, never innerHTML: the title comes off an
-// arbitrary web page, and this page holds the agent token. A page titled
-// `<img onerror=…>` must be a caption, not script.
-async function shotFigure(s) {
-  const fig = document.createElement("figure");
-  const img = document.createElement("img");
-  img.src = `data:image/${s.format};base64,${s.image}`;
-  img.alt = `${s.screen}: ${s.title || s.url}`;
-  // Reserve the box before there is anything in it, so swapping one picture for
-  // another of the same screen cannot reflow the column under your cursor.
-  img.style.aspectRatio = `${s.width} / ${s.height}`;
-  // No loading="lazy": the bytes are already here, in the reply. Lazy only
-  // defers the decode, which is the whole thing being avoided below.
-  //
-  // decode() before it goes into the document. An <img> inserted with an
-  // undecoded src paints an empty box for a frame or two first, and after a
-  // click that blink is exactly what you are staring at. Failing to decode is
-  // not fatal -- put it in anyway and let the browser show what it can.
-  await img.decode().catch(() => {});
-  // Click the picture, click the page. The capture is pinned to scale 1, so
-  // image pixels are CSS pixels and the only conversion left is however much
-  // the browser shrank it to fit this column.
-  if (can("input")) img.onclick = e => {
-    const p = imagePoint(e.currentTarget.getBoundingClientRect(), s,
-                         e.clientX, e.clientY);
-    clickAt(s.screen, p.x, p.y);
-  };
-  const save = document.createElement("a");
-  save.href = img.src;
-  save.download = `${s.screen}.${s.format === "jpeg" ? "jpg" : s.format}`;
-  save.textContent = "save";
-  const cap = document.createElement("figcaption");
-  cap.append(`${s.screen} — ${s.title || s.url} · ${s.width}×${s.height} · `, save);
-  fig.append(img, cap);
-  return fig;
-}
-
-// The screens the pictures on the page are of. Input aims at these, not at the
+// The screens the pictures on the stage are of. Input aims at these, not at the
 // armed target: you click what you are looking at.
 let shown = [];
 
@@ -372,31 +341,89 @@ function shotScreens() {
                            : [target || (screens[0] || {}).name]).filter(Boolean);
 }
 
+// Where on the *page* a click on the *picture* landed. Its own function with no
+// DOM in it because getting this wrong misses every target by a constant factor
+// and looks exactly like the click never arriving — see tests/test_web.py.
+//
+// `rect` is where the image ended up on screen after CSS fitted it to the
+// stage; `shot.width/height` are the capture's own pixels, which are CSS pixels
+// of the remote page because the capture is pinned to scale 1.
+function imagePoint(rect, shot, clientX, clientY) {
+  return {
+    x: Math.round((clientX - rect.left) * shot.width / rect.width),
+    y: Math.round((clientY - rect.top) * shot.height / rect.height),
+  };
+}
+
+// createElement + textContent, never innerHTML: the title comes off an arbitrary
+// web page, and this page holds the agent token. A page titled `<img onerror=…>`
+// must be a caption, not script.
+async function shotFigure(s) {
+  const fig = document.createElement("figure");
+  const img = document.createElement("img");
+  img.src = `data:image/${s.format};base64,${s.image}`;
+  img.alt = `${s.screen}: ${s.title || s.url}`;
+  // Reserve the box before there is anything in it, so swapping one picture for
+  // another of the same screen cannot reflow the stage under your cursor.
+  img.style.aspectRatio = `${s.width} / ${s.height}`;
+  // No loading="lazy": the bytes are already here, in the reply. Lazy only
+  // defers the decode, which is the whole thing being avoided below.
+  //
+  // decode() before it goes into the document. An <img> inserted with an
+  // undecoded src paints an empty box for a frame or two first, and after a
+  // click that blink is exactly what you are staring at. Failing to decode is
+  // not fatal — put it in anyway and let the browser show what it can.
+  await img.decode().catch(() => {});
+  if (can("input")) img.onclick = e => {
+    const p = imagePoint(e.currentTarget.getBoundingClientRect(), s,
+                         e.clientX, e.clientY);
+    clickAt(s.screen, p.x, p.y);
+  };
+  fig.append(img);
+  return fig;
+}
+
 async function lookAt(names) {
   // Build the replacements first, swap them in once. Clearing up front left an
-  // empty box for the whole round trip — worst right after a click, which is
+  // empty stage for the whole round trip — worst right after a click, which is
   // exactly when you are watching. The old picture stays up, dimmed, until
   // there is a newer one to put in its place.
   const figures = [];
   // Sequential on purpose. Each capture is a CDP round trip plus a PNG encode
   // on a Pi that is already busy rendering the page being captured.
+  const shots = [];
   for (const name of names) {
-    figures.push(await shotFigure(await api("/v1/screenshot", { screen: name })));
+    const s = await api("/v1/screenshot", { screen: name });
+    shots.push(s);
+    figures.push(await shotFigure(s));
   }
   // Decoded and ready to paint by here, so this is the only frame that changes.
   $("#shots").replaceChildren(...figures);
   $("#shots").classList.remove("stale");
   shown = names;
   $("#shots").classList.toggle("live", can("input"));
-  $("#typebox").hidden = !can("input");
-  $("#lookclear").hidden = false;
-  // Say it in words, not only as a cursor. A crosshair is invisible until you
-  // happen to hover the right thing, absent entirely on a touch screen, and
-  // indistinguishable from "input is switched off" — which is the actual
-  // question someone is asking when they wonder why clicking does nothing.
-  $("#looknote").textContent =
-    (can("input") ? "click the picture to click the page · " : "")
-    + "as of " + new Date().toLocaleTimeString();
+  $("#empty").hidden = true;
+  drawBadge(shots);
+}
+
+// name · size · when. Says it in words as well as with a cursor: a crosshair is
+// invisible until you happen to hover the right thing, absent on a touch screen,
+// and indistinguishable from "input is switched off" — which is the actual
+// question someone is asking when clicking seems to do nothing.
+function drawBadge(shots) {
+  const when = new Date().toLocaleTimeString();
+  const size = shots.length === 1 ? `${shots[0].width}×${shots[0].height}` : "";
+  $("#badge").hidden = false;
+  $("#badgetext").textContent =
+    [shots.map(s => s.screen.toUpperCase()).join(" + "), size, when]
+      .filter(Boolean).join("  ·  ")
+    + (can("input") ? "  ·  click the picture to click the page" : "");
+}
+
+function markStale() {
+  if (!$("#shots").children.length) return;
+  $("#shots").classList.add("stale");
+  $("#badgetext").textContent = "before your last action — capture again";
 }
 
 function look() {
@@ -404,24 +431,8 @@ function look() {
   return act(() => lookAt(shotScreens()));
 }
 
-function clearShots() {
-  $("#shots").replaceChildren();          // and let the data: urls go
-  $("#shots").classList.remove("stale", "live");
-  shown = [];
-  $("#typebox").hidden = true;
-  $("#lookclear").hidden = true;
-  $("#looknote").textContent = "";
-}
-
-function markStale() {
-  if (!$("#shots").children.length) return;
-  $("#shots").classList.add("stale");
-  $("#looknote").textContent = "before your last action — Look again";
-}
-
 // --- input ------------------------------------------------------------------
-// Only present when the agent has [interact] enabled; `supports` says so, and
-// drawCapabilities() hides the lot when it does not.
+// Only live when the agent has [interact] enabled; `supports` says so.
 
 const sleep = ms => new Promise(done => setTimeout(done, ms));
 
@@ -430,25 +441,44 @@ const sleep = ms => new Promise(done => setTimeout(done, ms));
 // a click that submits a form has not navigated yet when the request returns,
 // and capturing straight away photographs the page you just left — every time.
 //
-// The fixed wait is what lets a navigation start; the poll after it is what
-// waits for one to finish. Neither is a timer that captures on its own: both
-// only ever run inside an action somebody took.
-const SETTLE_MS = 400;
-const SETTLE_MAX_MS = 3000;
+// Three numbers, because readyState answers less than it looks like it does:
+//
+//   BEFORE  nothing is even asked until this has passed. A navigation that has
+//           not committed yet leaves the *old* document sitting there reporting
+//           "complete", which is indistinguishable from a click that changed
+//           nothing — so asking too early gets a confident answer about the
+//           wrong page.
+//   AFTER   "complete" means every sub-resource has loaded. It does not mean
+//           anything has been painted, and it says nothing at all about a
+//           script that renders once its fetch comes back. This is the grace
+//           that stops a capture landing on a half-drawn page.
+//   MAX     give up waiting and photograph whatever is there. Only paid by a
+//           genuinely slow page, which is also when you most want to wait.
+//
+// Turn BEFORE down to ~300 if most of your clicking is focusing fields rather
+// than submitting forms; turn AFTER up if captures still look half-drawn.
+// Neither is a timer that captures on its own — both only ever run inside an
+// action somebody took.
+const SETTLE_BEFORE_MS = 700;
+const SETTLE_AFTER_MS = 400;
+const SETTLE_MAX_MS = 6000;
 
 async function settle(screen) {
-  await sleep(SETTLE_MS);
+  await sleep(SETTLE_BEFORE_MS);
   const deadline = Date.now() + SETTLE_MAX_MS;
   while (Date.now() < deadline) {
     try {
       const s = await req("/v1/inspect?screen=" + encodeURIComponent(screen),
                           { headers: auth() });
-      if (s.ready_state === "complete") return;
+      if (s.ready_state === "complete") break;
     } catch {
-      return;               // an agent too old to inspect: just take the picture
+      break;              // an agent too old to inspect: just take the picture
     }
     await sleep(150);
   }
+  // Always, including when the loop gave up or inspect was unavailable: the
+  // grace is what the picture looking finished depends on, not the poll.
+  await sleep(SETTLE_AFTER_MS);
 }
 
 // Every input is followed by a fresh capture, so you see the caret land and the
@@ -462,14 +492,13 @@ async function inputThen(screen, actions) {
     }
     // The old picture is still up and dimmed at this point (act marked it), so
     // say what the wait is for rather than leaving it looking wedged.
-    $("#looknote").textContent = "waiting for the page…";
+    $("#badgetext").textContent = "waiting for the page…";
     await settle(screen);
     await lookAt([screen]);
   });
 }
 
-const clickAt = (screen, x, y) =>
-  inputThen(screen, [{ do: "click", x, y }]);
+const clickAt = (screen, x, y) => inputThen(screen, [{ do: "click", x, y }]);
 
 function sendTyped(withEnter) {
   const text = $("#typed").value;
@@ -484,59 +513,51 @@ function sendTyped(withEnter) {
   return inputThen(screen, actions);
 }
 
+// --- capability gating -------------------------------------------------------
 // Hide what this browser will only 501 on, and say so once rather than letting
 // the controls just be mysteriously absent.
 function drawCapabilities(kind) {
-  for (const id of ["#top", "#up", "#down", "#bottom"]) $(id).hidden = !can("scroll");
-  $("#auto").hidden = !can("autoscroll");
-  // #speed is not hidden with it: page() reads that slider for the scroll step
-  // size too, so it belongs to whichever of the two survives.
-  $("#scroll-box").hidden = !can("scroll") && !can("autoscroll");
-
-  for (const id of ["#aside", "#full"]) $(id).hidden = !can("window");
-
+  $("#look").hidden = !can("screenshot");
+  $("#recapture").hidden = !can("screenshot");
+  $("#scrollhint").hidden = !can("scroll");
+  $("#typed").disabled = !can("input");
+  $("#sendtext").disabled = !can("input");
+  $("#hide").disabled = !can("input");
+  $("#typed").placeholder = can("input")
+    ? "Type into the focused field on the screen…"
+    : "typing is off — set [interact] enabled = true on the Pi";
+  if (!can("input")) $("#shots").classList.remove("live");
   $("#extbox").hidden = !can("extensions");
-
-  $("#look-box").hidden = !can("screenshot");
-  // Input is withheld by config rather than by browser kind, so it is left out
-  // of the "this display runs firefox" explanation below — an agent with
-  // [interact] off is not missing a browser feature, it is switched off.
-  if (!can("input")) {
-    $("#typebox").hidden = true;
-    $("#shots").classList.remove("live");
-  }
 
   const missing = ["scroll", "autoscroll", "media", "screens", "window",
                    "extensions", "screenshot"].filter(f => !can(f));
-  $("#cap").hidden = !missing.length;
   $("#cap").textContent = missing.length
-    ? `this display runs ${kind}, so ${missing.join(", ")} are unavailable `
-      + "— they need chromium or edge"
+    ? `This display runs ${kind}, so ${missing.join(", ")} are unavailable —`
+      + " they need chromium or edge."
     : "";
 }
 
 function drawScreens() {
-  // One monitor: the picker is noise. Hide the whole fieldset. So is a picker
-  // on a browser that can only ever drive the first screen.
-  $("#screens").closest("fieldset").hidden = screens.length < 2 || !can("screens");
-  // Name the armed screen on the controls too, so it is never a guess.
-  $("#scroll-legend").textContent =
-    screens.length > 1 && target ? `Scroll — ${target}` : "Scroll";
-  $("#look-legend").textContent =
-    screens.length > 1 && target ? `Screen — ${target}` : "Screen";
-  const all = [...screens, { name: "all", current_url: "every screen" }];
-  $("#screens").replaceChildren(...all.map(s => {
+  // One monitor: the picker is noise. So is a picker on a browser that can only
+  // ever drive the first screen.
+  $("#screens").hidden = screens.length < 2 || !can("screens");
+  // "Both" reads better than "All" for the two-monitor case this mostly is.
+  const label = screens.length === 2 ? "Both" : "All";
+  const all = [...screens.map(s => s.name), "all"];
+  $("#screens").replaceChildren(...all.map(name => {
     const b = document.createElement("button");
     b.type = "button";
-    b.setAttribute("aria-pressed", String(target === s.name));
-    const where = document.createElement("span");
-    where.className = "where";
-    where.textContent = s.name === "all" ? "every screen"
-      : (s.current_url || "—").replace(/^https?:\/\//, "");
+    b.setAttribute("aria-pressed", String(target === name));
+    const row = screens.find(s => s.name === name);
+    b.title = name === "all" ? "Every screen" : (row && row.current_url) || name;
     // Label only. "all" is the wire value the agent matches on — see targets().
-    const label = s.name === "all" ? "All" : s.name;
-    b.append(label + (s.autoscroll ? " ⏬" : ""), where);
-    b.onclick = () => { target = localStorage.screen = s.name; drawScreens(); };
+    b.textContent = (name === "all" ? label : name)
+      + (row && row.autoscroll ? " ⏬" : "");
+    b.onclick = () => {
+      target = localStorage.screen = name;
+      shown = [];                       // the picture is of the other screen now
+      drawScreens();
+    };
     return b;
   }));
 }
@@ -548,9 +569,9 @@ async function refresh() {
     drawCapabilities(s.kind || "this browser");
     screens = s.screens || [];
     // Pin the selection to a real screen: first run, or a screen that has since
-    // been renamed out of the config.
-    // A browser that can't address screens gets pinned to the first one too: a
-    // "right" left in localStorage would aim every click at a 501.
+    // been renamed out of the config. A browser that can't address screens gets
+    // pinned to the first one too: a "right" left in localStorage would aim
+    // every click at a 501.
     const stale = can("screens")
       ? target !== "all" && !screens.some(x => x.name === target)
       : target !== (screens[0] || {}).name;
@@ -558,21 +579,17 @@ async function refresh() {
       target = screens.length ? screens[0].name : "";
       if (target) localStorage.screen = target;
     }
-    const me = screens.find(x => x.name === target);
     // A dark display is the one state the page can't show by naming a url, and
     // the one most likely to be mistaken for "the Pi is broken".
     awake = s.awake !== false;
-    $("#power").textContent = awake ? "Display off" : "Wake display";
-    if (!$("#status").textContent) {
-      $("#status").textContent = !awake ? "display asleep — anything you send wakes it"
-        : s.browser === "ok"
-        ? (target === "all" ? "all screens"
-           : me ? `${me.name}: ${me.current_url || "—"}` : s.current_url)
-        : "browser down";
+    $("#dot").className = s.browser === "ok" ? (awake ? "awake" : "") : "bad";
+    $("#dot").title = s.browser === "ok"
+      ? (awake ? "display awake" : "display asleep — anything you send wakes it")
+      : "browser down" + (s.error ? ": " + s.error : "");
+    if (!$("#status").textContent && s.browser !== "ok") {
+      $("#status").textContent = "browser down" + (s.error ? ": " + s.error : "");
     }
-    $("#auto").setAttribute("aria-pressed", String(!!(me && me.autoscroll)));
     probeMedia();                    // not awaited: the rest of the page is ready
-
     $("#ver").textContent = s.version;
     $("#host").textContent = location.host;
     drawScreens();
@@ -585,15 +602,16 @@ const clock = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 
 function drawMedia(m) {
   media = m;
-  $("#media").hidden = !m;
+  $("#dock").hidden = !m;
   if (!m) return;
   $("#playpause").textContent = m.playing ? "⏸" : "▶";
-  $("#mute").setAttribute("aria-pressed", String(m.muted));
+  $("#mute").textContent = m.muted ? "🔇" : "🔊";
   $("#vol").value = m.volume;
   $("#pos").textContent = m.duration
     ? `${clock(m.position)} / ${clock(m.duration)}` : clock(m.position);
-  $("#media-legend").textContent =
-    screens.length > 1 && target ? `Playing — ${target}` : "Playing";
+  $("#dockstate").textContent =
+    (screens.length > 1 && target !== "all" ? target + " · " : "")
+    + (m.playing ? "media playing" : "paused");
 }
 
 // Any failure hides the controls: 404 is "no video on this page", and anything
@@ -615,71 +633,147 @@ $("#mute").onclick = () => mediaAct(media && media.muted ? "unmute" : "mute");
 // onchange, not oninput: a drag would otherwise fire a request per pixel.
 $("#vol").onchange = () => mediaAct("volume", Number($("#vol").value));
 
-function drawSaved() {
-  $("#saved").replaceChildren(...store.get().map(url => {
-    const li = document.createElement("li");
-    const go = document.createElement("button");
-    go.textContent = url.replace(/^https?:\/\//, "");
-    go.title = url;
-    go.onclick = () => show(url);
-    const del = document.createElement("button");
-    del.textContent = "×";
-    del.className = "x";
-    del.title = "Forget " + url;
-    del.onclick = () => { store.set(store.get().filter(u => u !== url)); drawSaved(); };
-    li.append(go, del);
-    return li;
-  }));
+// --- scrolling ---------------------------------------------------------------
+// Guarded here rather than at each caller, so a key still works whatever is
+// showing and a firefox agent never gets asked.
+const scroll = body => can("scroll") && act(() => api("/v1/scroll", body));
+const page = () => Number($("#speed").value) * 15;   // a screenful-ish per press
+const autoscrolling = () => screens.some(s => s.name === target && s.autoscroll);
+
+// --- the command menu --------------------------------------------------------
+// Everything that is not "put this on the wall" lives here: one list, opened by
+// the ⋮ button or Ctrl-K, filtered by typing. A command is {label, when, run} —
+// `when` is how a firefox agent simply never sees the ones it would 501 on.
+
+function commands() {
+  const saved = store.get();
+  return [
+    { label: awake ? "Turn the display off" : "Wake the display", run: togglePower },
+    { label: "Capture the screen", keys: "⟳", when: () => can("screenshot"), run: look },
+    { label: "Reload the page", run: () => act(() => api("/v1/reload")) },
+    { label: "Back to the home page", run: () => act(() => api("/v1/home")) },
+
+    { sep: "Scroll", when: () => can("scroll") },
+    { label: "Scroll to top", keys: "Home", when: () => can("scroll"),
+      run: () => scroll({ to: "top" }) },
+    { label: "Scroll to bottom", keys: "End", when: () => can("scroll"),
+      run: () => scroll({ to: "bottom" }) },
+    { label: autoscrolling() ? "Stop auto-scrolling" : "Start auto-scrolling",
+      when: () => can("autoscroll"),
+      run: () => act(() => api("/v1/autoscroll", {
+        action: autoscrolling() ? "stop" : "start",
+        speed: Number($("#speed").value),
+      })) },
+
+    { sep: "Window", when: () => can("window") },
+    // Two commands, not a toggle: the page never learns that someone minimized
+    // the window from the Pi's own keyboard, so a toggle would lie half the time.
+    { label: "Set the kiosk aside", when: () => can("window"),
+      run: () => act(() => api("/v1/window", { state: "minimized" })) },
+    { label: "Put the kiosk back fullscreen", when: () => can("window"),
+      run: () => act(() => api("/v1/window", { state: "fullscreen" })) },
+
+    { sep: "Links" },
+    { label: "Send a file…", run: () => $("#pick").click() },
+    { label: "Save the link in the box", when: () => $("#url").value.trim(),
+      run: saveLink },
+    ...saved.map(url => ({
+      label: url.replace(/^https?:\/\//, ""), keys: "saved",
+      run: () => show(url),
+      forget: () => { store.set(saved.filter(u => u !== url)); drawMenu(); },
+    })),
+
+    { sep: "Agent" },
+    { label: "Settings, token and extensions…", run: openSetup },
+  ].filter(c => !c.when || c.when());
 }
 
-$("#go").onsubmit = e => { e.preventDefault(); show($("#url").value); };
-$("#save").onclick = () => {
-  const url = $("#url").value;
-  if (url && !store.get().includes(url)) { store.set([...store.get(), url]); drawSaved(); }
-};
-$("#home").onclick = () => act(() => api("/v1/home"));
-$("#reload").onclick = () => act(() => api("/v1/reload"));
-// Not api(): /v1/display takes no screen — the monitors sleep together.
-$("#power").onclick = () => act(() => req("/v1/display", {
+function drawMenu() {
+  const q = $("#filter").value.trim().toLowerCase();
+  const items = commands().filter(c => !q || (c.label || "").toLowerCase().includes(q));
+  $("#cmds").replaceChildren(...items.map(c => {
+    const li = document.createElement("li");
+    if (c.sep) {
+      // A heading is not a target: with a filter active it would be the thing
+      // Enter ran.
+      if (q) return li;
+      li.className = "sep";
+      li.textContent = c.sep;
+      return li;
+    }
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = c.label;
+    if (c.keys) {
+      const k = document.createElement("span");
+      k.className = "keys";
+      k.textContent = c.keys;
+      b.append(k);
+    }
+    b.onclick = () => { $("#menu").close(); c.run(); };
+    li.append(b);
+    if (c.forget) {
+      const x = document.createElement("button");
+      x.type = "button";
+      x.textContent = "×";
+      x.title = "Forget this link";
+      x.onclick = c.forget;
+      li.append(x);
+      li.className = "row";
+    }
+    return li;
+  }));
+  const first = $("#cmds").querySelector("button");
+  if (first) first.setAttribute("aria-selected", "true");
+}
+
+function openMenu() {
+  $("#filter").value = "";
+  drawMenu();
+  $("#menu").showModal();
+  $("#filter").focus();
+}
+
+function saveLink() {
+  const url = $("#url").value.trim();
+  if (url && !store.get().includes(url)) store.set([...store.get(), url]);
+}
+
+const togglePower = () => act(() => req("/v1/display", {
+  // Not api(): /v1/display takes no screen — the monitors sleep together.
   method: "POST",
   headers: { "Content-Type": "application/json", ...auth() },
   body: JSON.stringify({ action: awake ? "off" : "on" }),
 }));
 
-// Two commands, not a toggle: the page never learns that someone minimized the
-// window from the Pi's own keyboard, so a toggle would lie half the time.
-$("#aside").onclick = () => act(() => api("/v1/window", { state: "minimized" }));
-$("#full").onclick = () => act(() => api("/v1/window", { state: "fullscreen" }));
+$("#more").onclick = openMenu;
+$("#filter").oninput = drawMenu;
+$("#filter").onkeydown = e => {
+  if (e.key !== "Enter") return;
+  e.preventDefault();
+  const first = $("#cmds").querySelector("button");
+  if (first) first.click();
+};
 
+// --- wiring ------------------------------------------------------------------
+
+$("#go").onsubmit = e => { e.preventDefault(); show($("#url").value); };
+$("#home").onclick = () => act(() => api("/v1/home"));
+$("#reload").onclick = () => act(() => api("/v1/reload"));
 $("#look").onclick = look;
-$("#lookclear").onclick = clearShots;
+$("#recapture").onclick = look;
 $("#sendtext").onclick = () => sendTyped(false);
-$("#enter").onclick = () => sendTyped(true);
-// Enter in the box types the text *and* presses Enter on the page, which is
-// what submitting a login form is.
+// Enter in the box types the text *and* presses Enter on the page, which is what
+// submitting a login form is.
 $("#typed").onkeydown = e => { if (e.key === "Enter") sendTyped(true); };
 // A password typed into a visible box in an office is the obvious hazard, and
 // the box is not something we can know the shape of in advance.
 $("#hide").onchange = e =>
   $("#typed").type = e.target.checked ? "password" : "text";
-
-// Guarded here rather than at each caller: this covers the four buttons and the
-// six keyboard bindings, and a key still works while the buttons are hidden.
-const scroll = body => can("scroll") && act(() => api("/v1/scroll", body));
-const page = () => Number($("#speed").value) * 15;   // a screenful-ish per press
-$("#up").onclick = () => scroll({ dy: -page() });
-$("#down").onclick = () => scroll({ dy: page() });
-$("#top").onclick = () => scroll({ to: "top" });
-$("#bottom").onclick = () => scroll({ to: "bottom" });
-$("#auto").onclick = () => {
-  const on = $("#auto").getAttribute("aria-pressed") === "true";
-  act(() => api("/v1/autoscroll", {
-    action: on ? "stop" : "start", speed: Number($("#speed").value),
-  }));
-};
+$("#pick").onchange = e => e.target.files[0] && send(e.target.files[0]);
 
 // Keyboard control, the third scroll mode. Ignored while typing, so the URL box
-// still behaves like a URL box.
+// and the type box still behave like text boxes.
 const KEYS = {
   ArrowDown: () => scroll({ dy: 120 }), ArrowUp: () => scroll({ dy: -120 }),
   PageDown: () => scroll({ dy: page() }), PageUp: () => scroll({ dy: -page() }),
@@ -690,12 +784,37 @@ const KEYS = {
   ArrowRight: () => media && mediaAct("seek", 10),
 };
 document.onkeydown = e => {
+  // Ctrl-K first: it is the one binding that has to work while you are typing,
+  // because that is where you are when you realise you want something else.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+    e.preventDefault();
+    openMenu();
+    return;
+  }
   if (e.target.matches("input, textarea") || e.ctrlKey || e.altKey || e.metaKey) return;
   const fn = KEYS[e.key];
   if (fn) { e.preventDefault(); fn(); }
 };
 
-$("#pick").onchange = e => e.target.files[0] && send(e.target.files[0]);
+// The stage is the drop target: drop a file on the picture of the screen and it
+// goes on that screen.
+const stage = $("#stage");
+stage.ondragover = e => { e.preventDefault(); stage.classList.add("over"); };
+stage.ondragleave = () => stage.classList.remove("over");
+stage.ondrop = e => {
+  e.preventDefault();
+  stage.classList.remove("over");
+  // ponytail: one file per drop — a display shows one thing at a time.
+  if (e.dataTransfer.files.length) { send(e.dataTransfer.files[0]); return; }
+  const url = (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text")).trim();
+  if (url) show(url.split("\n")[0]);
+};
+document.onpaste = e => {
+  if (e.target.matches("input, textarea")) return;
+  if (e.clipboardData.files.length) { send(e.clipboardData.files[0]); return; }
+  const url = e.clipboardData.getData("text").trim();
+  if (url) show(url);
+};
 
 // --- settings ---------------------------------------------------------------
 // Everything here is a *runtime* setting the agent owns. The token, the browser
@@ -751,6 +870,12 @@ async function saveSettings(screens) {
   } catch (e) { $("#cfgnote").textContent = "✗ " + e.message; }
 }
 
+function openSetup() {
+  if (!$("#setup").open) $("#setup").showModal();
+  loadSettings();
+  loadExtensions();
+}
+
 // --- extensions -------------------------------------------------------------
 // Installing writes to disk; --load-extension is a launch flag, so nothing is
 // live until the browser restarts. The agent reports that as pending_restart and
@@ -758,7 +883,7 @@ async function saveSettings(screens) {
 function drawExtensions(body) {
   $("#extlist").replaceChildren(...body.installed.map(e => {
     const row = document.createElement("div");
-    row.className = "row tight";
+    row.className = "row";
     const label = document.createElement("span");
     label.textContent = e.name;
     label.title = e.id;
@@ -802,11 +927,10 @@ $("#extadd").onclick = async () => {
     drawExtensions(body);
     $("#extids").value = "";
     // ok is false when some ids installed and some did not, so name the ones
-    // that failed -- "installed" alone would be a lie about half the request.
+    // that failed — "installed" alone would be a lie about half the request.
     const bad = body.results.filter(r => !r.ok);
     if (bad.length) {
-      $("#extnote").textContent =
-        bad.map(r => `✗ ${r.id}: ${r.error}`).join(" · ");
+      $("#extnote").textContent = bad.map(r => `✗ ${r.id}: ${r.error}`).join(" · ");
     }
   } catch (e) { $("#extnote").textContent = "✗ " + e.message; }
 };
@@ -824,34 +948,9 @@ $("#savecfg").onclick = () => saveSettings(readSettings());
 // reset, so re-detect is just a save with those two fields empty.
 $("#redetect").onclick = () =>
   saveSettings(readSettings().map(s => ({ ...s, position: "", size: "" })));
-// Fetch on first open only: the editor is not something to poll.
-$("#setup").addEventListener("toggle", function once() {
-  if (!$("#setup").open) return;
-  $("#setup").removeEventListener("toggle", once);
-  loadSettings();
-  loadExtensions();
-});
+$("#closesetup").onclick = () => $("#setup").close();
 
-const drop = $("#drop");
-drop.ondragover = e => { e.preventDefault(); drop.classList.add("over"); };
-drop.ondragleave = () => drop.classList.remove("over");
-drop.ondrop = e => {
-  e.preventDefault();
-  drop.classList.remove("over");
-  // ponytail: one file per drop — a display shows one thing at a time.
-  if (e.dataTransfer.files.length) { send(e.dataTransfer.files[0]); return; }
-  const url = (e.dataTransfer.getData("text/uri-list") || e.dataTransfer.getData("text")).trim();
-  if (url) show(url.split("\n")[0]);
-};
-document.onpaste = e => {
-  if (document.activeElement === $("#url")) return;
-  if (e.clipboardData.files.length) { send(e.clipboardData.files[0]); return; }
-  const url = e.clipboardData.getData("text").trim();
-  if (url) show(url);
-};
-
-drawSaved();
 if (localStorage.token) refresh();
-else askToken("paste the agent token below to get started");
+else askToken("paste the agent token to get started");
 setInterval(refresh, 15000);
 </script>

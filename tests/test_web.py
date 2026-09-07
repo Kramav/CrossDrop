@@ -17,13 +17,32 @@ import pytest
 PAGES = sorted((Path(__file__).parent.parent / "web").glob("*.html"))
 
 
+HEX = re.compile(r"^[0-9a-fA-F]{3,8}$")
+
+
+def referenced(html: str) -> tuple[set, set]:
+    """(ids the JS looks up, ids anything refers to at all).
+
+    CSS counts as a reference: a layout hook like #bar is used by the stylesheet
+    and by nothing else, and contorting it into a class to satisfy a test would
+    be the test wagging the page. Colour literals are dropped, or `#fff` reads
+    as an element named fff.
+    """
+    js = set(re.findall(r'\$\("#([\w-]+)"\)', html))
+    style = re.search(r"<style>(.*?)</style>", html, re.S)
+    css = {m for m in re.findall(r"#([\w-]+)", style.group(1) if style else "")
+           if not HEX.match(m)}
+    return js, js | css
+
+
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: p.name)
 def test_every_selector_has_an_element(page):
     html = page.read_text(encoding="utf-8")
     ids = set(re.findall(r'id="([\w-]+)"', html))
-    used = set(re.findall(r'\$\("#([\w-]+)"\)', html))
-    assert not used - ids, f"{page.name}: JS queries ids that do not exist"
-    assert not ids - used, f"{page.name}: elements nothing ever queries"
+    js, all_refs = referenced(html)
+    assert not js - ids, f"{page.name}: JS queries ids that do not exist: {js - ids}"
+    assert not ids - all_refs, \
+        f"{page.name}: elements nothing refers to: {ids - all_refs}"
 
 
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: p.name)
