@@ -926,12 +926,30 @@ def inspect(cfg: dict, screen: str | None = None) -> dict:
         raise NotImplementedError(
             "inspect needs CDP; use kind = \"chromium\" or \"edge\"")
     page = _cdp_page(cfg, screen)
-    with _rpc(page["webSocketDebuggerUrl"]) as call:
-        state = _evaluate(call, _INSPECT_JS, "inspect")
+    # Off the target listing, so these two survive a page we cannot run script
+    # on -- which is the whole point of what follows.
     url = page.get("url") or "about:blank"
-    out = {"url": url, **(state or {})}
-    # A page that failed to load may have no document to ask, so the url is the
-    # second witness -- Chromium parks these on chrome-error://chromewebdata/.
+    out = {"url": url, "title": page.get("title") or "", "ready_state": "unknown",
+           "error_page": False, "has_media": False,
+           "scroll_y": 0, "scroll_height": 0, "fields": []}
+    try:
+        with _rpc(page["webSocketDebuggerUrl"]) as call:
+            out.update(_evaluate(call, _INSPECT_JS, "inspect") or {})
+    except Exception as e:
+        # A page we cannot ask is the one this route most needs to describe, not
+        # the one it should fail on. Debian's Chromium refuses Runtime.evaluate
+        # on chrome-error:// where Google's allows it, and the old shape raised
+        # here -- so /v1/inspect 503'd on exactly the page it exists to detect,
+        # `error_page` could never come back true, and update.sh's rollback gate
+        # was guarding nothing. Found by the smoke suite on the Pi, having
+        # passed against desktop Chrome every time.
+        #
+        # ready_state stays "unknown", which is how a caller tells "the page
+        # says it is still loading" from "the page would not answer at all".
+        log.warning("inspect: no script on %s (%s); reporting what the target "
+                    "listing knows", url, e)
+    # The second witness, and now reachable: a page that failed to load may have
+    # no document to ask, and Chromium parks those on chrome-error://.
     out["error_page"] = bool(out.get("error_page")) or url.startswith("chrome-error")
     return out
 

@@ -113,12 +113,71 @@ def test_inspect_never_reports_a_field_value(cdp):
 
 
 def test_a_script_error_is_a_failure_not_a_silent_none(cdp, monkeypatch):
+    """media still raises: there is nothing useful to say about a player you
+    could not reach. inspect does not — see below."""
     @contextlib.contextmanager
     def broken(ws_url):
         yield lambda m, p=None: {"exceptionDetails": {"text": "TypeError: nope"}}
     monkeypatch.setattr(browser, "_rpc", broken)
     with pytest.raises(RuntimeError, match="TypeError"):
-        browser.inspect(make_cfg(), "left")
+        browser.media(make_cfg(), "left")
+
+
+def unscriptable(monkeypatch, url="chrome-error://chromewebdata/"):
+    """A target that answers /json but refuses Runtime.evaluate — which is what
+    Debian's Chromium does on its own error pages, and Google's does not."""
+    # One target per screen: fewer and the count check in _cdp_page refuses
+    # before anything gets as far as trying to run script.
+    monkeypatch.setattr(browser, "_get", lambda port, path, latch=True:
+                        [{"type": "page", "id": f"T{i}", "url": url, "title": "",
+                          "webSocketDebuggerUrl": f"ws://{i}"} for i in (1, 2)]
+                        if path == "/json" else
+                        {"webSocketDebuggerUrl": "ws://browser"})
+
+    @contextlib.contextmanager
+    def refuses(ws_url):
+        def call(method, params=None):
+            raise RuntimeError("Runtime.evaluate failed: not allowed here")
+        yield call
+
+    monkeypatch.setattr(browser, "_rpc", refuses)
+
+
+def test_inspect_still_answers_when_it_cannot_run_script(cdp, monkeypatch):
+    """The bug the Pi found and desktop Chrome never could. inspect raised, so
+    /v1/inspect 503'd on exactly the page it exists to detect: `error_page`
+    could never come back true, and update.sh's rollback gate guarded nothing.
+
+    The url witness was already written — and unreachable, because the throw
+    happened first.
+    """
+    unscriptable(monkeypatch)
+    s = browser.inspect(make_cfg(), "left")
+    assert s["error_page"] is True
+    assert s["url"].startswith("chrome-error")
+    # "unknown", not a guess: this is how a caller tells "the page says it is
+    # still loading" from "the page would not answer at all".
+    assert s["ready_state"] == "unknown"
+    # And the shape is whole, so InspectOut still validates.
+    assert set(s) >= {"url", "title", "ready_state", "error_page", "has_media",
+                      "scroll_y", "scroll_height", "fields"}
+
+
+def test_an_unscriptable_ordinary_page_is_not_called_an_error(cdp, monkeypatch):
+    """Only the url makes it an error page. A perfectly good page we happened
+    not to reach must not be reported as broken -- update.sh rolls back on this.
+    """
+    unscriptable(monkeypatch, url="https://example.com/")
+    s = browser.inspect(make_cfg(), "left")
+    assert s["error_page"] is False
+    assert s["ready_state"] == "unknown"
+
+
+def test_the_route_reports_it_rather_than_503ing(client, monkeypatch):
+    unscriptable(monkeypatch)
+    r = client.get("/v1/inspect", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["error_page"] is True
 
 
 # --- the input gate ---------------------------------------------------------

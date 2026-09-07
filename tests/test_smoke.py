@@ -249,13 +249,45 @@ def test_smoke_a_real_error_page_is_detected(kiosk):
     kiosk.post("/v1/navigate", json={"url": "http://127.0.0.1:1/"})
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        s = kiosk.get("/v1/inspect").json()
+        r = kiosk.get("/v1/inspect")
+        # Status first, and the body in the message. Reading `error_page`
+        # straight off .json() turned a 503 into `KeyError: 'error_page'`, which
+        # names the symptom and hides the cause — and the cause was that inspect
+        # could not run script on the error page and gave up rather than falling
+        # back to the url.
+        assert r.status_code == 200, f"inspect failed: {r.status_code} {r.text}"
+        s = r.json()
         if s["error_page"]:
             break
         time.sleep(0.3)
     assert s["error_page"] is True, s
     # And the thing it is guarding against: everything else still looks fine.
     assert kiosk.get("/v1/status").json()["browser"] == "ok"
+
+
+def test_smoke_inspect_answers_for_a_failed_page(kiosk):
+    """Narrowly: it answers. Not what it says.
+
+    Builds differ here in ways worth not asserting. Google Chrome leaves the url
+    as the one you asked for, runs script on the error page, and finds
+    `#main-frame-error`. Debian's Chromium on the Pi refused Runtime.evaluate
+    outright and inspect raised — so /v1/inspect returned 503 on exactly the
+    page it exists to describe, and `error_page` could never come back true.
+
+    Whether the *detection* works is the test above, which is allowed to fail on
+    a build where neither witness fires: that would be a finding, not a broken
+    test. This one pins only that a page we cannot script is still a 200.
+    """
+    kiosk.post("/v1/navigate", json={"url": "http://127.0.0.1:1/"})
+    time.sleep(1)
+    r = kiosk.get("/v1/inspect")
+    assert r.status_code == 200, f"inspect 503'd on a failed page: {r.text}"
+    s = r.json()
+    # "unknown" is the honest answer when script would not run, and it is how a
+    # caller tells that apart from a page saying it is still loading.
+    assert s["ready_state"] in ("complete", "loading", "interactive", "unknown"), s
+    assert set(s) >= {"url", "title", "ready_state", "error_page", "has_media",
+                      "scroll_y", "scroll_height", "fields"}, s
 
 
 def test_smoke_the_wire_shape_update_sh_greps_for(kiosk, page_server):
