@@ -3,8 +3,16 @@
 
 [project]
 name = "roomctl"
-version = "0.1.0"
-description = "Client for the room-display agent"
+# Kept in step with the git tag by a CI check on refs/tags/v*. This is the only
+# version a `pip install` sees; the deployed one comes from CROSSDROP_VERSION,
+# which update.sh writes from the tag. Two numbers for one thing is how 0.1.0
+# came to sit under a v1.3.0 tag with nothing noticing.
+#
+# Not setuptools-scm: update.sh uses `git archive` deliberately, so a release
+# directory has no .git at all and scm would fail at build time on the Pi --
+# the box you cannot reach.
+version = "2.0.0"
+description = "Client for the CrossDrop display agent"
 requires-python = ">=3.11"
 dependencies = ["httpx"]
 

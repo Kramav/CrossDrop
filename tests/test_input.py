@@ -351,14 +351,14 @@ def write_config(tmp_path, kind="chromium", enabled=True):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch, cdp):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
     with TestClient(app) as c:
         yield c
 
 
 @pytest.fixture
 def locked(tmp_path, monkeypatch, cdp):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, enabled=False)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path, enabled=False)))
     with TestClient(app) as c:
         yield c
 
@@ -470,7 +470,7 @@ def test_a_caller_may_ask_for_less_time_never_more(client, monkeypatch):
 def test_what_was_typed_never_reaches_the_log(client, caplog):
     """A password is what this route will mostly type. The log records that
     text was entered and how much, never what."""
-    with caplog.at_level(logging.INFO, logger="room"):
+    with caplog.at_level(logging.INFO, logger="crossdrop"):
         client.post("/v1/input", headers=H, json={"actions": [
             {"do": "click", "selector": "#pass"},
             {"do": "type", "text": "hunter2"}]})
@@ -481,7 +481,7 @@ def test_what_was_typed_never_reaches_the_log(client, caplog):
 
 def test_a_stopped_sequence_is_logged_as_a_warning(client, cdp, caplog):
     cdp.found = None
-    with caplog.at_level(logging.INFO, logger="room"):
+    with caplog.at_level(logging.INFO, logger="crossdrop"):
         client.post("/v1/input", headers=H, json={
             "actions": [{"do": "click", "selector": "#gone"}]})
     assert any(r.levelno == logging.WARNING and "stopped at action" in r.getMessage()

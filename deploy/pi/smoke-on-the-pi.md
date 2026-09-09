@@ -1,15 +1,15 @@
 # Running the smoke suite on the Pi
 
 > **Where:** on the Pi, over SSH, as the user that owns the graphical session.
-> **From:** `/opt/room-display/current` — the code. **Not** `/etc/room-display`,
+> **From:** `/opt/crossdrop/current` — the code. **Not** `/etc/crossdrop`,
 > which is the config, and not `~`. Every block below carries its own `cd` so it
 > works whatever shell you arrive in.
 >
 > | Path | What lives there |
 > |---|---|
-> | `/opt/room-display/current` | the code, `tests/`, and `.venv` — **run from here** |
-> | `/etc/room-display/config.toml` | the token and install-time facts |
-> | `~/.local/share/room-display/` | settings, and the profile snapshot |
+> | `/opt/crossdrop/current` | the code, `tests/`, and `.venv` — **run from here** |
+> | `/etc/crossdrop/config.toml` | the token and install-time facts |
+> | `~/.local/share/crossdrop/` | settings, and the profile snapshot |
 
 `pytest` on its own needs no browser and proves the agent's logic. The **smoke**
 suite is the other half: it drives a real Chromium and checks the things a stub
@@ -49,10 +49,10 @@ stopping the ones after it, and the whole look → click → type → verify wor
 ## The whole thing, if you already know why
 
 ```sh
-systemctl --user stop display-agent
-cd /opt/room-display/current && DISPLAY=:0 ROOM_BROWSER=chromium ROOM_SMOKE=1 \
+systemctl --user stop crossdrop-agent
+cd /opt/crossdrop/current && DISPLAY=:0 CROSSDROP_BROWSER=chromium CROSSDROP_SMOKE=1 \
   .venv/bin/python -m pytest tests/test_smoke.py -q
-systemctl --user start display-agent
+systemctl --user start crossdrop-agent
 ```
 
 The rest of this page is what each line is for and what to do when one fails.
@@ -92,7 +92,7 @@ kiosk instead, and every test drove the real display before teardown shut it
 down.
 
 ```sh
-systemctl --user stop display-agent
+systemctl --user stop crossdrop-agent
 ```
 
 The wall goes dark for the duration. Nothing else is affected — your token,
@@ -103,37 +103,37 @@ logins, screen settings and uploads all live outside the release tree.
 ## 3. Run it
 
 ```sh
-cd /opt/room-display/current && DISPLAY=:0 ROOM_BROWSER=chromium ROOM_SMOKE=1 \
+cd /opt/crossdrop/current && DISPLAY=:0 CROSSDROP_BROWSER=chromium CROSSDROP_SMOKE=1 \
   .venv/bin/python -m pytest tests/test_smoke.py -q
 ```
 
 - **The `cd` is not optional, even though the venv path could be absolute.**
   `-m pytest` puts the *working directory* on `sys.path`, and that is how
-  `import agent` resolves. Run it from `/etc/room-display` — the config
+  `import agent` resolves. Run it from `/etc/crossdrop` — the config
   directory, and an easy place to already be — and you get
   `-bash: .venv/bin/python: No such file or directory`.
-- **The variables go on the command line, not on their own.** `ROOM_BROWSER=chromium`
+- **The variables go on the command line, not on their own.** `CROSSDROP_BROWSER=chromium`
   as a separate line sets a shell variable that child processes never see. It
-  happens not to matter here, because chromium is the default; `ROOM_SMOKE=1`
+  happens not to matter here, because chromium is the default; `CROSSDROP_SMOKE=1`
   very much does matter, and it is the one people put on the right line by
   accident rather than on purpose.
-- `ROOM_SMOKE=1` is what un-skips the file. Without it: `13 skipped`.
+- `CROSSDROP_SMOKE=1` is what un-skips the file. Without it: `14 skipped`.
 - `.venv/bin/python -m pytest`, not bare `pytest` — the release venv already has
   pytest, it is in `agent/requirements.txt`, and the system python does not.
 
-Expect **13 passed in ~20s**, and one fullscreen browser window that opens,
+Expect **14 passed in ~20s**, and one fullscreen browser window that opens,
 does its work and closes itself.
 
 Narrower, or louder — each one standalone:
 
 ```sh
-cd /opt/room-display/current && DISPLAY=:0 ROOM_SMOKE=1 .venv/bin/python -m pytest \
+cd /opt/crossdrop/current && DISPLAY=:0 CROSSDROP_SMOKE=1 .venv/bin/python -m pytest \
   tests/test_smoke.py -q -k click            # just the input tests
 
-cd /opt/room-display/current && DISPLAY=:0 ROOM_SMOKE=1 .venv/bin/python -m pytest \
+cd /opt/crossdrop/current && DISPLAY=:0 CROSSDROP_SMOKE=1 .venv/bin/python -m pytest \
   tests/test_smoke.py -v                     # name each test as it runs
 
-cd /opt/room-display/current && DISPLAY=:0 ROOM_SMOKE=1 .venv/bin/python -m pytest \
+cd /opt/crossdrop/current && DISPLAY=:0 CROSSDROP_SMOKE=1 .venv/bin/python -m pytest \
   tests/test_smoke.py -x --tb=long           # stop at the first failure
 ```
 
@@ -142,8 +142,8 @@ cd /opt/room-display/current && DISPLAY=:0 ROOM_SMOKE=1 .venv/bin/python -m pyte
 ## 4. Put it back
 
 ```sh
-systemctl --user start display-agent
-systemctl --user is-active display-agent
+systemctl --user start crossdrop-agent
+systemctl --user is-active crossdrop-agent
 ```
 
 Whatever was on the wall comes back on its own: the agent records what each
@@ -168,38 +168,38 @@ timeout has nothing to wake it.
 ## Troubleshooting
 
 **`-bash: .venv/bin/python: No such file or directory`** — you are in the wrong
-directory. Almost always `/etc/room-display`, which is the config and has no
-venv in it. The code is `/opt/room-display/current`. Check with `pwd`.
+directory. Almost always `/etc/crossdrop`, which is the config and has no
+venv in it. The code is `/opt/crossdrop/current`. Check with `pwd`.
 
 **`debug port 9222 is already in use`** — §2. Something is on that port: the
 agent, or a browser a previous run leaked. Check and clear it:
 
 ```sh
-systemctl --user stop display-agent
+systemctl --user stop crossdrop-agent
 curl -s http://127.0.0.1:9222/json/version         # anything still answering?
 pkill -f 'remote-debugging-port=9222'              # last resort
 ```
 
-**The agent came back on its own** — did you start `room-display-update` just
-before stopping it? The updater restarts `display-agent` when it deploys a tag,
+**The agent came back on its own** — did you start `crossdrop-update` just
+before stopping it? The updater restarts `crossdrop-agent` when it deploys a tag,
 which takes 9222 straight back. Check what it did, then stop the agent again:
 
 ```sh
-journalctl --user -u room-display-update -n 5 --no-pager
-systemctl --user is-active display-agent           # want: inactive
+journalctl --user -u crossdrop-update -n 5 --no-pager
+systemctl --user is-active crossdrop-agent           # want: inactive
 ```
 
 **`browser never came up: {...}`** — the fixture waited 30s and gave up. The
 status dict it prints carries `error`, which is the reason. Usually `DISPLAY` is
 unset (§1). If it names a missing binary, check `browser.path` in
-`/etc/room-display/config.toml`.
+`/etc/crossdrop/config.toml`.
 
-**13 skipped** — `ROOM_SMOKE=1` was not set, or `ROOM_BROWSER` says `firefox`.
+**14 skipped** — `CROSSDROP_SMOKE=1` was not set, or `CROSSDROP_BROWSER` says `firefox`.
 Everything here is CDP-only.
 
 **Input tests fail with 501** — the smoke fixture writes its own config with
 `[interact] enabled = true`, so this should not happen. If it does, the release
-predates `/v1/input`; check `git -C /opt/room-display/cache-repo describe`
+predates `/v1/input`; check `git -C /opt/crossdrop/cache-repo describe`
 against what `current` points at.
 
 **A test fails on a real browser but passes on a desktop** — that is the suite
@@ -229,8 +229,12 @@ cleanly. Clear it with the `pkill` above before starting the agent.
   watch it print `signature ok`:
 
   ```sh
-  # on the Pi, from anywhere -- the script takes its paths from the environment
-  sudo -u "$USER" VERIFY_TAG=1 /opt/room-display/current/deploy/pi/update.sh
+  # on the Pi, as the user that owns the session -- NOT under sudo.
+# Debian's sudoers is env_reset without setenv, so `sudo VERIFY_TAG=1 ...`
+# is refused outright; and if you force it through, env_reset also clears
+# XDG_RUNTIME_DIR, so the `systemctl --user restart` in step 5 fails *after*
+# the symlink has already been swapped -- no verify, no rollback, no latch.
+  VERIFY_TAG=1 /opt/crossdrop/current/deploy/pi/update.sh
   ```
 
   A tag you signed prints `<tag> signature ok` and deploys. If it refuses, the

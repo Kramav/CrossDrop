@@ -1,0 +1,13 @@
+#!/bin/sh
+# `-m venv D` makes D/bin/pip a stub that exits 0.
+#
+# So this proves nothing about --require-hashes: the real verification of the
+# lock is CI's install job, not this test. Do not read a green round trip as
+# evidence that the hashes are right.
+printf 'python3\t%s\n' "$*" >> "$STUB_LOG"
+if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then
+  mkdir -p "$3/bin"
+  printf '#!/bin/sh\nprintf "pip\t%%s\n" "$*" >> "%s"\nexit 0\n' "$STUB_LOG" > "$3/bin/pip"
+  chmod +x "$3/bin/pip"
+fi
+exit 0

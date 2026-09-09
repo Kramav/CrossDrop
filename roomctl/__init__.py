@@ -1,4 +1,4 @@
-"""Client for the room-display agent. The CLI and eve both import this.
+"""Client for the crossdrop agent. The CLI and eve both import this.
 
 One target = one Pi: a base url and a bearer token. Two ways in:
 
@@ -22,6 +22,7 @@ branch on the kind of failure without reading English:
 """
 
 import os
+import sys
 import tomllib
 from pathlib import Path
 from typing import Self
@@ -62,15 +63,46 @@ class Unavailable(AgentError):
 _BY_STATUS = {404: NotFound, 501: Unsupported, 503: Unavailable}
 
 
+def config_path() -> Path:
+    """~/.config/roomctl/targets.toml, or %APPDATA%\\roomctl\\targets.toml.
+
+    This file holds bearer tokens. It used to default to `Path(__file__).parent`
+    -- i.e. *inside the installed package*, which under a plain `pip install .`
+    is site-packages: wiped on upgrade, not somewhere anyone looks for secrets,
+    and world-readable by default.
+    """
+    if os.name == "nt" and os.getenv("APPDATA"):
+        return Path(os.environ["APPDATA"]) / "roomctl" / "targets.toml"
+    return Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config") \
+        / "roomctl" / "targets.toml"
+
+
 def targets_path() -> Path:
-    return Path(os.getenv("ROOMCTL_TARGETS") or Path(__file__).parent / "targets.toml")
+    """Where targets.toml is. ROOMCTL_TARGETS wins; then the config dir; then
+    beside the package, which is where it used to live and where an existing
+    install still has it."""
+    if os.getenv("ROOMCTL_TARGETS"):
+        return Path(os.environ["ROOMCTL_TARGETS"])
+    beside = Path(__file__).parent / "targets.toml"
+    cfg = config_path()
+    # Legacy location, but only if it is really there: a checkout that has one is
+    # still the file the developer is editing, and silently ignoring it would be
+    # worse than keeping the fallback.
+    if beside.exists() and not cfg.exists():
+        return beside
+    return cfg
 
 
 def load_targets() -> dict:
     p = targets_path()
     if not p.exists():
         # ASCII only: the Windows console codepage mangles anything else.
-        raise RuntimeError(f"{p}: no targets file - copy targets.example.toml next to it")
+        raise RuntimeError(f"{p}: no targets file - copy targets.example.toml there")
+    # Tokens. Nothing enforces this on the file, so say so rather than leave a
+    # credential readable by every account on a shared controller box.
+    if os.name != "nt" and (p.stat().st_mode & 0o077):
+        print(f"warning: {p} is readable by other users; chmod 600 it "
+              f"(it holds bearer tokens)", file=sys.stderr)
     # utf-8-sig: Windows editors and PowerShell write a BOM that tomllib chokes on.
     return tomllib.loads(p.read_text(encoding="utf-8-sig"))
 

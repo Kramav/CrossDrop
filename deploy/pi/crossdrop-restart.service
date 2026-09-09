@@ -4,11 +4,11 @@
 # forever. Restarting the agent relaunches the browser (agent/app.py lifespan),
 # which is the whole fix.
 #
-#   systemctl --user enable --now room-display-restart.timer
+#   systemctl --user enable --now crossdrop-restart.timer
 
 [Unit]
 Description=Restart the room display agent (and its kiosk browser) nightly
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/systemctl --user restart display-agent.service
+ExecStart=/usr/bin/systemctl --user restart crossdrop-agent.service

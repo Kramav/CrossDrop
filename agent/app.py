@@ -1,6 +1,7 @@
 """Room display agent — frozen /v1 contract (PLAN.md §5)."""
 
 import contextlib
+import itertools
 import logging
 import os
 import secrets
@@ -33,15 +34,15 @@ INTERACT_DEFAULTS = {"enabled": False, "max_actions": 40, "deadline_ms": 30_000}
 SERVER_DEFAULTS = {"host": "127.0.0.1", "port": 8080}
 SCREEN_DEFAULTS = {"name": "", "position": "", "size": "", "home_url": ""}
 
-# To stderr, which under display-agent.service is journald:
-# `journalctl --user -u display-agent`. Without it "the wall was showing the
+# To stderr, which under crossdrop-agent.service is journald:
+# `journalctl --user -u crossdrop-agent`. Without it "the wall was showing the
 # wrong thing at 9am" had no way of being answered after the fact.
-log = logging.getLogger("room")
+log = logging.getLogger("crossdrop")
 
 # First gap between kiosk launch attempts; doubles to five minutes. Overridable
 # because how slow a session is to come up is a property of the box, not the
 # code -- same as browser.py's PLACE_SETTLE.
-LAUNCH_RETRY_SECS = float(os.getenv("ROOM_LAUNCH_RETRY", "5"))
+LAUNCH_RETRY_SECS = float(os.getenv("CROSSDROP_LAUNCH_RETRY", "5"))
 
 
 def setup_logging() -> None:
@@ -54,15 +55,15 @@ def setup_logging() -> None:
     The level goes on `room`, not root: root at INFO turns on every library at
     INFO, and httpx alone narrates one line per request. On a Pi whose journal
     is 32M and in RAM (deploy/pi/journald-volatile.conf) that is our own audit
-    trail evicted by somebody else's chatter. ROOM_LOG=DEBUG adds the reads.
+    trail evicted by somebody else's chatter. CROSSDROP_LOG=DEBUG adds the reads.
     """
     logging.basicConfig(level=logging.WARNING,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    log.setLevel(os.getenv("ROOM_LOG", "INFO").upper())
+    log.setLevel(os.getenv("CROSSDROP_LOG", "INFO").upper())
 
 
 def load_config(path: str | os.PathLike | None = None) -> dict:
-    path = Path(path or os.getenv("ROOM_CONFIG") or Path(__file__).parent / "config.toml")
+    path = Path(path or os.getenv("CROSSDROP_CONFIG") or Path(__file__).parent / "config.toml")
     # utf-8-sig: Windows editors and PowerShell write a BOM that tomllib chokes on.
     cfg = tomllib.loads(path.read_text(encoding="utf-8-sig"))
     cfg["browser"] = DEFAULTS | cfg.get("browser", {})
@@ -92,11 +93,27 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         for d in display.detect()
     ]
     cfg["screens"] = [SCREEN_DEFAULTS | s for s in (blocks or [{}])]
-    # Saved edits from the web UI, before names and home urls are finalised
-    # below — a renamed screen has to get its new name stamped into its home url.
-    settings.apply(cfg)
+    # Defaults first, then the duplicate check, then the saved overrides.
+    #
+    # The order matters and got this wrong once. Checking only the *written*
+    # names let a generated default collide with a written one -- an unnamed
+    # first block beside `name = "main"` produced two screens called `main`,
+    # with no error, and the second monitor unaddressable by any name. So fill
+    # the defaults in first and check what the config really resolves to.
     for i, s in enumerate(cfg["screens"]):
         s["name"] = s["name"] or ("main" if i == 0 else f"screen{i + 1}")
+    # config.toml's own duplicates are a typo by somebody who had a keyboard when
+    # they wrote them: refuse and name them. settings.json's duplicates get the
+    # opposite answer, because nobody can fix those without a keyboard -- see
+    # _dedupe, which runs after the overrides are applied.
+    written = [s["name"] for s in cfg["screens"]]
+    if len(set(written)) != len(written):
+        raise RuntimeError(f"{path}: duplicate screen names {written}")
+    # Saved edits from the web UI, before the home urls are finalised below — a
+    # renamed screen has to get its new name stamped into its home url.
+    settings.apply(cfg)
+    _dedupe(cfg)
+    for s in cfg["screens"]:
         s["home_url"] = _home_url(cfg, s["home_url"] or cfg.get("home_url", "about:blank"))
         # The idle page names its monitor, and the url is the only way it can
         # know -- every window shares one profile and one debug port. Match on
@@ -109,10 +126,40 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
             q = [(k, v) for k, v in parse_qsl(u.query) if k != "screen"]
             q.append(("screen", s["name"]))
             s["home_url"] = urlunparse(u._replace(query=urlencode(q)))
-    names = [s["name"] for s in cfg["screens"]]
-    if len(set(names)) != len(names):
-        raise RuntimeError(f"{path}: duplicate screen names {names}")
     return cfg
+
+
+def _dedupe(cfg: dict) -> None:
+    """Make saved screen names unique again, in place, rather than refusing.
+
+    settings.json is written by this agent, so a name in it must never be able to
+    stop the agent booting -- there is no keyboard to fix it with, and the file
+    survives both update.sh and the nightly restart, so a crash loop from here is
+    permanent.
+
+    It was reachable. `put_settings` validated the rows the editor submitted;
+    `merge_screens` then preserved the tail of the saved list that the editor
+    could not see (a monitor that was unplugged at the time). Rename the visible
+    screen to what the hidden one is already called and both checks pass -- until
+    that monitor is plugged back in, when the two rows finally apply together and
+    the old check raised on every boot.
+
+    Renaming the loser is the recoverable answer: the screen picker in the web UI
+    then shows `right` and `right-2`, which is odd enough to notice and fixable
+    from the same UI that caused it.
+    """
+    seen: set[str] = set()
+    for i, s in enumerate(cfg["screens"]):
+        if not s["name"] or s["name"] not in seen:
+            seen.add(s["name"])
+            continue
+        fixed = next(f"{s['name']}-{n}" for n in itertools.count(2)
+                     if f"{s['name']}-{n}" not in seen)
+        log.error("screen %d is also called %r; using %r instead. Two screens "
+                  "cannot share a name -- rename them in Settings.",
+                  i, s["name"], fixed)
+        s["name"] = fixed
+        seen.add(fixed)
 
 
 def _home_url(cfg: dict, url: str) -> str:
@@ -143,10 +190,42 @@ def swap_config(cfg: dict, fresh: dict) -> None:
     reader got a KeyError and a 500 out of a route that had done nothing wrong.
     Each dict operation is atomic, so the worst seen now is one key from the old
     config beside one from the new.
+
+    Every autoscroll stops first. `_autoscroll` is keyed by screen *name*, and a
+    rename moves the name out from under a running loop: `/v1/screens` then
+    reports `autoscroll: false` for every screen, the UI's stop button resolves
+    the new name and pops nothing, and browser.autoscroll goes on driving the CDP
+    target it resolved before the rename. A display scrolling with nothing able
+    to stop it but a restart -- the same haunted-display bug `_navigate_one`
+    already guards against, reached through the settings editor instead.
     """
+    # Snapshot the generation *before* anything moves, so an autoscroll that is
+    # being installed concurrently can tell it resolved its screen name under a
+    # config that no longer exists.
+    for name in list(_autoscroll):
+        _autoscroll_stop(name)
+    # And the screen -> window cache, for the same reason and a worse failure.
+    # browser._targets is keyed by screen *name* too, and is otherwise only
+    # cleared by launch(). Swap two labels in the settings editor and every
+    # name still resolves to the window it named before: navigate, screenshot
+    # and inspect all address the wrong panel, and because the mapping came
+    # from the cache rather than from _identify, `_guessed` is empty and
+    # /v1/input types into it. Dropping the cache costs one CDP round trip per
+    # screen on the next call and makes the next lookup re-derive the mapping.
+    browser.forget_targets()
     cfg.update(fresh)
     for stale in set(cfg) - set(fresh):
         cfg.pop(stale, None)
+    # Again, after the swap. The sweep above cannot catch a start that was
+    # already in flight -- the route resolved a name that was valid when it
+    # checked, and installs it a moment later under a config that no longer has
+    # it. Nothing could then stop that loop but a restart, which is the haunted
+    # display this whole guard exists to prevent.
+    live = {s["name"] for s in cfg["screens"]}
+    for name in [n for n in list(_autoscroll) if n not in live]:
+        log.warning("stopping autoscroll on %r: no screen by that name any more",
+                    name)
+        _autoscroll_stop(name)
 
 
 def screen_of(cfg: dict, name: str | None) -> dict:
@@ -173,10 +252,10 @@ async def lifespan(app: FastAPI):
     # Reported by /v1/status: autoscroll state is not persisted, so this is how
     # a poller tells "still running" from "the 04:00 restart threw it away".
     app.state.started_at = time.time()
-    # We own the kiosk only if we started it. ROOM_SELFCHECK boots this app
+    # We own the kiosk only if we started it. CROSSDROP_SELFCHECK boots this app
     # beside the *live* kiosk to prove a new release starts, so it must never
     # launch a second browser onto that port or screen.
-    launch = cfg["browser"]["autolaunch"] and not os.getenv("ROOM_SELFCHECK")
+    launch = cfg["browser"]["autolaunch"] and not os.getenv("CROSSDROP_SELFCHECK")
     # On app.state, not a local: _launch() fills it in from another thread.
     app.state.proc = None
     app.state.launch_error = ""
@@ -194,6 +273,9 @@ async def lifespan(app: FastAPI):
                          daemon=True).start()
     yield
     app.state.stopping.set()
+    # Snapshot the generation *before* anything moves, so an autoscroll that is
+    # being installed concurrently can tell it resolved its screen name under a
+    # config that no longer exists.
     for name in list(_autoscroll):
         _autoscroll_stop(name)
     if watching:
@@ -284,7 +366,7 @@ def _save_shown(cfg: dict) -> None:
 def _restorable(cfg: dict) -> dict[str, str]:
     """Screen name -> the url it was showing, for screens still worth restoring.
 
-    The nightly restart (deploy/pi/room-display-restart.timer) stops Chromium
+    The nightly restart (deploy/pi/crossdrop-restart.timer) stops Chromium
     running the Pi out of memory, but must not clear the wall: something put up
     at 5pm should still be up in the morning, something from last week not.
     """
@@ -311,7 +393,7 @@ def _still_there(cfg: dict, url: str) -> bool:
     return True
 
 
-app = FastAPI(title="room-display agent", version="1", lifespan=lifespan)
+app = FastAPI(title="CrossDrop agent", version="1", lifespan=lifespan)
 _bearer = HTTPBearer(auto_error=True)
 
 
@@ -927,9 +1009,18 @@ def install_extensions(body: ExtensionsIn) -> ExtensionsOut:
     # Every id checked before anything is fetched: a typo is total, so the
     # request fails rather than half-installing. Failures after that are per-id
     # -- raising partway would install some and report none (_fanout).
+    cfg = app.state.cfg
     for i in body.ids:
         if not extensions.ID_RE.match(i or ""):
             raise HTTPException(422, f"not an extension id: {i!r}")
+        # Checked with the ids, before anything is fetched, for the same reason:
+        # a request that is going to be refused should be refused whole.
+        if not extensions.allowed(cfg, i):
+            raise HTTPException(
+                403, f"{i} is not in [browser] allow_extensions in config.toml. "
+                     f"An extension runs inside the profile holding this "
+                     f"display's logins, so the list is file-only and needs a "
+                     f"restart.")
     if not d:
         raise HTTPException(422, "no extensions_dir set in config.toml")
 
@@ -1007,11 +1098,22 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     rows = [{"name": n, "home_url": s.home_url.strip(),
              "position": s.position.strip(), "size": s.size.strip()}
             for n, s in zip(names, body.screens)]
+    # Merged, not replaced: the editor only ever sees the monitors detected right
+    # now, and a save with one unplugged must not delete the other screen's saved
+    # name and home_url. See settings.merge_screens.
+    merged = settings.merge_screens(rows)
+    # Validate what will be *written*, not what was submitted. The rows above are
+    # unique; the merged list can still collide with a saved row the editor could
+    # not see, and that collision only surfaces on the boot after the missing
+    # monitor comes back. load_config recovers from it now (see _dedupe), but
+    # refusing the save is where the user can still be told which name to pick.
+    saved_names = [r.get("name") for r in merged["screens"] if r.get("name")]
+    if len(set(saved_names)) != len(saved_names):
+        raise HTTPException(422, f"that name is already taken by a screen this "
+                                 f"editor cannot see (a monitor that is "
+                                 f"unplugged right now): {saved_names}")
     try:
-        # Merged, not replaced: the editor only ever sees the monitors detected
-        # right now, and a save with one unplugged must not delete the other
-        # screen's saved name and home_url. See settings.merge_screens.
-        settings.save(settings.merge_screens(rows))
+        settings.save(merged)
     except (OSError, RuntimeError) as e:      # unwritable dir, or no resolvable home
         raise HTTPException(500, f"cannot save settings: {e}")
 
@@ -1023,9 +1125,14 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     # The live half, and the only reason this beats editing a file: the window
     # moves while you watch. It must not fail the request -- the settings are
     # already saved, and a dead browser is not a bad save.
+    # zip, not before[i]: `before` was taken from the old config and the swap
+    # above reloads from disk, so the two lists need not be the same length. A
+    # monitor plugged in during the request made this an IndexError -- a 500 out
+    # of a route that had already saved successfully, so the caller could not
+    # tell whether the save had landed.
     note = ""
-    for i, s in enumerate(cfg["screens"]):
-        if (s["position"], s["size"]) == before[i] or not s["position"]:
+    for s, was in zip(cfg["screens"], before):
+        if (s["position"], s["size"]) == was or not s["position"]:
             continue
         try:
             browser.place(cfg, s)
@@ -1102,7 +1209,7 @@ def status() -> Status:
     # current_url stays the first screen's, so a pre-multi-monitor client that
     # reads it keeps working unchanged.
     return Status(up=True, current_url=url, browser=state,
-                  version=os.getenv("ROOM_VERSION", "dev"), awake=display.awake(),
+                  version=os.getenv("CROSSDROP_VERSION", "dev"), awake=display.awake(),
                   screens=[_screen_out(s) for s in cfg["screens"]],
                   kind=cfg["browser"]["kind"], supports=browser.supports(cfg),
                   started_at=getattr(app.state, "started_at", 0.0), error=error)
@@ -1127,7 +1234,13 @@ def home_status() -> dict:
     """What the home screen may display. Deliberately *not* /v1/status: this is
     unauthenticated, so it reports the **host** of what a screen is showing and
     never the full url -- a link to a private document is worth more than the
-    convenience of seeing it on an idle screen."""
+    convenience of seeing it on an idle screen.
+
+    No `version` either, for a weaker version of the same reason: the release tag
+    is the one field here an attacker actually wants, since it says which known
+    bugs this box has. The idle page never displayed it usefully and /v1/status
+    still carries it, behind the token.
+    """
     out = []
     for s in app.state.cfg["screens"]:
         try:
@@ -1141,5 +1254,4 @@ def home_status() -> dict:
                 or (url or "").startswith(("about:", "data:")):
             host = None
         out.append({"name": s["name"], "showing": host})
-    return {"name": app.state.cfg["screens"][0]["name"],
-            "version": os.getenv("ROOM_VERSION", "dev"), "screens": out}
+    return {"name": app.state.cfg["screens"][0]["name"], "screens": out}

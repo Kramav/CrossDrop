@@ -1,0 +1,25 @@
+#!/bin/sh
+# `clone` copies the *working tree* (tracked + untracked-not-ignored), not HEAD.
+# Not laziness: setup.sh cds into the clone and copies unit files out of it, so
+# during a rename a real clone would serve the last commit and the test would
+# fail with `cp: no such file` while the tree on disk is perfectly correct.
+#
+# $STUB_REAL_GIT, not `git`: this stub is first on PATH, so a bare `git` here is
+# this file calling itself.
+printf 'git\t%s\n' "$*" >> "$STUB_LOG"
+case "$1" in
+  clone)
+    shift
+    dest=""
+    for a in "$@"; do case "$a" in -*) ;; *) dest="$a" ;; esac; done
+    [ -n "$dest" ] || exit 1
+    mkdir -p "$dest"
+    "$STUB_REAL_GIT" -C "$STUB_REPO" ls-files --cached --others --exclude-standard \
+      | while IFS= read -r f; do
+          d="$dest/$f"
+          mkdir -p "${d%/*}"
+          cp "$STUB_REPO/$f" "$d" 2>/dev/null || true
+        done
+    ;;
+esac
+exit 0

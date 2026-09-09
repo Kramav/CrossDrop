@@ -1,0 +1,27 @@
+#!/bin/sh
+# Records, refuses out-of-prefix writes, then runs the command unprivileged.
+#
+# NOT a path rewriter. sudo is only *some* of what the installer writes -- the
+# git clone, the cd, the mkdir -p and the cp into ~/.config/systemd/user are all
+# unprivileged -- so a rewriting stub would cover part of it and silently miss
+# the rest. On ubuntu-latest, where sudo is real and passwordless, "the rest"
+# means writing to the runner. Refusing instead turns an unconverted absolute
+# path in setup.sh into a red test rather than a real write, which makes this
+# stub the completeness check for the PREFIX conversion.
+printf 'sudo\t%s\n' "$*" >> "$STUB_LOG"
+for a in "$@"; do
+  case "$a" in
+    -*|*=*) continue ;;
+    /*) case "$a" in
+          "$PREFIX"/*) ;;
+          *) echo "STUB REFUSED: sudo touched $a, which is outside PREFIX=$PREFIX" >&2
+             echo "  full argv: $*" >&2
+             exit 90 ;;
+        esac ;;
+  esac
+done
+while [ "$#" -gt 0 ]; do
+  case "$1" in -v|-n|-E) shift ;; *) break ;; esac
+done
+[ "$#" -eq 0 ] && exit 0
+exec "$@"

@@ -6,12 +6,12 @@ browser profile in RAM and snapshotted to SD so logins survive a reboot.
 Paths match PLAN.md §8, so Phase 8 only has to repoint the `current` symlink —
 nothing here changes when auto-update lands.
 
-    /opt/room-display/current               code + venv   (a plain dir now, a symlink in Phase 8)
-    /opt/room-display/extensions            unpacked browser extensions (§10)
-    /etc/room-display/config.toml           token, paths  (never overwritten by updates)
-    /run/user/1000/room-display/profile     browser profile — tmpfs, so RAM (Phase 6)
-    /run/user/1000/room-display/uploads     uploads — tmpfs too
-    ~/.local/share/room-display/profile.tar.gz   the only thing that touches SD (0600)
+    /opt/crossdrop/current               code + venv   (a plain dir now, a symlink in Phase 8)
+    /opt/crossdrop/extensions            unpacked browser extensions (§10)
+    /etc/crossdrop/config.toml           token, paths  (never overwritten by updates)
+    /run/user/1000/crossdrop/profile     browser profile — tmpfs, so RAM (Phase 6)
+    /run/user/1000/crossdrop/uploads     uploads — tmpfs too
+    ~/.local/share/crossdrop/profile.tar.gz   the only thing that touches SD (0600)
 
 **Just want it running?** [setup.sh](setup.sh) does this page *and* pi-setup.md
 §2-§7 in one go, on a card you've already imaged:
@@ -46,10 +46,10 @@ Tailscale should already be up (`tailscale ip -4` prints a 100.x address).
 ## 3. Code
 
 ```sh
-sudo mkdir -p /opt/room-display
-sudo chown "$USER" /opt/room-display
-git clone <repo> /opt/room-display/current
-cd /opt/room-display/current
+sudo mkdir -p /opt/crossdrop
+sudo chown "$USER" /opt/crossdrop
+git clone <repo> /opt/crossdrop/current
+cd /opt/crossdrop/current
 python3 -m venv .venv
 .venv/bin/pip install -r agent/requirements.txt
 ```
@@ -57,9 +57,9 @@ python3 -m venv .venv
 ## 4. Config
 
 ```sh
-sudo mkdir -p /etc/room-display
-sudo cp /opt/room-display/current/agent/config.example.toml /etc/room-display/config.toml
-sudo nano /etc/room-display/config.toml
+sudo mkdir -p /etc/crossdrop
+sudo cp /opt/crossdrop/current/agent/config.example.toml /etc/crossdrop/config.toml
+sudo nano /etc/crossdrop/config.toml
 ```
 
 `setup.sh` writes this file for you, including a random token — the manual route
@@ -70,14 +70,14 @@ Pi values — the rest of the file is fine as shipped:
 
 ```toml
 token = "<a long random string>"
-home_url = "about:blank"
+home_url = "http://100.x.y.z:8080/home"   # the tailnet address, not a path
 
 [browser]
 kind = "chromium"
-profile_dir = "/home/<user>/.local/share/room-display/profile"
+profile_dir = "/run/user/1000/crossdrop/profile"   # tmpfs: see §6
 
 [upload]
-dir = "/run/user/1000/room-display/uploads"
+dir = "/run/user/1000/crossdrop/uploads"
 ```
 
 `/run/user/1000` is tmpfs, so uploads are in RAM with no setup — that is the
@@ -87,17 +87,17 @@ the shipped 25 × 20 can reach 500 MB, so lower `keep` on a 2 GB Pi.
 The token is a secret, and the file is world-readable by default:
 
 ```sh
-sudo chown root:"$USER" /etc/room-display/config.toml
-sudo chmod 640 /etc/room-display/config.toml
+sudo chown root:"$USER" /etc/crossdrop/config.toml
+sudo chmod 640 /etc/crossdrop/config.toml
 ```
 
 ## 5. Service
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp /opt/room-display/current/deploy/pi/display-agent.service ~/.config/systemd/user/
+cp /opt/crossdrop/current/deploy/pi/crossdrop-agent.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now display-agent
+systemctl --user enable --now crossdrop-agent
 ```
 
 No `kiosk-launch.sh`: the agent launches and owns the kiosk itself, so a
@@ -131,7 +131,7 @@ Default is snapshot-on-stop (PLAN.md §9 option (a)). If the study loses power
 often, take option (b) — the timer is already installed, just disabled:
 
 ```sh
-systemctl --user enable --now room-display-snapshot.timer
+systemctl --user enable --now crossdrop-snapshot.timer
 ```
 
 Logs go to RAM too, via [journald-volatile.conf](journald-volatile.conf). Read
@@ -147,7 +147,7 @@ it, and the shipped `max_mb` × `keep` can reach 500 MB on its own.
 
 Chromium on one page for days grows until it can't allocate, and puts up "Aw,
 Snap! — restart Chromium, restart your computer, or close tabs" on a display
-with no keyboard to do any of that. [room-display-restart.timer](room-display-restart.timer)
+with no keyboard to do any of that. [crossdrop-restart.timer](crossdrop-restart.timer)
 restarts the agent at 04:00, which relaunches the browser; `setup.sh` enables
 it.
 
@@ -155,17 +155,17 @@ Each screen comes back on **whatever it was showing**, provided it was last used
 within `display.restore_within_minutes` (default 720, i.e. 12 h) — so a chart put
 up at 5 pm is still there in the morning, and one from last week isn't. Set it to
 `0` to always come up on `home_url`. The urls are written to
-`~/.local/share/room-display/last.json` when the agent stops, not on every
+`~/.local/share/crossdrop/last.json` when the agent stops, not on every
 navigate, because that path is the SD card. A dropped file whose upload has since
 been swept off tmpfs is skipped rather than restored as a 404.
 
 ```sh
-systemctl --user list-timers room-display-restart.timer   # when it next fires
-systemctl --user disable --now room-display-restart.timer # opt out
+systemctl --user list-timers crossdrop-restart.timer   # when it next fires
+systemctl --user disable --now crossdrop-restart.timer # opt out
 ```
 
 Change the hour by editing `OnCalendar` in
-`~/.config/systemd/user/room-display-restart.timer`, then
+`~/.config/systemd/user/crossdrop-restart.timer`, then
 `systemctl --user daemon-reload`.
 
 ## 7. Two monitors
@@ -205,7 +205,7 @@ are laid out edge to edge, so a 1366-wide first screen puts the second at
 Note that display power (§8) is X11-only: on Wayland the agent leaves the
 monitors alone.
 
-Then in `/etc/room-display/config.toml`:
+Then in `/etc/crossdrop/config.toml`:
 
 ```toml
 [[screen]]
@@ -260,7 +260,7 @@ DISPLAY=:0 xset q | grep -A3 "^DPMS"     # Enabled, and 0 0 0 — the agent's do
 
 If that shows non-zero timeouts, the agent is not managing power (wrong session,
 no `DISPLAY`, or no `xset`) and the OS will blank the screen on its own. The
-journal says which: `journalctl --user -u display-agent | grep display:`.
+journal says which: `journalctl --user -u crossdrop-agent | grep display:`.
 
 Overrides, if the defaults don't suit — `0` disables that timer:
 
@@ -340,7 +340,7 @@ plain uBlock Origin is V2 and current Chromium will not load it at all — check
 more. Both the web UI and `pending_restart` in the API reply say so. Apply it:
 
 ```sh
-systemctl --user restart display-agent
+systemctl --user restart crossdrop-agent
 ```
 
 …or wait for the 04:00 restart timer (§6), which picks it up on its own.
@@ -375,7 +375,7 @@ Confirm what Chromium actually loaded, with no display involved — an
 extension's service worker is a CDP target:
 
 ```sh
-journalctl --user -u display-agent | grep browser:
+journalctl --user -u crossdrop-agent | grep browser:
 curl -s localhost:9222/json | python3 -c 'import json,sys; print([t["title"] for t in json.load(sys.stdin) if t.get("url","").startswith("chrome-extension://")])'
 ```
 
@@ -386,12 +386,12 @@ appears there.
 If it reports nothing loaded, the agent logs which directories it passed:
 
 ```sh
-journalctl --user -u display-agent | grep browser:
-grep extensions_dir /etc/room-display/config.toml   # set by setup.sh
+journalctl --user -u crossdrop-agent | grep browser:
+grep extensions_dir /etc/crossdrop/config.toml   # set by setup.sh
 ```
 
 An empty `extensions_dir` means the config predates this feature — add
-`extensions_dir = "/opt/room-display/extensions"` under `[browser]`.
+`extensions_dir = "/opt/crossdrop/extensions"` under `[browser]`.
 
 ### Keeping it up to date
 
@@ -452,8 +452,8 @@ When there *is* a new tag:
 Enable it when you're ready to let the Pi replace its own code:
 
 ```sh
-systemctl --user enable --now room-display-update.timer
-systemctl --user list-timers room-display-update.timer
+systemctl --user enable --now crossdrop-update.timer
+systemctl --user list-timers crossdrop-update.timer
 ```
 
 **Cutting a release.** Push to main, wait for CI green, then tag:
@@ -469,9 +469,9 @@ the unit reads via `EnvironmentFile`.
 **Layout.** Updates swap code only. Your token, snapshot and uploads live
 outside the release tree and are never touched:
 
-    /opt/room-display/cache-repo/      one bare clone, fetched --tags
-    /opt/room-display/releases/<tag>/  code + venv, one per release
-    /opt/room-display/current -> releases/<tag>
+    /opt/crossdrop/cache-repo/      one bare clone, fetched --tags
+    /opt/crossdrop/releases/<tag>/  code + venv, one per release
+    /opt/crossdrop/current -> releases/<tag>
 
 **Test the rollback before you trust it** — that's PLAN.md §7's acceptance, and
 it's the only feature here that matters. Use the spare Pi: tag a deliberately
@@ -479,8 +479,8 @@ broken commit, watch it refuse to deploy or roll itself back, then tag a good
 one and watch it land.
 
 ```sh
-journalctl --user -u room-display-update -f
-systemctl --user start room-display-update    # don't wait for the timer
+journalctl --user -u crossdrop-update -f
+systemctl --user start crossdrop-update    # don't wait for the timer
 ```
 
 A failed update leaves the unit failed on purpose (`systemctl --user
@@ -517,12 +517,12 @@ msedge.exe --app=http://<pi-tailnet-ip>:8080/
 
 ```sh
 # on the Pi
-bash /opt/room-display/current/deploy/pi/uninstall.sh
+bash /opt/crossdrop/current/deploy/pi/uninstall.sh
 ```
 
 It prints what it will delete and waits for you to type `wipe` (`-y` skips the
-prompt). It undoes §2–§6: the user units, `/opt/room-display`,
-`/etc/room-display`, `~/.local/share/room-display`, the journald drop-in, and on
+prompt). It undoes §2–§6: the user units, `/opt/crossdrop`,
+`/etc/crossdrop`, `~/.local/share/crossdrop`, the journald drop-in, and on
 a Debian box the tty1 autologin and the kiosk block in `~/.profile`.
 
 **That includes the bearer token, the browser logins and the screen settings.**
@@ -531,7 +531,7 @@ what you want to keep first:
 
 ```sh
 # on your machine — lands in the directory you run this from
-scp room@<pi>:~/.local/share/room-display/settings.json .
+scp room@<pi>:~/.local/share/crossdrop/settings.json .
 ```
 
 Left alone deliberately: apt packages, Tailscale (your way back in), and
@@ -541,7 +541,7 @@ autologin, since both are read at boot.
 
 ## Troubleshooting
 
-`journalctl --user -u display-agent -f` is the log.
+`journalctl --user -u crossdrop-agent -f` is the log.
 
 - **Restart loop, "debug port 9222 never came up"** — the compositor was not up
   yet; systemd retries every 5 s, so give it a minute after boot. If it never
@@ -553,7 +553,7 @@ autologin, since both are read at boot.
   9222 and the agent is driving *that* browser. `pgrep -a chromium`; kill the
   strays and restart. (This is why PLAN.md §6 wants the profile dir dedicated.)
 - **"Aw, Snap!" / out of memory after days of uptime** — Chromium ran the Pi
-  out of RAM. `systemctl --user restart display-agent` clears it now; the
+  out of RAM. `systemctl --user restart crossdrop-agent` clears it now; the
   nightly restart timer above keeps it from coming back. If it still happens
   inside a day, `free -m` and `df -h /run/user/1000` while it's up: drop
   `disk_cache_mb` and `upload.max_mb` × `keep`, since on tmpfs both are RAM the
@@ -564,9 +564,9 @@ autologin, since both are read at boot.
   password store on Linux is the system keyring, and desktop autologin never
   unlocks it, so it asks. The agent launches with `--password-store=basic` to
   avoid it entirely. If you see this, you're on older code: `git pull` in
-  `/opt/room-display/current` and `systemctl --user restart display-agent`.
+  `/opt/crossdrop/current` and `systemctl --user restart crossdrop-agent`.
   If a dialog somehow survives, `pkill -u "$USER" chromium` and restart — the
   agent relaunches its own browser.
-- **Blank white screen** — that's `home_url = "about:blank"` rendering, i.e. the
+- **Blank white screen** — that's `home_url = "http://100.x.y.z:8080/home"   # the tailnet address, not a path` rendering, i.e. the
   kiosk working. Prove it with `/v1/navigate`; set `home_url` in
-  `/etc/room-display/config.toml` if you want something else at boot.
+  `/etc/crossdrop/config.toml` if you want something else at boot.

@@ -29,6 +29,26 @@ UPDATE_SH = (Path(__file__).parent.parent / "deploy/pi/update.sh").read_text(
     encoding="utf-8")
 
 
+# --- reading the scripts ----------------------------------------------------
+# Several tests below scope themselves to one section of a shell script by
+# slicing on a literal marker. `str.index` raises ValueError for a marker that
+# moved, which pytest reports as an *error* rather than a failure and never says
+# which of the five markers went. These two say.
+
+def _at(text: str, marker: str, *, what: str) -> int:
+    i = text.find(marker)
+    assert i >= 0, f"{what}: marker {marker!r} is gone — reword the test or the script"
+    return i
+
+
+def _slice(text: str, start: str, end: str, *, what: str) -> str:
+    """The run of `text` from `start` up to the next `end` after it."""
+    i = _at(text, start, what=what)
+    j = text.find(end, i)
+    assert j >= 0, f"{what}: no {end!r} after {start!r}"
+    return text[i:j]
+
+
 @pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
 def test_the_shell_scripts_parse(script):
     """A syntax error in these is discovered by a Pi, at 04:00, with no keyboard
@@ -46,7 +66,7 @@ def client(tmp_path, monkeypatch, request):
     p.write_text(f'token = "{TOKEN}"\nhome_url = "about:blank"\n'
                  f'[browser]\nkind = "chromium"\nautolaunch = false\n',
                  encoding="utf-8")
-    monkeypatch.setenv("ROOM_CONFIG", str(p))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(p))
     with TestClient(app) as c:
         yield c
 
@@ -120,7 +140,7 @@ def test_the_agent_and_the_snapshot_script_agree_on_the_data_dir():
     a working install right up until the reboot that needed the snapshot."""
     from agent import settings
 
-    assert settings.DATA_DIR == ".local/share/room-display"
+    assert settings.DATA_DIR == ".local/share/crossdrop"
     assert f'$HOME/{settings.DATA_DIR}' in SNAPSHOT_SH, \
         "profile-snapshot.sh's default has drifted from settings.DATA_DIR"
 
@@ -131,24 +151,24 @@ def test_both_halves_move_together(monkeypatch, tmp_path):
     snapshot script at once."""
     from agent import settings
 
-    monkeypatch.delenv("ROOM_SETTINGS", raising=False)
-    monkeypatch.setenv("ROOM_DATA", str(tmp_path / "elsewhere"))
+    monkeypatch.delenv("CROSSDROP_SETTINGS", raising=False)
+    monkeypatch.setenv("CROSSDROP_DATA", str(tmp_path / "elsewhere"))
     assert settings.data_dir() == tmp_path / "elsewhere"
     assert settings.path() == tmp_path / "elsewhere" / "settings.json"
     assert settings.last_path() == tmp_path / "elsewhere" / "last.json"
-    assert 'ROOM_DATA:-' in SNAPSHOT_SH, "the script ignores ROOM_DATA"
+    assert 'CROSSDROP_DATA:-' in SNAPSHOT_SH, "the script ignores CROSSDROP_DATA"
     # And the unit documents it, so the two are discoverable together.
-    unit = (Path(__file__).parent.parent / "deploy/pi/display-agent.service"
+    unit = (Path(__file__).parent.parent / "deploy/pi/crossdrop-agent.service"
             ).read_text(encoding="utf-8")
-    assert "ROOM_DATA" in unit
+    assert "CROSSDROP_DATA" in unit
 
 
 def test_room_settings_still_wins(monkeypatch, tmp_path):
-    """It predates ROOM_DATA and the whole suite points it at a tmp_path."""
+    """It predates CROSSDROP_DATA and the whole suite points it at a tmp_path."""
     from agent import settings
 
-    monkeypatch.setenv("ROOM_DATA", str(tmp_path / "dir"))
-    monkeypatch.setenv("ROOM_SETTINGS", str(tmp_path / "explicit.json"))
+    monkeypatch.setenv("CROSSDROP_DATA", str(tmp_path / "dir"))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "explicit.json"))
     assert settings.path() == tmp_path / "explicit.json"
 
 
@@ -160,7 +180,8 @@ def test_the_installer_never_prints_the_token():
     # The token is never read into a variable at all, so there is nothing for
     # the heredoc to interpolate even by accident.
     assert 'TOKEN="$(' not in SETUP_SH, "the installer still captures the token"
-    banner = SETUP_SH[SETUP_SH.index("Done. From a controller box"):]
+    banner = SETUP_SH[_at(SETUP_SH, "Done. From a controller box",
+                          what="setup.sh closing banner"):]
     assert "\\$TOKEN" in banner, "the placeholder should stay unexpanded"
     # The reader is shown the command that reads it, and runs it themselves.
     assert "sed -n" in banner
@@ -179,8 +200,9 @@ def test_the_installer_says_it_is_enabling_tailscale_ssh():
     mentioned. Defensible, but it should be a stated decision rather than a
     silent one inside a `curl | bash`."""
     assert "TSSSH" in SETUP_SH
-    said = SETUP_SH.index("enabling Tailscale SSH")
-    assert said < SETUP_SH.index("tailscale up --ssh"), "said after the fact"
+    said = _at(SETUP_SH, "enabling Tailscale SSH", what="setup.sh tailscale notice")
+    assert said < _at(SETUP_SH, "tailscale up --ssh",
+                      what="setup.sh tailscale up"), "said after the fact"
 
 
 def test_full_upgrade_can_be_declined():
@@ -192,13 +214,14 @@ def test_tag_verification_is_opt_in_and_a_hard_gate():
     every Pi updating, and a display stuck on an old release is worse than the
     risk it removes. On, it must refuse rather than warn."""
     assert 'VERIFY_TAG:-0' in UPDATE_SH, "not off by default"
-    block = UPDATE_SH[UPDATE_SH.index("VERIFY_TAG:-0"):]
-    block = block[:block.index("# --- 3")]
+    what = "update.sh signature gate"
+    block = _slice(UPDATE_SH, "VERIFY_TAG:-0", "# --- 3", what=what)
     assert "verify-tag" in block and "exit 1" in block
     # And it latches, or the timer retries the same bad tag every 30 minutes.
     assert ".failed-$TAG" in block
     # The latch needs its directory to exist on a first-ever run.
-    assert block.index('mkdir -p "$RELEASES"') < block.index('touch "$RELEASES')
+    assert _at(block, 'mkdir -p "$RELEASES"', what=what) \
+        < _at(block, 'touch "$RELEASES', what=what)
 
 
 UNINSTALL_SH = (Path(__file__).parent.parent / "deploy/pi/uninstall.sh").read_text(
@@ -213,8 +236,8 @@ def test_the_uninstaller_removes_exactly_the_block_the_installer_appends(tmp_pat
 
     Run the real sed against the real block, with a line of the user's own on
     either side to prove the range does not eat them."""
-    block = SETUP_SH[SETUP_SH.index("# CrossDrop kiosk session"):]
-    block = block[:block.index("\nEOF") + 1]
+    block = _slice(SETUP_SH, "# CrossDrop kiosk session", "\nEOF",
+                   what="setup.sh kiosk block") + "\n"
     prof = tmp_path / ".profile"
     prof.write_text(f'export EDITOR=vim\n\n{block}\nexport PAGER=less\n',
                     encoding="utf-8")
@@ -231,13 +254,14 @@ def test_the_uninstaller_removes_exactly_the_block_the_installer_appends(tmp_pat
 
 
 def test_the_uninstaller_does_not_delete_itself_mid_run():
-    """It lives under /opt/room-display and deletes /opt/room-display. bash reads
+    """It lives under /opt/crossdrop and deletes /opt/crossdrop. bash reads
     a script as it executes, so without the copy the `rm -rf` truncates the file
     it is running from and the rest — journald, autologin, the pin — silently
     never happens."""
-    copy = UNINSTALL_SH.index('cp "$SELF" "$TMP"')
-    assert copy < UNINSTALL_SH.index("sudo rm -rf /opt/room-display")
-    assert 'exec env ROOM_UNINSTALL_TMP=' in UNINSTALL_SH
+    what = "uninstall.sh self-copy"
+    copy = _at(UNINSTALL_SH, 'cp "$SELF" "$TMP"', what=what)
+    assert copy < _at(UNINSTALL_SH, 'rm -rf "$OPT"', what=what)
+    assert "exec env" in UNINSTALL_SH and "UNINSTALL_TMP=" in UNINSTALL_SH
 
 
 def _sh(*args, **kw):
@@ -308,8 +332,121 @@ def test_the_rollback_still_latches_and_snapshots_before_it(client):
     Scoped to the rollback section rather than the whole file — the signature
     check latches too, and searching from the top found *its* touch instead.
     """
-    section = UPDATE_SH[UPDATE_SH.index("# --- 7. rollback"):]
-    latch = section.index('touch "$RELEASES/.failed-$TAG"')
-    snap = section.index("snapshot_failure\n")
-    restore = section.index('ln -sfn "$PREV" "$CURRENT"')
+    what = "update.sh rollback"
+    section = UPDATE_SH[_at(UPDATE_SH, "# --- 7. rollback", what=what):]
+    latch = _at(section, 'touch "$RELEASES/.failed-$TAG"', what=what)
+    snap = _at(section, "snapshot_failure\n", what=what)
+    restore = _at(section, 'ln -sfn "$PREV" "$CURRENT"', what=what)
     assert snap < latch < restore
+
+
+# --- what the installer writes ----------------------------------------------
+
+def test_the_installer_sets_home_url_to_the_address_the_unit_binds(tmp_path,
+                                                                   monkeypatch):
+    """The expensive one. setup.sh rewrote five keys and home_url was not among
+    them, so a stock install shipped the example's `home_url = "/home"`. That
+    resolves against [server] to http://127.0.0.1:8080/home -- and the unit
+    passes --host "$(tailscale ip -4)" and never reads [server], so nothing is
+    listening there.
+
+    Both monitors then come up on Chromium's error page, /v1/inspect reports
+    error_page: true forever, and update.sh's rollback gate fires on *every*
+    release and latches it. Auto-update was dead on arrival on any box this
+    script built, and the failure looks like a network problem.
+
+    Runs the real sed against the real example config, then loads the result.
+    """
+    example = Path(__file__).parent.parent / "agent/config.example.toml"
+    out = tmp_path / "config.toml"
+    ts_ip, port = "100.73.78.36", "8080"
+    # The same two expressions setup.sh applies, and the string assertion below
+    # is what keeps them the same two.
+    r = _sh("-c", f'sed -e \'s|^token = .*|token = "deadbeef"|\' '
+                  f'-e \'s|^home_url = .*|home_url = "http://{ts_ip}:{port}/home"|\' '
+                  f'"{example.as_posix()}" > "{out.as_posix()}"')
+    assert r.returncode == 0, r.stderr
+
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(out))
+    from agent.app import load_config
+
+    home = load_config()["screens"][0]["home_url"]
+    assert home.startswith(f"http://{ts_ip}:{port}/home"), home
+    assert "127.0.0.1" not in home, home
+    # And the installer still carries that substitution.
+    assert 's|^home_url = .*|home_url = \\"$HOME_URL\\"|' in SETUP_SH, \
+        "setup.sh no longer sets home_url — a fresh install lands on an error page"
+    assert 'HOME_URL="http://$TS_IP:$PORT/home"' in SETUP_SH
+
+
+def test_the_installer_warns_when_an_existing_config_points_at_loopback():
+    """An existing config is deliberately never rewritten, so every Pi built
+    before the fix above still has the broken home_url and would never hear
+    about it."""
+    assert "resolves to loopback" in SETUP_SH
+
+
+def test_every_install_site_requires_hashes():
+    """A version pin still trusts the registry. update.sh builds a fresh venv per
+    release from live PyPI, unattended, on a box with no keyboard -- so a yanked
+    and re-uploaded artifact reaches every Pi within 30 minutes of the next tag.
+    The lock carries hashes; these are the flags that make pip check them."""
+    lock = (Path(__file__).parent.parent / "agent/requirements.txt").read_text(
+        encoding="utf-8")
+    assert lock.count("--hash=sha256:") > 100, "the lock lost its hashes"
+    assert "--require-hashes" in SETUP_SH, "setup.sh installs unverified"
+    assert "--require-hashes" in UPDATE_SH, "update.sh installs unverified"
+    ci = (Path(__file__).parent.parent / ".github/workflows/ci.yml").read_text(
+        encoding="utf-8")
+    assert ci.count("--require-hashes") >= 2, "CI proves a different install"
+
+
+@pytest.mark.parametrize("script", SCRIPTS, ids=lambda p: p.name)
+def test_the_shell_scripts_have_unix_line_endings(script):
+    """A CRLF in these is a Pi that will not boot the kiosk.
+
+    `#!/usr/bin/env bash\r` makes the kernel look for an interpreter literally
+    named "bash\r", and the error -- "no such file or directory" naming a file
+    that plainly exists -- is one of the least helpful in unix. .gitattributes
+    normalises on commit, so this only bites a file written on Windows and run
+    before it is committed, which is exactly what a developer does. git-bash is
+    tolerant enough that `bash -n` passes anyway, so nothing else here notices.
+    """
+    assert b"\r\n" not in script.read_bytes(), \
+        f"{script.name} has CRLF line endings; run: sed -i 's/\r$//' {script}"
+
+
+def test_the_migration_carries_the_state_and_hands_off_the_rest():
+    """update.sh cannot do this itself, for four independent reasons, so the
+    order here is the whole design: stop the update timer first (it fires every
+    30 minutes and one firing mid-migration deploys into the tree being moved),
+    then move the two irreplaceable things, then hand off to setup.sh."""
+    m = (Path(__file__).parent.parent / "deploy/pi/migrate.sh").read_text(
+        encoding="utf-8")
+    what = "migrate.sh ordering"
+    # The update timer, by itself, before anything else is stopped.
+    assert _at(m, "disable --now room-display-update.timer", what=what) \
+        < _at(m, "disable --now display-agent", what=what)
+    # Nothing irreplaceable is deleted: the token and the snapshot are moved.
+    assert 'sudo mv "$OLD_ETC" "$NEW_ETC"' in m
+    assert 'mv "$OLD_DATA" "$NEW_DATA"' in m
+    assert "config.toml.pre-crossdrop" in m, "no backup of the token"
+    # The only rm -rf is the git checkout, and it comes after both moves.
+    assert _at(m, 'sudo mv "$OLD_ETC"', what=what) \
+        < _at(m, 'sudo rm -rf "$OLD_OPT"', what=what)
+    # And the latch is cleared, or a tag that failed under v1 blocks v2 forever.
+    assert "releases/.failed-*" in m
+
+
+def test_the_v1_refusal_names_a_command_that_can_actually_run():
+    """migrate.sh ships in v2 and no v1 tag contains it, so it is not on a v1
+    box: `bash /opt/room-display/current/deploy/pi/migrate.sh` is a path that
+    does not exist. The refusal has to hand over something fetchable, or the
+    operator's next step is "No such file or directory" with nothing telling
+    them to clone."""
+    block = _slice(SETUP_SH, "This box has a v1 install", "EOF",
+                   what="setup.sh v1 refusal")
+    assert "curl -fsSL" in block, "the refusal points at a file that is not there"
+    assert "migrate.sh" in block
+    # And MIGRATE=1 fetches rather than assuming a sibling file.
+    assert 'curl -fsSL "$MIGRATE_URL"' in SETUP_SH

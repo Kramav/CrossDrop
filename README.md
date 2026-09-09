@@ -65,7 +65,7 @@ that you only have to open one.
 | [deploy/pi/smoke-on-the-pi.md](deploy/pi/smoke-on-the-pi.md) | Driving the real browser on the real box: what the smoke suite proves, why the agent has to be stopped first, and what each failure means. |
 | [deploy/linux.md](deploy/linux.md) | Running the display on a Debian box instead of a Pi, and why it goes on the Proxmox host rather than in a guest. |
 | [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1) | The tray client. Pure PowerShell + WinForms so it runs on a box with no checkout and no Python. |
-| [tests/](tests/) | pytest, one file per surface. No browser needed unless `ROOM_SMOKE=1`. |
+| [tests/](tests/) | pytest, one file per surface. No browser needed unless `CROSSDROP_SMOKE=1`. |
 | [PLAN.md](PLAN.md) | Why it's built this way, phase by phase. Section numbers referenced from code comments. §11 holds the adversarial review's standing decisions and what is still unverified on hardware. |
 
 ## Controlling a display
@@ -130,9 +130,9 @@ position and size, applied live with no restart, so moving a window between
 monitors happens while you watch. Leave position or size blank and the agent
 falls back to what `xrandr` detects; **Re-detect layout** is that, for both.
 
-Edits persist to `~/.local/share/room-display/settings.json`, which the agent
+Edits persist to `~/.local/share/crossdrop/settings.json`, which the agent
 owns and `update.sh` never touches. They do **not** go into
-`/etc/room-display/config.toml` — it holds the bearer token and is deliberately
+`/etc/crossdrop/config.toml` — it holds the bearer token and is deliberately
 `root:<user> 640`, so the agent cannot write it. The token, `browser.kind`,
 `profile_dir`, `upload.dir`, `extensions_dir` and `debug_port` stay file-only for the same reason:
 they are install-time facts that need a browser relaunch, not a config reload.
@@ -198,7 +198,7 @@ disk, and it holds one connection open instead of dialling per call.
 ```python
 import os, roomctl
 
-with roomctl.Client(os.environ["ROOM_URL"], os.environ["ROOM_TOKEN"]) as c:
+with roomctl.Client(os.environ["CROSSDROP_URL"], os.environ["CROSSDROP_TOKEN"]) as c:
     s = c.status()
     c.navigate("https://example.com", screen="all")
 
@@ -206,7 +206,7 @@ with roomctl.Client(os.environ["ROOM_URL"], os.environ["ROOM_TOKEN"]) as c:
         c.autoscroll("start", speed=60)
 
     staged = c.upload("slides.pdf", navigate=False)   # prepare, show later
-    c.navigate(os.environ["ROOM_URL"] + staged["url"])
+    c.navigate(os.environ["CROSSDROP_URL"] + staged["url"])
 ```
 
 Failures are typed. `AgentError` subclasses `RuntimeError` — so anything written
@@ -348,7 +348,7 @@ this whole project cannot otherwise recover from.
 `POST /v1/input` is the way out, and it **ships off**:
 
 ```toml
-# /etc/room-display/config.toml, then restart the agent
+# /etc/crossdrop/config.toml, then restart the agent
 [interact]
 enabled = true
 ```
@@ -399,6 +399,43 @@ Worth knowing:
   password.
 - **One request, one deadline.** Default 30 s, capped by `[interact]
   deadline_ms`; a caller may ask for less, never more.
+
+## Upgrading from v1.x
+
+**v2.0.0 renamed the installation.** v1.x lived at `/opt/room-display` with a
+unit called `display-agent`; v2 lives at `/opt/crossdrop` with `crossdrop-agent`,
+and the `ROOM_*` environment variables are now `CROSSDROP_*`. One name instead
+of three — `systemctl --user status crossdrop-agent` is now the obvious guess
+*and* the right one.
+
+On an existing Pi, run the migration once:
+
+```sh
+# on the box, over SSH, as the user that owns the graphical session.
+# migrate.sh is new in v2, so it is not on a v1 box yet — fetch it:
+curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/migrate.sh | bash
+```
+
+Re-running the installer on a v1 box refuses and prints that same line, so you
+cannot get this wrong by accident. `MIGRATE=1` on the installer does both in one
+step.
+
+It stops the update timer first, moves `/etc/room-display` and the profile
+snapshot (your browser logins), backs the config up beside itself, then hands
+off to `setup.sh` to rebuild the code. **The bearer token is not regenerated**,
+so every controller's `targets.toml` keeps working. Nothing irreplaceable is
+deleted — only the git checkout, which is rebuilt from the repo.
+
+If you would rather start clean: `bash .../uninstall.sh` then re-run the
+installer. The uninstaller understands both layouts, so it works on a box that
+was never migrated.
+
+You do not have to do this today. Until you migrate, the Pi keeps running the
+release it has: `agent/selfcheck.py` refuses the v2 layout on a v1 box and
+`update.sh` gates the release swap on selfcheck, so an unmigrated Pi that sees
+the v2 tag **declines it and stays healthy** rather than swapping onto code
+whose paths do not exist. The reason appears in `journalctl --user -u
+display-agent`.
 
 ## The `/v1` contract
 
@@ -483,13 +520,13 @@ restarting it into the same failure, and no `/v1/status` alive to be asked.
 **Every request is logged**, to journald via the service's stderr:
 
 ```sh
-journalctl --user -u display-agent -f                  # follow
-journalctl --user -u display-agent | grep /v1/navigate # what was put on the wall
+journalctl --user -u crossdrop-agent -f                  # follow
+journalctl --user -u crossdrop-agent | grep /v1/navigate # what was put on the wall
 ```
 
 Mutations log at INFO, reads at DEBUG — a controller polling `/v1/status` every
 15s would otherwise bury the one navigate you are looking for, and the Pi's
-journal is 32 MB and in RAM. Set `ROOM_LOG=DEBUG` in the unit to see the reads
+journal is 32 MB and in RAM. Set `CROSSDROP_LOG=DEBUG` in the unit to see the reads
 too.
 
 `GET /home` is the idle screen the kiosk sits on, and `GET /home-status` feeds
@@ -507,7 +544,7 @@ From the repo root, with `agent/requirements.txt` installed:
 
 ```sh
 pytest                  # no browser needed
-ROOM_SMOKE=1 pytest -s  # drives a real kiosk browser
+CROSSDROP_SMOKE=1 pytest -s  # drives a real kiosk browser
 ```
 
 The smoke tests are where the claims a stub cannot check get checked — that a
@@ -516,7 +553,7 @@ error page, and that a click at given coordinates really lands on the element
 that is there. They open one kiosk window for about half a minute:
 
 ```sh
-ROOM_BROWSER=chromium ROOM_SMOKE=1 pytest tests/test_smoke.py -q
+CROSSDROP_BROWSER=chromium CROSSDROP_SMOKE=1 pytest tests/test_smoke.py -q
 ```
 
 On the Pi they need the agent stopped first — it holds the debug port, and the

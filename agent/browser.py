@@ -26,7 +26,7 @@ from . import extensions
 # A child of app.py's "room" logger: same level, same journal. The print()s
 # elsewhere here are startup notices; this is what you go looking for after a
 # screen has behaved oddly.
-log = logging.getLogger("room.browser")
+log = logging.getLogger("crossdrop.browser")
 
 CANDIDATES = {
     "firefox": [
@@ -130,6 +130,7 @@ def launch(cfg: dict) -> subprocess.Popen:
     b = cfg["browser"]
     kind, port = b["kind"], b["debug_port"]
     _loaded.clear()             # firefox takes none; chromium fills this below
+    forget_targets()            # a fresh launch opens a window per screen
     profile = Path(b["profile_dir"])
     profile.mkdir(parents=True, exist_ok=True)
     scr = screens(cfg)
@@ -292,7 +293,8 @@ def open_window(cfg: dict, screen: dict) -> str:
         tid = call("Target.createTarget",
                    {"url": screen["home_url"], "newWindow": True})["targetId"]
         _place(call, tid, screen["position"], screen.get("size", ""))
-    _targets[screen["name"]] = tid
+    with _targets_lock:
+        _targets[screen["name"]] = tid
     return tid
 
 
@@ -432,7 +434,7 @@ AUTOSCROLL_TICK = 0.1
 # Seconds of scrolling per synthesised gesture: longer means fewer round-trips,
 # shorter means `stop` bites sooner, since a gesture runs to completion first.
 # Tunable, because how smooth this looks is a property of the panel and GPU.
-GESTURE_SECS = float(os.getenv("ROOM_GESTURE_SECS", "0.5"))
+GESTURE_SECS = float(os.getenv("CROSSDROP_GESTURE_SECS", "0.5"))
 
 
 def autoscroll(cfg: dict, screen: str | None, speed: int,
@@ -697,7 +699,9 @@ def input(cfg: dict, screen: str | None, actions: list[dict],
         except ValueError as e:
             raise ValueError(f"action {i}: {e}")    # nothing has run yet
 
-    page = _cdp_page(cfg, screen)
+    # exact: this is the one route that types, so it will not act on a window
+    # identified by "closest to where that monitor is supposed to be".
+    page = _cdp_page(cfg, screen, exact=True)
     results: list[dict] = []
     with _rpc(page["webSocketDebuggerUrl"]) as call:
         for a in actions:
@@ -956,7 +960,7 @@ def close() -> None:
 # the degraded-boot design exists to prevent.
 #
 # A fast-fail latch, not a circuit breaker: being wrong costs one round trip.
-DEAD_COOLDOWN = float(os.getenv("ROOM_DEAD_COOLDOWN", "5"))
+DEAD_COOLDOWN = float(os.getenv("CROSSDROP_DEAD_COOLDOWN", "5"))
 _dead_until = 0.0
 
 
@@ -1026,11 +1030,52 @@ def _rpc(ws_url: str):
 
 
 # Seconds between moving a window and fullscreening it. Override with
-# ROOM_PLACE_SETTLE to test a compositor that is slower than this.
-PLACE_SETTLE = float(os.getenv("ROOM_PLACE_SETTLE", "0.3"))
+# CROSSDROP_PLACE_SETTLE to test a compositor that is slower than this.
+PLACE_SETTLE = float(os.getenv("CROSSDROP_PLACE_SETTLE", "0.3"))
 
 # screen name -> CDP target id, filled in by launch()/open_window().
 _targets: dict[str, str] = {}
+# Guards _targets, _guessed and _generation as a set. Held only for the dict
+# operations, never across CDP I/O -- the round trip happens outside it.
+_targets_lock = threading.Lock()
+# Bumped by forget_targets(). A caller that resolved a screen under an older
+# generation must not write its answer back: the screen list has changed under
+# it and the name may now mean a different monitor.
+_generation = 0
+
+def forget_targets() -> int:
+    """Drop the screen -> window mapping, so the next call re-derives it.
+
+    Called whenever the screen list changes underneath us (app.swap_config).
+    The cache is keyed by name and a rename moves the name to a different
+    monitor, so keeping it means every route silently addresses the old one.
+
+    Returns the new generation. Clearing alone was not enough: every browser
+    route is `def`, so it runs on a threadpool thread, and a call that had
+    already read the *old* screen list could write its answer into `_targets`
+    after the clear. That entry then outlived the swap, `_guessed` did not
+    contain the name so `_refuse_guess` passed, and `/v1/input` typed into a
+    window chosen under a config that no longer existed. The generation is what
+    lets a late writer notice its answer is stale and drop it.
+    """
+    global _generation
+    with _targets_lock:
+        _generation += 1
+        _targets.clear()
+        _guessed.clear()
+        return _generation
+
+
+def generation() -> int:
+    with _targets_lock:
+        return _generation
+
+
+# Screen names whose target was matched by *position* rather than by list index
+# -- see _identify. The match is good enough to navigate with and not good enough
+# to type a password into, and because _targets caches it, the call that finds
+# out is not the call that acts on it. So the doubt is recorded here instead.
+_guessed: set[str] = set()
 
 # Extension directories this browser was actually started with. Compared against
 # what is on disk to answer "does a restart have anything to pick up?" --
@@ -1061,22 +1106,78 @@ def _pages(port: int) -> list[dict]:
             and not str(t.get("url") or "").startswith(_NOT_OURS)]
 
 
-def _cdp_page(cfg: dict, screen: str | None = None) -> dict:
-    """The page target belonging to `screen`."""
+def _cdp_page(cfg: dict, screen: str | None = None, exact: bool = False) -> dict:
+    """The page target belonging to `screen`.
+
+    `exact` refuses a target that was matched by position rather than by list
+    index. Only /v1/input passes it: showing the wrong monitor a web page is a
+    visible mistake somebody corrects, and typing into the wrong monitor is a
+    password in a box nobody meant to open.
+    """
+    # Read before the screen list, so a swap that happens while we are resolving
+    # is always *newer* than what we captured -- never the other way round.
+    gen = generation()
     pages = _pages(cfg["browser"]["debug_port"])
     if not pages:
         raise RuntimeError("browser has no page target")
 
     scr = screens(cfg)
     name = screen or scr[0]["name"]
-    tid = _targets.get(name)
+    # The doubt is about the *mapping*, so clearing it needs the mapping to be
+    # checkable again -- which it is exactly when there are as many windows as
+    # screens, because then list order is the identity.
+    #
+    # Checking only the count was not enough, and was worse than latching: the
+    # cached id was written by _identify while the counts disagreed, and
+    # "it is still one of the open windows" says nothing about *which screen*
+    # it belongs to. A closed-and-reopened window left two screens resolving to
+    # the same target with the flag cleared, so /v1/input typed into the wrong
+    # monitor -- the exact outcome _guessed exists to prevent.
+    #
+    # So compare the cached id against the answer index order would give. Agree
+    # -> the guess happened to be right and the doubt is over. Disagree -> drop
+    # the cache and re-identify, which is what should have happened anyway.
+    with _targets_lock:
+        if _generation != gen:
+            tid = None                  # the screen list moved; trust nothing
+        else:
+            if len(pages) == len(scr) and name in _guessed:
+                want = [s["name"] for s in scr]
+                i = want.index(name) if name in want else 0
+                if _targets.get(name) == pages[i]["id"]:
+                    _guessed.discard(name)
+                else:
+                    log.warning("screen %r: the window it was matched to is not "
+                                "the one list order gives now; re-identifying",
+                                name)
+                    _targets.pop(name, None)
+            tid = _targets.get(name)
     for p in pages:
         if p["id"] == tid:
+            _refuse_guess(name, exact)
             return p
 
     page = _identify(cfg, name, scr, pages)
-    _targets[name] = page["id"]
+    with _targets_lock:
+        # Only if nothing swapped the config underneath us. Writing anyway is
+        # how a pre-swap answer outlived the swap and became the mapping every
+        # later call trusted -- including /v1/input, which then had no `_guessed`
+        # entry to refuse on.
+        if _generation == gen:
+            _targets[name] = page["id"]
+    _refuse_guess(name, exact)
     return page
+
+
+def _refuse_guess(name: str, exact: bool) -> None:
+    with _targets_lock:
+        doubted = name in _guessed
+    if exact and doubted:
+        raise RuntimeError(
+            f"screen {name!r} was matched to a window by position, not by "
+            f"identity, because the browser has a different number of windows "
+            f"than there are screens. Refusing to send input to a window that "
+            f"might be the wrong one -- restart the agent to reopen its windows.")
 
 
 def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
@@ -1092,6 +1193,8 @@ def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
     """
     names = [s["name"] for s in scr]
     i = names.index(name) if name in names else 0
+    with _targets_lock:
+        _guessed.discard(name)
     if len(scr) == 1:
         return pages[0]                     # nothing to get wrong
     if len(pages) == len(scr):
@@ -1124,8 +1227,13 @@ def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
     # beats the nth entry of a list that no longer lines up.
     placed.sort(key=lambda t: t[0])
     off, page = placed[0]
+    # Remembered, not just logged: _targets caches this answer, so by the time
+    # anything acts on it the warning is thousands of journal lines back.
+    with _targets_lock:
+        _guessed.add(name)
     log.warning("screen %r: %d windows for %d screens, matched %s by position "
-                "(%d px from %s)", name, len(pages), len(scr), page["id"], off, want)
+                "(%d px from %s). Good enough to show a page on; /v1/input will "
+                "refuse it.", name, len(pages), len(scr), page["id"], off, want)
     return page
 
 

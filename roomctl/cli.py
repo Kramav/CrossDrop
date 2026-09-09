@@ -14,30 +14,55 @@ import roomctl
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="roomctl", description="Drive a room display.")
-    p.add_argument("-t", "--target", help="target name from targets.toml (default: its `default`)")
+    # -t and -s go on the top-level parser *and*, via `parents`, on every
+    # subcommand. They were top-level only, so `roomctl navigate URL -s right` --
+    # the form README and deploy/pi/README document eight times -- exited 2 with
+    # "unrecognized arguments", while `roomctl -s right navigate URL` worked. A
+    # flag that only parses before the verb is a flag most people type wrong.
+    #
+    # default=SUPPRESS is what makes both positions work at once. A subparser
+    # parses into a fresh namespace and then copies every key it holds onto the
+    # outer one, so an ordinary `default=None` on the subcommand's own -s would
+    # overwrite a `-s` given before the verb -- breaking the form that works
+    # today in order to fix the one that does not. SUPPRESS keeps an untyped flag
+    # out of that namespace entirely, so only a flag actually typed is copied.
+    #
+    # And *not* p.set_defaults() to fill the gap: it rewrites `action.default` on
+    # every matching action, and `parents=` shares one action object with all
+    # sixteen subparsers -- so it would put the None back on each of them and
+    # restore the exact bug. The two lines after parse_args do it instead.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-t", "--target", default=argparse.SUPPRESS,
+                        help="target name from targets.toml (default: its `default`)")
     # A target is a Pi; a screen is one of its monitors. "all" hits every screen.
-    p.add_argument("-s", "--screen", help="screen name, or 'all' (default: the first)")
+    common.add_argument("-s", "--screen", default=argparse.SUPPRESS,
+                        help="screen name, or 'all' (default: the first)")
+
+    p = argparse.ArgumentParser(prog="roomctl", description="Drive a room display.",
+                                parents=[common])
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status", help="is the display up, and what is it showing")
-    sub.add_parser("screens", help="list this display's screens")
-    sub.add_parser("reload", help="re-navigate to the current url")
-    sub.add_parser("home", help="back to the configured home_url")
-    sub.add_parser("navigate", help="point the display at a url").add_argument("url")
-    sub.add_parser("upload", help="send a file and show it").add_argument("path")
+
+    def cmd(name, **kw):
+        return sub.add_parser(name, parents=[common], **kw)
+    cmd("status", help="is the display up, and what is it showing")
+    cmd("screens", help="list this display's screens")
+    cmd("reload", help="re-navigate to the current url")
+    cmd("home", help="back to the configured home_url")
+    cmd("navigate", help="point the display at a url").add_argument("url")
+    cmd("upload", help="send a file and show it").add_argument("path")
 
     # Extensions are per-display, not per-screen: -s does not apply.
-    ext = sub.add_parser("extension", help="list, install or remove kiosk extensions")
+    ext = cmd("extension", help="list, install or remove kiosk extensions")
     ext.add_argument("action", nargs="?", default="list",
                      choices=["list", "install", "remove"])
     ext.add_argument("what", nargs="*",
                      help="install: Web Store ids. remove: the id shown by list.")
 
     # Kept in step with agent/browser.py WINDOW_STATES by hand, same as media below.
-    win = sub.add_parser("window", help="set the kiosk window aside, or put it back")
+    win = cmd("window", help="set the kiosk window aside, or put it back")
     win.add_argument("state", choices=["normal", "minimized", "fullscreen"])
 
-    shot = sub.add_parser("shot", help="what the screen is actually showing")
+    shot = cmd("shot", help="what the screen is actually showing")
     shot.add_argument("-o", "--out", help="write the image here (default: "
                                           "print the metadata only)")
     shot.add_argument("--region", help="x,y,width,height in CSS pixels, "
@@ -45,23 +70,23 @@ def main(argv: list[str] | None = None) -> int:
     shot.add_argument("--format", default="png", choices=["png", "jpeg", "webp"])
     shot.add_argument("--quality", type=int, default=80, help="jpeg/webp only")
 
-    sub.add_parser("inspect", help="what the page says about itself")
+    cmd("inspect", help="what the page says about itself")
 
     # One verb per subcommand rather than a JSON action list on the command
     # line: the list is what the *library* is for, and quoting JSON through two
     # shells is how you end up typing a password into the wrong field.
-    click = sub.add_parser("click", help="click a selector, or an x y")
+    click = cmd("click", help="click a selector, or an x y")
     click.add_argument("where", nargs="+", help="a CSS selector, or: X Y")
     click.add_argument("--double", action="store_true")
     click.add_argument("--right", action="store_true")
 
-    typ = sub.add_parser("type", help="type text into whatever has focus")
+    typ = cmd("type", help="type text into whatever has focus")
     typ.add_argument("text")
 
-    press = sub.add_parser("key", help="press a key, e.g. Enter or ctrl+a")
+    press = cmd("key", help="press a key, e.g. Enter or ctrl+a")
     press.add_argument("combo", help="Key, or mod+mod+Key")
 
-    scroll = sub.add_parser("scroll", help="scroll the page")
+    scroll = cmd("scroll", help="scroll the page")
     where = scroll.add_mutually_exclusive_group()
     where.add_argument("--down", action="store_true", help="down a screenful (default)")
     where.add_argument("--up", action="store_true", help="up a screenful")
@@ -69,13 +94,13 @@ def main(argv: list[str] | None = None) -> int:
     where.add_argument("--bottom", action="store_true")
     scroll.add_argument("--dy", type=int, default=600, help="pixels, if not --top/--bottom")
 
-    auto = sub.add_parser("autoscroll", help="scroll slowly and continuously")
+    auto = cmd("autoscroll", help="scroll slowly and continuously")
     auto.add_argument("action", choices=["start", "stop"])
     auto.add_argument("--speed", type=int, default=40, help="pixels per tick")
 
     # Kept in step with agent/browser.py MEDIA_ACTIONS by hand: roomctl talks to a
     # remote Pi and must not import the agent to run.
-    med = sub.add_parser("media", help="control the video or audio on the page")
+    med = cmd("media", help="control the video or audio on the page")
     med.add_argument("action", nargs="?", default="state",
                      choices=["state", "play", "pause", "toggle",
                               "mute", "unmute", "seek", "volume"])
@@ -83,6 +108,10 @@ def main(argv: list[str] | None = None) -> int:
                      help="seek: seconds, may be negative. volume: 0-100.")
 
     a = p.parse_args(argv)
+    # Neither position used: SUPPRESS means the attribute is simply absent.
+    for flag in ("target", "screen"):
+        if not hasattr(a, flag):
+            setattr(a, flag, None)
 
     def do_extension(c):
         if a.action == "install":

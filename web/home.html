@@ -56,7 +56,13 @@ async function tick() {
     const s = await (await fetch("/home-status")).json();
     $("#screen").textContent = s.screens.length > 1 && me ? me : (s.name || "Room display");
     $("#screen-label").textContent = s.screens.length > 1 ? "This screen" : "Ready";
-    $("#version").textContent = s.version;
+    // "connected", not the release tag. /home-status is unauthenticated -- the
+    // tag is the one field on it an attacker actually wants, since it says which
+    // known bugs this box has -- so the agent stopped reporting it. What this
+    // pill is for is "is the agent answering", which the catch below contradicts
+    // in red, and that still works.
+    $("#version").textContent = "connected";
+    $("#version").className = "";
     $("#live").classList.remove("idle");
     // Other monitors: host only, never the full url -- see /home-status.
     $("#others").replaceChildren(...s.screens.filter(x => x.name !== me).map(x => {

@@ -114,7 +114,7 @@ def write_cfg(tmp_path):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_cfg(tmp_path)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_cfg(tmp_path)))
     with TestClient(appmod.app) as c:
         yield c
 

@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/set
 sudo reboot
 ```
 
-It prints the token and a `curl` to try from another box. Then, from a
+It prints the *command that reads* the token, and a `curl` to try from another box -- never the token itself, which would put the box's one credential into terminal scrollback. Then, from a
 controller machine:
 
 ```sh
@@ -46,7 +46,7 @@ Not a desktop — the smallest session that satisfies the agent:
     /etc/systemd/system/getty@tty1.service.d/autologin.conf   agetty autologins `room` on tty1
     ~/.profile (or ~/.bash_profile)                           that login runs `startx -- -nocursor`
     ~/.xinitrc                                                `exec openbox-session`
-    ~/.config/systemd/user/display-agent.service              the agent, started by the same login
+    ~/.config/systemd/user/crossdrop-agent.service              the agent, started by the same login
 
 X11 rather than Wayland on purpose: monitor power in
 [agent/display.py](../agent/display.py) is `xset`/DPMS, and a keyboard-less
@@ -68,14 +68,26 @@ makes a screen per connected output. Rename them in the web UI's **Settings**.
   SSD doesn't need it, so the host keeps a persistent journal.
 - **Don't also pass the GPU to a VM.** Xorg on the host and VFIO want the same
   device.
-- Tailscale on the host is what the agent binds to (`display-agent.service`
+- Tailscale on the host is what the agent binds to (`crossdrop-agent.service`
   asks `tailscale ip -4`), so the API is never on the LAN.
 
 ## Backing it out
 
 ```sh
-systemctl --user disable --now display-agent
-sudo rm -rf /etc/systemd/system/getty@tty1.service.d /opt/room-display /etc/room-display
-sudo systemctl daemon-reload
-sudo apt purge -y chromium xserver-xorg xinit x11-xserver-utils openbox && sudo apt autoremove -y
+bash /opt/crossdrop/current/deploy/pi/uninstall.sh
+```
+
+Use the uninstaller, not a hand-written `rm`. The obvious teardown --
+`disable --now`, `rm -rf /opt/crossdrop /etc/crossdrop`, `apt purge xserver-xorg`
+-- leaves `exec startx -- -nocursor` in `~/.profile` and then removes X, so the
+next tty1 login runs `startx` with no X installed. On a box that still
+autologins, that is a login loop with no keyboard.
+
+`uninstall.sh` removes the kiosk block first, and leaves the packages alone
+deliberately (see its header). If you also want the packages gone, do that
+afterwards, once the profile no longer tries to start a session:
+
+```sh
+sudo apt purge -y chromium xserver-xorg xinit x11-xserver-utils openbox
+sudo apt autoremove -y
 ```

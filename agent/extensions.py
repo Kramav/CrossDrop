@@ -74,6 +74,26 @@ def display_name(path: str | Path) -> str:
         return p.name
 
 
+def allowed(cfg: dict, id: str) -> bool:
+    """Is `id` on the install allowlist? Empty or absent list = anything goes.
+
+    The allowlist lives in config.toml, which on the Pi is root:<user> 640 and
+    the agent cannot write -- the same reasoning as `[interact] enabled`. An
+    allowlist the API can extend for itself is not an allowlist.
+
+    Why this route and not the others: it downloads code and unpacks it into the
+    profile that holds the kiosk's logged-in sessions, so an extension can read
+    every page this display has ever been signed in to. Everything else here
+    shows something or reads something back. The only check used to be that the
+    id is 32 characters of a-p, which a squatted or mistyped id also satisfies.
+
+    Off by default because a list nobody set must not stop a working install
+    from adding an ad blocker -- the same trade as VERIFY_TAG in update.sh.
+    """
+    ids = (cfg.get("browser") or {}).get("allow_extensions") or []
+    return not ids or id in ids
+
+
 def install(dir: str, id: str, _open=urllib.request.urlopen) -> str:
     """Download extension `id` from the Web Store into `dir`. Returns its name.
 

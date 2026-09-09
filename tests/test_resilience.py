@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent import app as appmod
+from agent import display
 from agent.app import app
 
 TOKEN = "test-token"
@@ -31,7 +32,7 @@ def write_config(tmp_path, autolaunch=False, names=("left", "right")):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
     with TestClient(app) as c:
         yield c
 
@@ -70,7 +71,7 @@ def test_status_answers_when_the_browser_will_not_launch(tmp_path, monkeypatch,
     way -- a restart loop in which /v1/status, the only thing that could have
     named the cause, was down for every attempt.
     """
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, autolaunch=True)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path, autolaunch=True)))
 
     def no_binary(cfg):
         raise RuntimeError("no chromium binary found; set browser.path in config")
@@ -95,7 +96,7 @@ def test_a_failed_launch_keeps_retrying(tmp_path, monkeypatch):
     """The transient case, and the reason this retries rather than giving up
     once: the compositor may simply not be up yet. Before the fix that was
     covered by systemd restarting the whole agent; it has to stay covered."""
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, autolaunch=True)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path, autolaunch=True)))
     monkeypatch.setattr(appmod, "_home_when_ready", lambda cfg: None)
     attempts = []
 
@@ -184,7 +185,7 @@ def test_a_shutdown_during_launch_still_stops_the_browser(tmp_path, monkeypatch)
     window used to find proc still None and leave the kiosk running -- an
     orphaned fullscreen window on a box with no keyboard, which is the failure
     the whole module is arranged around."""
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, autolaunch=True)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path, autolaunch=True)))
     launched, stopped, in_launch = threading.Event(), [], threading.Event()
 
     def slow_launch(cfg):
@@ -520,7 +521,7 @@ def unicode_config(tmp_path, monkeypatch):
     p.write_text('token = "påssword-with-ünicode"\nhome_url = "about:blank"\n'
                  '[browser]\nkind = "chromium"\nautolaunch = false\n',
                  encoding="utf-8")
-    monkeypatch.setenv("ROOM_CONFIG", str(p))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(p))
     return p
 
 
@@ -543,14 +544,14 @@ def test_a_token_that_cannot_be_sent_says_so_in_the_log(tmp_path, monkeypatch,
     it. Not fatal — a bad token must never stop a keyboard-less display booting
     — so the journal is where the answer has to be."""
     unicode_config(tmp_path, monkeypatch)
-    with caplog.at_level(logging.WARNING, logger="room"):
+    with caplog.at_level(logging.WARNING, logger="crossdrop"):
         appmod.load_config()
     assert any("non-ASCII" in r.getMessage() for r in caplog.records)
 
 
 def test_an_ordinary_token_says_nothing(tmp_path, monkeypatch, caplog):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path)))
-    with caplog.at_level(logging.WARNING, logger="room"):
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
+    with caplog.at_level(logging.WARNING, logger="crossdrop"):
         appmod.load_config()
     assert not [r for r in caplog.records if "non-ASCII" in r.getMessage()]
 
@@ -563,7 +564,7 @@ def test_a_mutation_is_logged(client, monkeypatch, caplog):
     even with the journal in front of you."""
     monkeypatch.setattr(appmod.browser, "navigate",
                         lambda cfg, url, screen=None: url)
-    with caplog.at_level(logging.INFO, logger="room"):
+    with caplog.at_level(logging.INFO, logger="crossdrop"):
         client.post("/v1/navigate", headers=H,
                     json={"url": "https://x/", "screen": "left"})
     line = next(r for r in caplog.records if "/v1/navigate" in r.getMessage())
@@ -574,7 +575,7 @@ def test_a_mutation_is_logged(client, monkeypatch, caplog):
 def test_a_failed_request_is_logged_with_its_status(client, caplog):
     """A 503 has to be as visible as a success, or the log only records the
     times nothing was wrong."""
-    with caplog.at_level(logging.INFO, logger="room"):
+    with caplog.at_level(logging.INFO, logger="crossdrop"):
         client.post("/v1/navigate", headers=H, json={"url": "https://x/"})
     assert any("503" in r.getMessage() for r in caplog.records
                if "/v1/navigate" in r.getMessage())
@@ -584,21 +585,21 @@ def test_reads_do_not_flood_the_log(client, caplog, no_browser):
     """A controller polls /v1/status every 15s and the kiosk polls /home-status.
     At INFO those would bury every real action under thousands of lines a day,
     on a Pi whose journal is 32M and in RAM."""
-    with caplog.at_level(logging.INFO, logger="room"):
+    with caplog.at_level(logging.INFO, logger="crossdrop"):
         client.get("/v1/status", headers=H)
         client.get("/home-status")
     assert not [r for r in caplog.records if "/v1/status" in r.getMessage()]
 
     caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger="room"):
+    with caplog.at_level(logging.DEBUG, logger="crossdrop"):
         client.get("/v1/status", headers=H)
-    # ROOM_LOG=DEBUG is the debug mode: same line, one level down.
+    # CROSSDROP_LOG=DEBUG is the debug mode: same line, one level down.
     assert any("/v1/status" in r.getMessage() for r in caplog.records)
 
 
 def test_an_unauthenticated_request_is_logged(client, caplog):
     """401s are the ones worth having a record of."""
-    with caplog.at_level(logging.INFO, logger="room"):
+    with caplog.at_level(logging.INFO, logger="crossdrop"):
         client.post("/v1/navigate", json={"url": "https://x/"})
     assert any("401" in r.getMessage() for r in caplog.records
                if "/v1/navigate" in r.getMessage())
@@ -621,3 +622,80 @@ def test_setup_logging_is_safe_to_call_twice(caplog):
     before = len(root.handlers)
     appmod.setup_logging()
     assert len(root.handlers) == before
+
+
+# --- the config swap, under concurrency -------------------------------------
+
+def test_a_lookup_in_flight_cannot_outlive_the_config_swap(monkeypatch):
+    """browser.forget_targets() closed the single-threaded hole and left the
+    concurrent one open.
+
+    Every browser route is `def`, so it runs on a threadpool thread. A call that
+    had already read the *old* screen list could finish its CDP round trip and
+    write its answer into `_targets` after the clear -- and that entry outlived
+    the swap. `_guessed` did not contain the name, so `_refuse_guess` passed and
+    /v1/input typed into a window chosen under a config that no longer existed.
+    Nothing re-checked it, so it never healed.
+    """
+    from agent import browser
+
+    browser.forget_targets()
+    pages = [{"type": "page", "id": "T1", "url": "http://a/",
+              "webSocketDebuggerUrl": "ws://one"},
+             {"type": "page", "id": "T2", "url": "http://b/",
+              "webSocketDebuggerUrl": "ws://two"}]
+    monkeypatch.setattr(browser, "_get", lambda port, path, **k:
+                        list(pages) if path == "/json"
+                        else {"webSocketDebuggerUrl": "ws://browser"})
+
+    old = {"browser": {"kind": "chromium", "debug_port": 9222},
+           "screens": [{"name": "left", "position": "", "home_url": "about:blank"},
+                       {"name": "right", "position": "", "home_url": "about:blank"}]}
+    swapped = threading.Event()
+
+    # The swap lands between resolving the screen list and caching the answer.
+    real_identify = browser._identify
+
+    def slow_identify(cfg, name, scr, ps):
+        page = real_identify(cfg, name, scr, ps)
+        swapped.wait(5)
+        return page
+
+    monkeypatch.setattr(browser, "_identify", slow_identify)
+    got = {}
+    t = threading.Thread(target=lambda: got.update(
+        page=browser._cdp_page(old, "right")), daemon=True)
+    t.start()
+    time.sleep(0.1)
+    browser.forget_targets()        # what swap_config does
+    swapped.set()
+    t.join(10)
+
+    assert got, "the lookup never finished"
+    # It may return whatever it resolved -- but it must not have left that
+    # answer behind for the next call to trust.
+    assert browser._targets == {}, browser._targets
+
+
+def test_an_autoscroll_starting_during_a_swap_is_still_stopped(monkeypatch):
+    """The stop sweep snapshots `list(_autoscroll)` before the swap, so a start
+    already in flight -- the route resolved a name that was valid when it
+    checked -- installs under a name the new config no longer has. Nothing could
+    then stop that loop but a restart: screen_of() 404s on the name, so the UI's
+    stop button pops nothing. The haunted display, by a different door."""
+    from agent import browser
+
+    cfg = {"browser": {"kind": "chromium", "debug_port": 9222},
+           "screens": [{"name": "left", "position": "", "home_url": "about:blank"}],
+           "display": display.DEFAULTS}
+    monkeypatch.setattr(appmod.app.state, "cfg", cfg, raising=False)
+    monkeypatch.setattr(browser, "autoscroll",
+                        lambda c, screen, speed, stop: stop.wait(20))
+    appmod._autoscroll_start(cfg, "left", 40)
+    assert until(lambda: "left" in appmod._autoscroll)
+
+    fresh = dict(cfg)
+    fresh["screens"] = [{"name": "centre", "position": "", "home_url": "about:blank"}]
+    appmod.swap_config(cfg, fresh)
+    assert "left" not in appmod._autoscroll, \
+        "a loop is running under a name no screen has; only a restart stops it"

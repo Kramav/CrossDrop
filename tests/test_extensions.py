@@ -188,7 +188,7 @@ extensions_dir = "{(tmp_path / 'ext').as_posix()}"
 [upload]
 max_mb = 1
 ''', encoding="utf-8")
-    monkeypatch.setenv("ROOM_CONFIG", str(cfg))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
     browser._loaded.clear()
     with TestClient(appmod.app) as c:
         yield c
@@ -264,9 +264,52 @@ def test_firefox_says_so_instead_of_installing(tmp_path, monkeypatch):
     cfg.write_text('token = "t"\nhome_url = "about:blank"\n'
                    '[browser]\nautolaunch = false\nkind = "firefox"\n',
                    encoding="utf-8")
-    monkeypatch.setenv("ROOM_CONFIG", str(cfg))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
     with TestClient(appmod.app) as c:
         assert c.get("/v1/extensions", headers=AUTH).status_code == 501
         assert c.post("/v1/extensions", json={"ids": [ID]},
                       headers=AUTH).status_code == 501
         assert "extensions" not in c.get("/v1/status", headers=AUTH).json()["supports"]
+
+
+# --- the allowlist ----------------------------------------------------------
+# The only route here that writes executable code onto the box, unpacked into
+# the profile that holds every session the kiosk is logged in to.
+
+def test_an_id_off_the_allowlist_never_reaches_the_network(client, monkeypatch):
+    """A 32-character run of a-p is the only thing that used to stand between a
+    mistyped or squatted id and code running inside the display's logins. When a
+    list is set, a miss must be refused before anything is fetched -- same rule
+    as the id syntax check beside it."""
+    calls = []
+    monkeypatch.setitem(appmod.app.state.cfg["browser"], "allow_extensions",
+                        ["a" * 32])
+    monkeypatch.setattr(extensions, "install",
+                        lambda d, i, **k: calls.append(i) or "nope")
+    r = client.post("/v1/extensions", headers=AUTH, json={"ids": ["b" * 32]})
+    assert r.status_code == 403, r.text
+    assert "allow_extensions" in r.json()["detail"]
+    assert calls == [], "it fetched an id it had already decided to refuse"
+
+
+def test_one_bad_id_refuses_the_whole_request(client, monkeypatch):
+    """Same reasoning as the syntax check: a request that is going to be refused
+    is refused whole, rather than installing the allowed half."""
+    calls = []
+    monkeypatch.setitem(appmod.app.state.cfg["browser"], "allow_extensions",
+                        ["a" * 32])
+    monkeypatch.setattr(extensions, "install",
+                        lambda d, i, **k: calls.append(i) or "ok")
+    r = client.post("/v1/extensions", headers=AUTH,
+                    json={"ids": ["a" * 32, "b" * 32]})
+    assert r.status_code == 403, r.text
+    assert calls == [], calls
+
+
+def test_no_allowlist_still_installs_anything(client, monkeypatch):
+    """Off by default. A list nobody set must not stop a working install adding
+    an ad blocker -- the same trade as VERIFY_TAG in update.sh."""
+    monkeypatch.setattr(extensions, "install", lambda d, i, **k: "fine")
+    r = client.post("/v1/extensions", headers=AUTH, json={"ids": ["c" * 32]})
+    assert r.status_code == 200, r.text
+    assert r.json()["results"][0]["ok"] is True

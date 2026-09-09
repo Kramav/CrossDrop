@@ -7,6 +7,7 @@ instead, in the agent's data dir, which survives update.sh replacing
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -17,26 +18,29 @@ SCREEN_FIELDS = ("name", "home_url", "position", "size")
 
 # The deployed name, not the repo name -- PLAN.md §11 "Naming". Renaming an
 # installation is a migration on hardware nobody can reach with a keyboard.
-DATA_DIR = ".local/share/room-display"
+DATA_DIR = ".local/share/crossdrop"
+
+# A child of app.py's logger, so it lands in the same journal.
+log = logging.getLogger("crossdrop.settings")
 
 
 def data_dir() -> Path:
     """settings.json, last.json, and the profile snapshot deploy/pi/
     profile-snapshot.sh writes beside them.
 
-    ROOM_DATA makes moving these a deployment decision rather than a code edit,
+    CROSSDROP_DATA makes moving these a deployment decision rather than a code edit,
     and profile-snapshot.sh reads the same variable — a systemd `Environment=`
     line covers ExecStartPre and ExecStopPost too, so the two halves cannot
     drift. Changing the literal above instead brings a box up with no saved
     screens and no restored page, which nobody notices until they look.
     """
-    return Path(os.getenv("ROOM_DATA") or Path.home() / DATA_DIR)
+    return Path(os.getenv("CROSSDROP_DATA") or Path.home() / DATA_DIR)
 
 
 def path() -> Path:
-    # ROOM_SETTINGS names the file outright and still wins: it predates
-    # ROOM_DATA and the tests point it at a tmp_path.
-    return Path(os.getenv("ROOM_SETTINGS") or data_dir() / "settings.json")
+    # CROSSDROP_SETTINGS names the file outright and still wins: it predates
+    # CROSSDROP_DATA and the tests point it at a tmp_path.
+    return Path(os.getenv("CROSSDROP_SETTINGS") or data_dir() / "settings.json")
 
 
 def last_path() -> Path:
@@ -75,7 +79,11 @@ def merge_screens(rows: list[dict]) -> dict:
     drop the other screen's name and home_url for good, and plugging it back in
     did not bring them back. Longer saved lists keep their tail instead.
     """
-    saved = load().get("screens") or []
+    # Same shape guard as apply(): this indexes `saved`, so a `screens` that is
+    # not a list raised out of PUT /v1/settings, and one holding non-objects
+    # would write them straight back for the next boot to choke on.
+    saved = load().get("screens")
+    saved = [r for r in saved if isinstance(r, dict)] if isinstance(saved, list) else []
     return {"screens": [rows[i] if i < len(rows) else saved[i]
                         for i in range(max(len(rows), len(saved)))]}
 
@@ -88,7 +96,24 @@ def apply(cfg: dict, data: dict | None = None) -> dict:
     `display.detect()` sorts left to right, so the index is the identity.
     """
     data = load() if data is None else data
-    for screen, over in zip(cfg["screens"], data.get("screens") or []):
+    # Shape-checked, not just type-checked. `load()` only proved the top level is
+    # a dict, so `{"screens": {"a": 1}}`, `{"screens": ["x"]}`, `{"screens": [null]}`
+    # and `{"screens": 5}` all reached the loop below and raised AttributeError or
+    # TypeError out of load_config -- which lifespan does not catch, so uvicorn
+    # died and Restart=always looped it. This file outlives update.sh and the
+    # nightly restart, so that crash loop was permanent on a box with no
+    # keyboard. `_dedupe` guards the *names* in here; this guards the shape.
+    rows = data.get("screens")
+    if not isinstance(rows, list):
+        if rows is not None:
+            log.error("settings.json: `screens` is %s, not a list — ignoring the "
+                      "saved overrides", type(rows).__name__)
+        rows = []
+    for screen, over in zip(cfg["screens"], rows):
+        if not isinstance(over, dict):
+            log.error("settings.json: a screen entry is %s, not an object — "
+                      "ignoring it", type(over).__name__)
+            continue
         for f in SCREEN_FIELDS:
             # Truthy, not `is not None`: blanking a field in the UI must fall
             # back to what xrandr detected rather than store an empty position
