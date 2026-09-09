@@ -136,12 +136,19 @@ def kiosk(tmp_path_factory):
             # The browser comes up on a background thread now, so wait for it
             # rather than racing it: /v1/status carries `error` until it lands,
             # and reports why if it never does.
-            for _ in range(60):
-                if c.get("/v1/status").json()["browser"] == "ok":
-                    break
+            #
+            # 120s, not 30. Chromium under a bare Xvfb with no window manager,
+            # no dbus and no GPU is slow and *variable* -- on a shared CI runner
+            # it has taken anywhere from 15s to over 30s to open its debug port.
+            # At 30s this failed while printing `'browser': 'ok'` in the very
+            # status call it made to build the message, which is the signature of
+            # a timeout rather than a broken browser. Waiting longer costs
+            # nothing on a good run: the loop breaks as soon as it is up.
+            deadline = time.monotonic() + 120
+            while (last := c.get("/v1/status").json())["browser"] != "ok":
+                if time.monotonic() > deadline:
+                    pytest.fail(f"browser never came up in 120s: {last}")
                 time.sleep(0.5)
-            else:
-                pytest.fail(f"browser never came up: {c.get('/v1/status').json()}")
             yield c
         server.should_exit = True
         thread.join(30)

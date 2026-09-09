@@ -100,8 +100,12 @@ def load_targets() -> dict:
         raise RuntimeError(f"{p}: no targets file - copy targets.example.toml there")
     # Tokens. Nothing enforces this on the file, so say so rather than leave a
     # credential readable by every account on a shared controller box.
+    # `roomctl:` prefixed like every other diagnostic this package writes. The
+    # CLI's contract is that stderr starts with it -- scripts branch on that,
+    # and tests/test_roomctl.py pins it -- so an unprefixed line here broke the
+    # contract for every caller on a platform where the check runs at all.
     if os.name != "nt" and (p.stat().st_mode & 0o077):
-        print(f"warning: {p} is readable by other users; chmod 600 it "
+        print(f"roomctl: warning: {p} is readable by other users; chmod 600 it "
               f"(it holds bearer tokens)", file=sys.stderr)
     # utf-8-sig: Windows editors and PowerShell write a BOM that tomllib chokes on.
     return tomllib.loads(p.read_text(encoding="utf-8-sig"))
