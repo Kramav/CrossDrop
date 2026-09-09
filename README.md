@@ -125,10 +125,18 @@ dock, the capture and the screen picker are simply absent, with one line saying
 why, rather than present and returning 501. An agent too old to report
 `supports` gets the old behaviour: everything shown.
 
-**Settings** also holds the screens editor — each monitor's name, home URL,
-position and size, applied live with no restart, so moving a window between
-monitors happens while you watch. Leave position or size blank and the agent
-falls back to what `xrandr` detects; **Re-detect layout** is that, for both.
+**Settings** also holds the screens editor — each monitor's name and home URL,
+applied live with no restart. Above the rows is a scale map of the monitors
+drawn where `xrandr` reports them, numbered to match the rows: screens are named
+by index, left to right, and the map is what tells you which index is the panel
+on the left.
+
+The layout itself is **not** editable, by design. Position and size are read
+from `xrandr` at every load and never saved, so they cannot go stale — a layout
+saved against one set of monitors used to win over the set actually attached, and
+put both kiosk windows on one screen. Rearranging the monitors is the session's
+job (`xrandr`, or the desktop's own display settings); pinning one by hand is
+`[[screen]]` in `config.toml`.
 
 Edits persist to `~/.local/share/crossdrop/settings.json`, which the agent
 owns and `update.sh` never touches. They do **not** go into
@@ -463,7 +471,7 @@ before it keeps working unchanged.
 | `DELETE /v1/extensions/{id}` | — | as `GET` |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
-| `PUT /v1/settings` | `{"screens": [{"name", "home_url", "position"?, "size"?}]}` | saves, then moves the windows live |
+| `PUT /v1/settings` | `{"screens": [{"name", "home_url"}]}` | saves, re-reads the layout from `xrandr`, then moves the windows live |
 | `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"`, `"error"` |
 
 Three things to know if the caller is a program rather than a person:

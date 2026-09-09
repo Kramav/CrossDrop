@@ -205,9 +205,12 @@ roomctl status | jq -r '.supports | join(" ")'
 not take — check you edited the file `CROSSDROP_CONFIG` points at
 (`systemctl --user show crossdrop-agent -p Environment`).
 
-Screen names, home URLs, positions and sizes are **not** here — those are the
-web UI's Settings panel, they apply live, and they survive updates
-(`~/.local/share/crossdrop/settings.json`).
+Screen names and home URLs are **not** here — those are the web UI's Settings
+panel, they apply live, and they survive updates
+(`~/.local/share/crossdrop/settings.json`). Positions and sizes are not stored
+anywhere: the agent reads them from `xrandr` every time it loads. `[[screen]]`
+blocks in this file can still pin them, and a stale pin outranks the monitors
+you actually have — check for one here before believing a layout is wrong.
 
 ---
 
