@@ -153,6 +153,18 @@
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem .6rem;
           margin-bottom: .8rem; }
   .grid .wide { grid-column: 1 / -1; }
+  /* The monitors, to scale, in the arrangement xrandr reports. Read-only: the
+     layout belongs to the session, not to us. Its job is to say *which panel is
+     which row* on a box whose two screens you cannot tell apart from here. */
+  #screenmap { position: relative; width: 100%; margin: .2rem 0 .8rem;
+               border: 1px dashed var(--line); border-radius: .4rem; }
+  #screenmap:empty { display: none; }
+  #screenmap b { position: absolute; display: flex; flex-direction: column;
+                 align-items: center; justify-content: center; gap: .15rem;
+                 border: 1px solid var(--line); border-radius: .3rem;
+                 background: #ffffff08; font-weight: 600; font-size: .8rem;
+                 text-align: center; overflow: hidden; padding: .2rem; }
+  #screenmap b small { font-weight: 400; opacity: .6; font-size: .7rem; }
   .note { font-size: .8rem; opacity: .7; margin: .4rem 0 0; }
   #extlist .row { justify-content: space-between; margin-bottom: .3rem; }
   #extlist .row span { font-size: .85rem; }
@@ -266,11 +278,11 @@
   <p class="note">Kept in this browser only, never sent anywhere but the agent.</p>
 
   <h2>Screens</h2>
+  <div id="screenmap"></div>
   <div id="screencfg"></div>
   <div class="row">
-    <button type="button" id="savecfg">Save screens</button>
-    <button type="button" id="redetect"
-            title="Clear position and size so xrandr wins again">Re-detect layout</button>
+    <button type="button" id="savecfg"
+            title="Also re-reads the monitor layout from xrandr">Save screens</button>
   </div>
   <p class="note" id="cfgnote"></p>
 
@@ -918,18 +930,62 @@ function field(label, value, placeholder) {
   return wrap;
 }
 
+// The monitors drawn where xrandr says they are, each numbered to match its row
+// below. Screens are named by *index*, left to right, so on a box with two
+// panels there is otherwise nothing to tell you whether row 1 is the one on the
+// left — which is exactly how a config ends up with the names swapped.
+//
+// Read-only, deliberately: rearranging monitors is the session's job (xrandr,
+// or the desktop's own display settings), and a drag here that wrote a layout
+// back would be a second source of truth for the thing we just made single.
+function drawMap(screens) {
+  const box = $("#screenmap");
+  const num = (v, sep) => (v || "").split(sep).map(Number);
+  const rects = screens.map(s => {
+    const [x, y] = num(s.position, ",");
+    const [w, h] = num(s.size, "x");
+    return { x, y, w, h };
+  });
+  // One screen has nothing to arrange, and a session xrandr could not read has
+  // no geometry to draw. Both leave the map out rather than draw a lie.
+  if (rects.length < 2 || rects.some(r => [r.x, r.y, r.w, r.h].some(n => !isFinite(n))
+                                          || r.w <= 0 || r.h <= 0)) {
+    box.replaceChildren();
+    return;
+  }
+  const W = Math.max(...rects.map(r => r.x + r.w));
+  const H = Math.max(...rects.map(r => r.y + r.h));
+  box.style.aspectRatio = `${W} / ${H}`;
+  box.replaceChildren(...rects.map((r, i) => {
+    const el = document.createElement("b");
+    Object.assign(el.style, {
+      left: `${r.x / W * 100}%`, top: `${r.y / H * 100}%`,
+      width: `${r.w / W * 100}%`, height: `${r.h / H * 100}%`,
+    });
+    const size = document.createElement("small");
+    size.textContent = `${r.w}×${r.h}`;
+    el.append(`${i + 1} · ${screens[i].name}`, size);
+    return el;
+  }));
+}
+
 function drawSettings(cfg) {
-  $("#screencfg").replaceChildren(...cfg.screens.map(s => {
+  drawMap(cfg.screens);
+  $("#screencfg").replaceChildren(...cfg.screens.map((s, i) => {
     const g = document.createElement("div");
     g.className = "grid";
-    const name = field("Name", s.name);
+    // Numbered to match the map: the number is the only thing tying a row to a
+    // physical panel.
+    const name = field(`${i + 1} · Name`, s.name);
     const home = field("Home URL", s.home_url);
     home.className = "wide";
-    // Placeholder, not value: blank means "use what xrandr detected", so the
-    // detected geometry has to show as the fallback rather than as an edit.
-    const pos = field("Position", s.position, s.detected_position || "e.g. 1366,0");
-    const size = field("Size", s.size, s.detected_size || "e.g. 2560x1440");
-    g.append(name, home, pos, size);
+    // Geometry is read-only: the agent takes it from xrandr at every load, so
+    // there is nothing here to edit and nothing that can go stale.
+    const geom = document.createElement("p");
+    geom.className = "note wide";
+    geom.textContent = s.position ? `at ${s.position}, ${s.size || "size unknown"}`
+                                  : "placed by the compositor";
+    g.append(name, home, geom);
     return g;
   }));
   $("#cfgnote").textContent = cfg.note || "Saved on the Pi at " + cfg.path;
@@ -937,8 +993,8 @@ function drawSettings(cfg) {
 
 function readSettings() {
   return [...$("#screencfg").children].map(g => {
-    const [name, home, position, size] = [...g.querySelectorAll("input")].map(i => i.value);
-    return { name, home_url: home, position, size };
+    const [name, home] = [...g.querySelectorAll("input")].map(i => i.value);
+    return { name, home_url: home };
   });
 }
 
@@ -1032,11 +1088,9 @@ $("#savetok").onclick = () => {
   refresh();
 };
 $("#tok").onkeydown = e => { if (e.key === "Enter") $("#savetok").click(); };
+// Also the re-sync: the agent re-reads xrandr on every save, so a monitor
+// swapped since it started is picked up here without a restart.
 $("#savecfg").onclick = () => saveSettings(readSettings());
-// Blank position and size and the agent falls back to xrandr — that is the
-// reset, so re-detect is just a save with those two fields empty.
-$("#redetect").onclick = () =>
-  saveSettings(readSettings().map(s => ({ ...s, position: "", size: "" })));
 $("#closesetup").onclick = () => $("#setup").close();
 
 // The scroll step is a per-controller preference, not something the agent owns.

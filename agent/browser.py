@@ -192,6 +192,18 @@ def launch(cfg: dict) -> subprocess.Popen:
     wait_ready(kind, port)
 
     _targets.clear()
+    if kind != "firefox" and len(scr) > 1:
+        # Window 1 is the only page in existence right now, which makes this the
+        # one moment its identity is certain. Once open_window has run there is
+        # nothing left to tell the windows apart but where they sit: `/json` is
+        # ordered most-recently-used, not by creation, so the first entry is
+        # whatever was focused last. Trusting it crossed the screens -- screen 1
+        # drove screen 2's monitor and each idle page named the other panel.
+        with contextlib.suppress(Exception):    # no /json on a browser that died
+            first = _pages(port)
+            if first:
+                with _targets_lock:
+                    _targets[scr[0]["name"]] = first[0]["id"]
     if len(scr) > 1 or scr[0]["position"]:
         # Window 1 already exists (--kiosk put it wherever the compositor
         # liked), so it is *moved*. Without this its `position` does nothing and
@@ -1100,7 +1112,12 @@ _NOT_OURS = ("devtools://", "chrome-extension://")
 
 
 def _pages(port: int) -> list[dict]:
-    """The kiosk's own content targets, in the browser's own order."""
+    """The kiosk's own content targets.
+
+    In the browser's order, which is *most recently used* -- not the order the
+    windows were opened in. Nothing here may treat the index as an identity; see
+    _identify.
+    """
     return [t for t in _get(port, "/json")
             if t.get("type") == "page"
             and not str(t.get("url") or "").startswith(_NOT_OURS)]
@@ -1109,10 +1126,10 @@ def _pages(port: int) -> list[dict]:
 def _cdp_page(cfg: dict, screen: str | None = None, exact: bool = False) -> dict:
     """The page target belonging to `screen`.
 
-    `exact` refuses a target that was matched by position rather than by list
-    index. Only /v1/input passes it: showing the wrong monitor a web page is a
-    visible mistake somebody corrects, and typing into the wrong monitor is a
-    password in a box nobody meant to open.
+    `exact` refuses a target whose match was not certain -- see _identify. Only
+    /v1/input passes it: showing the wrong monitor a web page is a visible
+    mistake somebody corrects, and typing into the wrong monitor is a password
+    in a box nobody meant to open.
     """
     # Read before the screen list, so a swap that happens while we are resolving
     # is always *newer* than what we captured -- never the other way round.
@@ -1124,33 +1141,24 @@ def _cdp_page(cfg: dict, screen: str | None = None, exact: bool = False) -> dict
     scr = screens(cfg)
     name = screen or scr[0]["name"]
     # The doubt is about the *mapping*, so clearing it needs the mapping to be
-    # checkable again -- which it is exactly when there are as many windows as
-    # screens, because then list order is the identity.
+    # checkable again -- which it is once there are as many windows as screens,
+    # because the doubt was raised by there being fewer.
     #
-    # Checking only the count was not enough, and was worse than latching: the
-    # cached id was written by _identify while the counts disagreed, and
-    # "it is still one of the open windows" says nothing about *which screen*
-    # it belongs to. A closed-and-reopened window left two screens resolving to
-    # the same target with the flag cleared, so /v1/input typed into the wrong
-    # monitor -- the exact outcome _guessed exists to prevent.
+    # Never latch: the cached id was written by _identify while the counts
+    # disagreed, and "it is still one of the open windows" says nothing about
+    # *which screen* it belongs to. A closed-and-reopened window left two screens
+    # resolving to the same target, so /v1/input typed into the wrong monitor --
+    # the exact outcome _guessed exists to prevent. So drop it and re-identify;
+    # _identify clears the flag itself when the bounds make the answer certain.
     #
-    # So compare the cached id against the answer index order would give. Agree
-    # -> the guess happened to be right and the doubt is over. Disagree -> drop
-    # the cache and re-identify, which is what should have happened anyway.
+    # This used to re-check against `pages[i]`, which is the list-order identity
+    # that started the whole bug. It cannot be the arbiter of a doubt it causes.
     with _targets_lock:
         if _generation != gen:
             tid = None                  # the screen list moved; trust nothing
         else:
             if len(pages) == len(scr) and name in _guessed:
-                want = [s["name"] for s in scr]
-                i = want.index(name) if name in want else 0
-                if _targets.get(name) == pages[i]["id"]:
-                    _guessed.discard(name)
-                else:
-                    log.warning("screen %r: the window it was matched to is not "
-                                "the one list order gives now; re-identifying",
-                                name)
-                    _targets.pop(name, None)
+                _targets.pop(name, None)
             tid = _targets.get(name)
     for p in pages:
         if p["id"] == tid:
@@ -1175,9 +1183,10 @@ def _refuse_guess(name: str, exact: bool) -> None:
     if exact and doubted:
         raise RuntimeError(
             f"screen {name!r} was matched to a window by position, not by "
-            f"identity, because the browser has a different number of windows "
-            f"than there are screens. Refusing to send input to a window that "
-            f"might be the wrong one -- restart the agent to reopen its windows.")
+            f"identity: the browser has a different number of windows than "
+            f"there are screens, or another screen has as good a claim on that "
+            f"window. Refusing to send input to a window that might be the "
+            f"wrong one -- restart the agent to reopen its windows.")
 
 
 def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
@@ -1186,10 +1195,12 @@ def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
     Reached on the first call after a launch, after a window is closed and
     reopened, and whenever we are driving a browser we did not start.
 
-    List order is the order the windows were opened in, so it is the answer
-    exactly while there are as many windows as screens. When there are not,
-    position means nothing, and guessing sends the next click -- or the next
-    typed password -- to whichever monitor sorted into that slot.
+    Where the windows actually sit, not what order they are listed in. `/json`
+    is ordered most-recently-used, so `pages[i]` was only ever right until
+    something took focus -- after which screen 1 resolved to screen 2's window,
+    both idle pages named the wrong monitor, and /v1/input trusted it because
+    list order counted as identity. Bounds are the one thing here that is
+    genuinely about *which monitor*.
     """
     names = [s["name"] for s in scr]
     i = names.index(name) if name in names else 0
@@ -1197,19 +1208,58 @@ def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
         _guessed.discard(name)
     if len(scr) == 1:
         return pages[0]                     # nothing to get wrong
+
+    origins = [(s.get("position") or "").strip() for s in scr]
+    if origins[i]:
+        page, alone = _by_bounds(cfg, i, origins, pages)
+        # Two independent doubts, and bounds only answer the first. `alone` says
+        # no other screen has a claim on this window; the window *count* says
+        # whether there is a window open that is not one of ours at all -- an
+        # OAuth popup, an extension page -- which no amount of geometry rules
+        # out. Both have to be clear before /v1/input may type into it.
+        if page is not None and alone and len(pages) == len(scr):
+            return page
+        if page is not None:
+            # Remembered, not just logged: _targets caches this answer, so by the
+            # time anything acts on it the warning is far back in the journal.
+            with _targets_lock:
+                _guessed.add(name)
+            log.warning("screen %r: matched window %s by position, not by "
+                        "identity (%d windows, %d screens). Good enough to show "
+                        "a page on; /v1/input will refuse it.",
+                        name, page["id"], len(pages), len(scr))
+            return page
+
+    # No position to match on: a session xrandr could not read, so every screen
+    # is at "". List order is all that is left and it is worth something only
+    # while the counts line up -- one window per screen, nothing reopened.
     if len(pages) == len(scr):
         return pages[i]
+    raise RuntimeError(
+        f"{len(pages)} windows for {len(scr)} screens, and {name!r} has no "
+        f"position to identify it by; restart the agent to reopen its windows")
 
-    # Ask the browser where its windows actually are, and match that against the
-    # screen's own coordinates -- the only thing here that is genuinely about
-    # *which monitor*, rather than about the order of a list.
-    want = (scr[i].get("position") or "").strip()
-    if not want:
-        raise RuntimeError(
-            f"{len(pages)} windows for {len(scr)} screens, and {name!r} has no "
-            f"position to identify it by; restart the agent to reopen its windows")
-    x, y = _pair(want, ",", "position")
+
+def _by_bounds(cfg: dict, i: int, origins: list[str], pages: list[dict]
+               ) -> tuple[dict | None, bool]:
+    """The window sitting on screen `i`'s monitor, and whether it is unambiguous.
+
+    Unambiguous means no other screen has an equal or better claim on that
+    window. That is a stronger identity than list order ever was -- it survives
+    focus changes, which list order does not. It is still only half the question:
+    see the caller for the other half.
+
+    Ambiguity is real when two monitors report the same origin (a mirrored
+    session) or a window has not been moved onto its screen yet.
+    """
+    x, y = _pair(origins[i], ",", "position")
+    others = [_pair(o, ",", "position")
+              for j, o in enumerate(origins) if o and j != i]
     port = cfg["browser"]["debug_port"]
+
+    def gap(b: dict, at: tuple[int, int]) -> int:
+        return abs(b["left"] - at[0]) + abs(b["top"] - at[1])
+
     placed = []
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
         for p in pages:
@@ -1217,24 +1267,21 @@ def _identify(cfg: dict, name: str, scr: list[dict], pages: list[dict]) -> dict:
                 b = call("Browser.getWindowForTarget",
                          {"targetId": p["id"]}).get("bounds") or {}
                 if "left" in b and "top" in b:
-                    placed.append((abs(b["left"] - x) + abs(b["top"] - y), p))
-    if not placed:
-        raise RuntimeError(
-            f"{len(pages)} windows for {len(scr)} screens and none would say "
-            f"where it is; cannot tell which one is {name!r}")
+                    placed.append((gap(b, (x, y)),
+                                   min((gap(b, o) for o in others),
+                                       default=float("inf")), p))
+    if len(placed) != len(pages):
+        # Some window would not say where it is, so the spatial picture has a
+        # hole in it and the nearest match may be nearest only because the real
+        # answer is one of the windows that stayed silent. Let the caller fall
+        # back to list order rather than answer from half the evidence.
+        return None, False
     # Nearest, not exact: a compositor is entitled to adjust a window by a few
     # pixels, and the nearest window to where this screen is supposed to be
-    # beats the nth entry of a list that no longer lines up.
+    # beats the nth entry of a list that never meant what it looked like.
     placed.sort(key=lambda t: t[0])
-    off, page = placed[0]
-    # Remembered, not just logged: _targets caches this answer, so by the time
-    # anything acts on it the warning is thousands of journal lines back.
-    with _targets_lock:
-        _guessed.add(name)
-    log.warning("screen %r: %d windows for %d screens, matched %s by position "
-                "(%d px from %s). Good enough to show a page on; /v1/input will "
-                "refuse it.", name, len(pages), len(scr), page["id"], off, want)
-    return page
+    mine, rival, page = placed[0]
+    return page, mine < rival
 
 
 def _bidi_url(port: int) -> str:

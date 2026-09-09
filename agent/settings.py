@@ -14,7 +14,16 @@ from pathlib import Path
 # What the web UI may change. The token, `profile_dir`, `upload.dir`,
 # `debug_port` and `browser.kind` stay file-only: install-time facts wired to
 # the tmpfs layout, needing a browser relaunch rather than a config reload.
-SCREEN_FIELDS = ("name", "home_url", "position", "size")
+#
+# `position` and `size` are deliberately absent: they are facts display.detect()
+# re-reads at every boot, and persisting a derived fact is what makes it go
+# stale. A layout saved against one set of monitors used to win over the set
+# actually attached -- swap a screen, or save while one is unplugged, and both
+# kiosk windows landed on the same output with no way to tell why. xrandr is the
+# only source of truth for geometry now; config.toml's [[screen]] blocks remain
+# the way to pin one by hand, because that file is edited by somebody who had a
+# keyboard.
+SCREEN_FIELDS = ("name", "home_url")
 
 # The deployed name, not the repo name -- PLAN.md §11 "Naming". Renaming an
 # installation is a migration on hardware nobody can reach with a keyboard.
