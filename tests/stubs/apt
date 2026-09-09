@@ -1,0 +1,3 @@
+#!/bin/sh
+printf 'apt\t%s\n' "$*" >> "$STUB_LOG"
+exit 0

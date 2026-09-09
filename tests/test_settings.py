@@ -25,7 +25,7 @@ HOME = "http://pi:8080/home"
 def store(tmp_path, monkeypatch):
     """Point the agent at a throwaway settings.json."""
     p = tmp_path / "settings.json"
-    monkeypatch.setenv("ROOM_SETTINGS", str(p))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(p))
     return p
 
 
@@ -39,7 +39,7 @@ def client(tmp_path, store, monkeypatch):
         '[[screen]]\nname = "right"\nposition = "800,0"\nsize = "800x600"\n',
         encoding="utf-8",
     )
-    monkeypatch.setenv("ROOM_CONFIG", str(cfg))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
     # No browser behind this: place() is expected to fail and land in `note`.
     with TestClient(app) as c:
         yield c
@@ -207,7 +207,7 @@ def test_an_unplugged_monitor_does_not_delete_its_saved_screen(tmp_path, store,
     cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
                    '[browser]\nkind = "chromium"\nautolaunch = false\n'
                    '[[screen]]\nname = "left"\n', encoding="utf-8")
-    monkeypatch.setenv("ROOM_CONFIG", str(cfg))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
     with TestClient(app) as c:
         r = c.put("/v1/settings", headers=AUTH,
                   json={"screens": [{"name": "Samsung", "home_url": HOME}]})
@@ -257,3 +257,181 @@ def test_pair_still_backs_the_validation():
     silently accepts garbage instead of 422-ing."""
     with pytest.raises(RuntimeError):
         browser._pair("1366", ",", "position")
+
+
+# --- the boot brick ---------------------------------------------------------
+# settings.json is written by the agent and survives update.sh, the nightly
+# restart and a reboot. Anything in it that stops load_config is therefore
+# permanent, on a box with no keyboard. Two halves: the save is refused, and if
+# one ever gets in anyway, the boot survives it.
+
+@pytest.fixture
+def one_screen(tmp_path, store, monkeypatch):
+    """A live config with a single screen, the state a Pi is in while the second
+    monitor is unplugged. Explicit, so it does not depend on what this dev box
+    has attached."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
+                   '[browser]\nkind = "chromium"\nautolaunch = false\n'
+                   '[[screen]]\nname = "left"\nposition = "0,0"\n',
+                   encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
+    return cfg
+
+
+def test_a_name_already_taken_by_an_unplugged_screen_is_refused(one_screen, store):
+    """The reachable brick, in the order it actually happens.
+
+    Two monitors, saved as `left` and `right`. Unplug the second: detect() finds
+    one, so the editor shows one row and merge_screens preserves `right` as an
+    invisible tail. Rename the visible row to `right` -- both rows are now called
+    `right`, which put_settings could not see because it only validated what the
+    editor submitted. Plug the monitor back in and the two rows finally apply
+    together, and every boot from then on raised.
+    """
+    settings.save({"screens": [
+        {"name": "left", "home_url": HOME, "position": "0,0", "size": ""},
+        {"name": "right", "home_url": HOME, "position": "1366,0", "size": ""}]})
+    with TestClient(app) as c:
+        r = c.put("/v1/settings", headers=AUTH, json={"screens": [
+            {"name": "right", "home_url": HOME, "position": "0,0", "size": ""}]})
+    assert r.status_code == 422, r.text
+    assert "cannot see" in r.json()["detail"], r.text
+    # And the collision never reached disk, so the next boot is unaffected.
+    saved = [s["name"] for s in json.loads(store.read_text())["screens"]]
+    assert saved == ["left", "right"], saved
+
+
+def test_a_duplicate_that_got_in_anyway_does_not_stop_the_boot(tmp_path,
+                                                              monkeypatch):
+    """Defence in depth for the above. A saved name must never be able to
+    prevent a boot: there is no keyboard, and the file outlives every restart.
+    Renaming the loser is recoverable -- the screen picker shows `right-2`,
+    which is odd enough to notice and fixable from the same UI."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('token = "t"\nhome_url = "https://e.test/"\n'
+                        '[[screen]]\nname = "left"\nposition = "0,0"\n'
+                        '[[screen]]\nname = "right"\nposition = "1366,0"\n',
+                        encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg_path))
+    settings.save({"screens": [
+        {"name": "right", "home_url": "https://e.test/", "position": "0,0"},
+        {"name": "right", "home_url": "https://e.test/", "position": "1366,0"}]})
+    cfg = appmod.load_config()                  # used to raise RuntimeError
+    assert [s["name"] for s in cfg["screens"]] == ["right", "right-2"]
+
+
+def test_a_duplicate_written_by_hand_is_still_refused(tmp_path, monkeypatch):
+    """The opposite answer, deliberately. config.toml is edited by somebody who
+    had a keyboard when they wrote it, so a typo there should be named rather
+    than silently renamed."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('token = "t"\nhome_url = "https://e.test/"\n'
+                        '[[screen]]\nname = "same"\n[[screen]]\nname = "same"\n',
+                        encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg_path))
+    with pytest.raises(RuntimeError, match="duplicate"):
+        appmod.load_config()
+
+
+def test_a_monitor_appearing_mid_save_is_not_a_500(tmp_path, store, monkeypatch):
+    """`before` was read from the old config and indexed with the new one's
+    enumeration, so a monitor plugged in between the length check and the reload
+    raised IndexError -- a 500 out of a route that had already written the file,
+    leaving the caller unable to tell whether the save landed.
+
+    No [[screen]] blocks, so the screen list comes from display.detect() and can
+    genuinely change length between the two load_config calls in one request."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
+                   '[browser]\nkind = "chromium"\nautolaunch = false\n',
+                   encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
+    calls = []
+
+    def detect():
+        calls.append(1)
+        # Call 1 is the lifespan's load_config; call 2 is the reload inside the
+        # request, which is where the second monitor has to appear.
+        return [{"output": "HDMI-1", "position": "0,0", "size": "800x600"}] + (
+            [{"output": "HDMI-2", "position": "800,0", "size": "800x600"}]
+            if len(calls) > 1 else [])
+
+    monkeypatch.setattr(appmod.display, "detect", detect)
+    with TestClient(app) as c:
+        r = c.put("/v1/settings", headers=AUTH, json={"screens": [
+            {"name": "only", "home_url": HOME, "position": "0,0",
+             "size": "800x600"}]})
+    assert r.status_code == 200, r.text
+
+
+def test_a_generated_name_cannot_collide_with_a_written_one(tmp_path, monkeypatch):
+    """The duplicate check ran before the default names were filled in, so it
+    only saw what was written. An unnamed first block beside `name = "main"`
+    produced two screens both called `main` -- no error, and the second monitor
+    unaddressable by any name, with browser._targets mapping both to one CDP
+    target and /v1/screens listing two identical rows."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('token = "t"\nhome_url = "https://e.test/"\n'
+                        '[[screen]]\nposition = "0,0"\n'
+                        '[[screen]]\nname = "main"\nposition = "1366,0"\n',
+                        encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg_path))
+    with pytest.raises(RuntimeError, match="duplicate"):
+        appmod.load_config()
+
+
+def test_a_generated_name_collides_with_screen2_too(tmp_path, monkeypatch):
+    """The other direction: `screen2` is the generated name for the second
+    block, so writing it on the first one collides the same way."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('token = "t"\nhome_url = "https://e.test/"\n'
+                        '[[screen]]\nname = "screen2"\nposition = "0,0"\n'
+                        '[[screen]]\nposition = "1366,0"\n', encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg_path))
+    with pytest.raises(RuntimeError, match="duplicate"):
+        appmod.load_config()
+
+
+@pytest.mark.parametrize("body", [
+    '{"screens": {"a": 1}}',
+    '{"screens": ["x"]}',
+    '{"screens": [null]}',
+    '{"screens": 5}',
+    '{"screens": [{"name": "ok"}, 7]}',
+])
+def test_a_wrong_shaped_settings_file_does_not_stop_the_boot(tmp_path, monkeypatch,
+                                                             store, body):
+    """load() only ever proved the top level is a dict, so every one of these
+    reached apply()'s loop and raised AttributeError or TypeError out of
+    load_config. lifespan does not catch that, so uvicorn died and
+    Restart=always looped it -- and this file outlives update.sh and the nightly
+    restart, so the crash loop was permanent on a box with no keyboard.
+
+    Exactly the property _dedupe's docstring argues must never exist, guarded
+    for names and unguarded for shape. The overrides are what you lose."""
+    store.write_text(body, encoding="utf-8")
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('token = "t"\nhome_url = "https://e.test/"\n'
+                        '[[screen]]\nname = "left"\n', encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg_path))
+    cfg = appmod.load_config()          # used to raise, and take uvicorn with it
+    # One screen, usably named. A *valid* row in the list is still allowed to
+    # override, so the name may be the saved one -- what matters is that a bad
+    # row costs the overrides rather than the boot.
+    assert len(cfg["screens"]) == 1
+    assert isinstance(cfg["screens"][0]["name"], str) and cfg["screens"][0]["name"]
+
+
+def test_a_wrong_shaped_settings_file_does_not_break_a_save(store, one_screen):
+    """merge_screens indexes the saved list too, so the same shapes came back
+    out of PUT /v1/settings as a 500 -- and a non-object row would have been
+    written straight back for the next boot to choke on."""
+    store.write_text('{"screens": ["not a screen", {"name": "keep"}]}',
+                     encoding="utf-8")
+    with TestClient(app) as c:
+        r = c.put("/v1/settings", headers=AUTH, json={"screens": [
+            {"name": "left", "home_url": HOME, "position": "", "size": ""}]})
+    assert r.status_code == 200, r.text
+    saved = json.loads(store.read_text())["screens"]
+    assert all(isinstance(row, dict) for row in saved), saved

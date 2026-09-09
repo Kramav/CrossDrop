@@ -35,7 +35,7 @@
 ```
  CONTROLLERS (clients)                  PI (server + display)
  ┌──────────────────────┐              ┌─────────────────────────────────┐
- │ Win10 desktop        │              │  display-agent (FastAPI)         │
+ │ Win10 desktop        │              │  crossdrop-agent (FastAPI)         │
  │  web app-window ─────┼──HTTP /v1──▶ │   GET /            (web UI)      │
  │  roomctl CLI ────────┼──HTTP /v1──▶ │   POST /v1/navigate  ──CDP──▶    │
  ├──────────────────────┤   (Tailscale)│   POST /v1/upload -> tmpfs      │  Chromium
@@ -102,17 +102,17 @@ CrossDrop/
 │   │   ├── setup.sh                    # one re-runnable installer, Pi and plain Debian
 │   │   ├── update.sh                   # release-gated pull + health-check + rollback
 │   │   ├── profile-snapshot.sh         # profile minus caches, so auth survives a reboot
-│   │   ├── display-agent.service
-│   │   ├── room-display-update.{service,timer}    # ~30 min, ships disabled
-│   │   ├── room-display-snapshot.{service,timer}  # hourly, ships disabled
-│   │   ├── room-display-restart.{service,timer}   # 04:00 ±15m, ships ENABLED
+│   │   ├── crossdrop-agent.service
+│   │   ├── crossdrop-update.{service,timer}    # ~30 min, ships disabled
+│   │   ├── crossdrop-snapshot.{service,timer}  # hourly, ships disabled
+│   │   ├── crossdrop-restart.{service,timer}   # 04:00 ±15m, ships ENABLED
 │   │   ├── journald-volatile.conf
 │   │   ├── pi-setup.md
 │   │   └── README.md
 │   ├── windows/              # tray app: roomtray.ps1, selfcheck.ps1, README
 │   └── linux.md
 ├── .github/workflows/ci.yml  # lint + tests on push/PR to main
-├── tests/                    # pytest; no browser needed unless ROOM_SMOKE=1
+├── tests/                    # pytest; no browser needed unless CROSSDROP_SMOKE=1
 └── README.md                 # documents the frozen /v1 contract
 ```
 
@@ -165,7 +165,7 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 **Phase 5 — Pi provisioning (persistent profile first).**
 - Enable **desktop auto-login** (`raspi-config` → System Options → Boot / Auto Login → **Desktop Autologin**) so the graphical session + browser come up after reboot with no human present.
-- `display-agent.service` runs **as the login user**, tied to `graphical-session.target`; `kiosk-launch.sh`; on-SD profile to isolate variables.
+- `crossdrop-agent.service` runs **as the login user**, tied to `graphical-session.target`; `kiosk-launch.sh`; on-SD profile to isolate variables.
 - *Accept:* reboot Pi → desktop auto-logs in → kiosk + agent up → control works with nobody present.
 
 **Phase 6 — Pi RAM profile + auth persistence.** tmpfs profile; restore-on-boot, snapshot-on-stop (± hourly timer) of profile **minus** `Cache/`,`Code Cache/`,`GPUCache/` (whole-minus-cache, so Local Storage / IndexedDB auth survives too). Add **log2ram** for `/var/log`. *Accept:* log into a school page → reboot → still authed (or graceful re-auth); idle SD writes ≈ 0.
@@ -185,7 +185,7 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 **Phase 8 — Auto-update from GitHub (release-gated CD).** See §8 below for the full design. *Accept:* tag a deliberately broken commit → Pi's health-check fails → it stays on the previous good version (logged); tag a good commit → Pi updates within one timer interval and `/v1/status.version` shows the new tag.
 
-**v1.1.0 — screens editor in the web UI.** Built. Edit a screen's `position`, `size`, `home_url` and name from the drop-zone page instead of `ssh` + `nano` + restart, applied **live** via `browser.place()`. Persists to `~/.local/share/room-display/settings.json` — **JSON, not the planned `screens.toml`**, because `tomllib` only reads and a TOML writer is a new dependency for a file no human edits. `/etc/room-display/config.toml` stays un-writable by the agent as specified, and `token`, `profile_dir`, `upload.dir`, `debug_port` and `browser.kind` stay file-only. Blank `position`/`size` falls back to `display.detect()`, which is the re-detect path the UI exposes as a button. Same work put the token in a real field on the page instead of a `prompt()`. See `agent/settings.py`, `tests/test_settings.py`. *Accept (still unrun on hardware):* move a window between monitors from the UI, with no restart, and have it survive one.
+**v1.1.0 — screens editor in the web UI.** Built. Edit a screen's `position`, `size`, `home_url` and name from the drop-zone page instead of `ssh` + `nano` + restart, applied **live** via `browser.place()`. Persists to `~/.local/share/crossdrop/settings.json` — **JSON, not the planned `screens.toml`**, because `tomllib` only reads and a TOML writer is a new dependency for a file no human edits. `/etc/crossdrop/config.toml` stays un-writable by the agent as specified, and `token`, `profile_dir`, `upload.dir`, `debug_port` and `browser.kind` stay file-only. Blank `position`/`size` falls back to `display.detect()`, which is the re-detect path the UI exposes as a button. Same work put the token in a real field on the page instead of a `prompt()`. See `agent/settings.py`, `tests/test_settings.py`. *Accept (still unrun on hardware):* move a window between monitors from the UI, with no restart, and have it survive one.
 
 **Deliberately still out of scope after v1.1.0.** Display sleep timeouts (`idle_off_minutes`, `content_off_minutes`) and upload caps (`max_mb`, `keep`) are runtime-safe and would drop into the same file in ~10 lines each; they were considered and left file-only. Add them when editing a config file over `ssh` is actually what stands in the way.
 
@@ -195,7 +195,7 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 **v1.1.7 — the agent survives its own browser.** Done. Three failures found by the 2026-09-06 architecture review, all of them curable only by walking into the room:
 
-- **A failed browser launch took the API down with it.** `browser.launch()` ran inline in `lifespan`, so no binary, a debug port that never came up, or an X session slower than the agent raised *before* uvicorn bound the port. systemd restarted us, the next attempt failed identically, and `/v1/status` — the only thing that could have named the cause — was down for every attempt. Now it launches on the existing startup thread, retries with backoff (5s → 5 min, `ROOM_LAUNCH_RETRY`), and reports the reason in a new `error` field on `/v1/status`. `browser` keeps its two original values, so a client reading `== "ok"` is unaffected. The retry is not a nicety: it is what replaces the systemd restart loop for the transient case, which was the one thing that loop got right.
+- **A failed browser launch took the API down with it.** `browser.launch()` ran inline in `lifespan`, so no binary, a debug port that never came up, or an X session slower than the agent raised *before* uvicorn bound the port. systemd restarted us, the next attempt failed identically, and `/v1/status` — the only thing that could have named the cause — was down for every attempt. Now it launches on the existing startup thread, retries with backoff (5s → 5 min, `CROSSDROP_LAUNCH_RETRY`), and reports the reason in a new `error` field on `/v1/status`. `browser` keeps its two original values, so a client reading `== "ok"` is unaffected. The retry is not a nicety: it is what replaces the systemd restart loop for the transient case, which was the one thing that loop got right.
 - **An autoscroll restarted on the same screen orphaned the run that replaced it.** The finishing run popped whatever sat under its screen name, which after a second start was the *new* run's stop event. That run then scrolled with nothing holding its event: `POST /v1/autoscroll stop` popped nothing, the navigate guard in `_navigate_one()` stopped nothing, and the display went on scrolling every page sent to it afterwards — the exact haunting that guard exists to prevent. A lock, and a delete conditional on the entry still being ours. Trivially reachable by double-clicking the web UI's Auto-scroll button.
 - **There was no log.** Six `print()` calls, none about a request. "The wall showed the wrong thing at 9am" was unanswerable with the journal in front of you. One middleware, one line per request: method, path, status, duration. Mutations at INFO and reads at DEBUG, because a 15s status poll at INFO buys thousands of lines a day against a 32 MB journal that lives in RAM. The level is set on our logger and not on root — root at INFO also turns on httpx, which narrates every one of `_home_when_ready`'s once-a-second polls.
 
@@ -287,27 +287,27 @@ Three bugs found while building it, each worth more than the feature that surfac
 
 **Two halves:**
 - **CI (GitHub):** `.github/workflows/ci.yml` runs on push/PR to main — lint + tests for `agent/` and `roomctl/`. A green run is your signal it's safe to tag. *(Starts as import/smoke tests; grows with your suite.)*
-- **CD (Pi):** `update.sh`, driven by `room-display-update.timer` → `.service`.
+- **CD (Pi):** `update.sh`, driven by `crossdrop-update.timer` → `.service`.
 
 **`update.sh` flow** (writes only when there's genuinely a new tag → SD-friendly):
 1. **Cheap check:** `git ls-remote --tags` (read-only, over the deploy key) → highest semver tag. Equals the running tag? Exit 0, no writes.
 2. **Fetch tag** into a new `releases/<tag>/` (cached clone + `git archive`, so no per-release `.git`).
 3. **Build:** per-release venv, `pip install -r requirements.txt`.
 4. **Health-check (boot sanity, no live port):** `python -m agent selfcheck` from the new venv — loads config, imports, boots the app in-process (Starlette `TestClient`), asserts `/v1/status` responds. Catches syntax/import/dep/config breakage without touching the running instance. Exit 0/1 gates the swap.
-5. **Swap (atomic):** record current target as `previous`; repoint `current` symlink (`ln -sfn`); `systemctl restart display-agent`.
+5. **Swap (atomic):** record current target as `previous`; repoint `current` symlink (`ln -sfn`); `systemctl restart crossdrop-agent`.
 6. **Post-restart verify (real integration):** poll the live `/v1/status` ~30 s. Not healthy → **rollback**: point `current` back to `previous`, restart, log loudly to journald. This is what catches runtime/browser regressions that boot-sanity can't.
 7. **Prune:** on success, keep the last 3 releases.
 
 **Runtime layout on the Pi (separate from the repo, never overwritten by updates):**
 ```
-/opt/room-display/
+/opt/crossdrop/
 ├── cache-repo/            # single clone, fetched --tags
 ├── releases/<tag>/        # per-release code + venv
 └── current -> releases/<tag>
-/etc/room-display/config.toml   # token, paths — NOT in the repo
+/etc/crossdrop/config.toml   # token, paths — NOT in the repo
 <data dir>/                     # cookie snapshot + uploads (tmpfs-backed)
 ```
-`display-agent.service` points at `/opt/room-display/current` and reads config from `/etc/room-display/` — updates swap **code only**, never your token, cookies, or uploads.
+`crossdrop-agent.service` points at `/opt/crossdrop/current` and reads config from `/etc/crossdrop/` — updates swap **code only**, never your token, cookies, or uploads.
 
 **Auth:** a **read-only deploy key** (SSH, single repo, revocable) on the Pi — not a personal PAT. Using `git ls-remote`/SSH keeps the deploy key as the only credential (no API token needed).
 
@@ -394,7 +394,7 @@ Three changes, in order of how much they do:
 | Nothing checked `pip install` succeeded | Checked, and it refuses to enable the service |
 | The banner printed the token into scrollback | The token is never read into a variable; the banner prints the command that reads it |
 | 10 — unsigned tags are code execution on every Pi | `VERIFY_TAG=1` makes `git verify-tag` a hard gate. Off by default: enabling it without a key in place would stop every Pi updating, and a display stuck on an old release is worse than the risk it removes |
-| S3 — a wedged browser stacks up threadpool threads | Fail-fast latch in `_get()`, `ROOM_DEAD_COOLDOWN`. `wait_ready()` bypasses it, or a launch poll would go from 0.3 s to 5 s |
+| S3 — a wedged browser stacks up threadpool threads | Fail-fast latch in `_get()`, `CROSSDROP_DEAD_COOLDOWN`. `wait_ready()` bypasses it, or a launch poll would go from 0.3 s to 5 s |
 | S9 — a non-ASCII token 500s | Compared as bytes, so it 401s; and `load_config` warns that such a token can never be sent at all |
 | S10 — the sweep could evict the upload just written | `sweep(spare=…)` names it rather than trusting mtime order |
 | S11 — `up` is a hardcoded `true` | Left alone and documented: it means "this agent answered", `browser`/`error` carry the news. Redefining a frozen field would silently change behaviour for anything that does read it |
@@ -420,32 +420,65 @@ Two leaks surfaced while fixing those, both mine, both from this session's work:
 - **The rollback has never actually fired** since `update.sh` grew the
   `/v1/inspect` gate and the failure screenshot. It is the one feature here that
   matters and it is still only proven on the happy path.
-- **Naming — settled, not open.** **CrossDrop is the repo; `room-display` is the
-  installation.** Two names on purpose, and neither is going to change.
+- **Naming — done, v2.0.0.** **CrossDrop is the repo and the installation.**
+  `roomctl` stays the client.
 
-  A rename was costed three ways. *New hardware only* was the worst of them: old
-  and new boxes would carry different layouts forever, every command in
-  [deploy/pi/update-over-ssh.md](deploy/pi/update-over-ssh.md) would grow an
-  "older installs say…" note, and `settings.py` would keep a two-location lookup
-  that could never be removed — permanent complexity bought with nothing but
-  consistency. A *flag day* with a migration script is at least coherent, but it
-  is a migration on hardware nobody can reach with a keyboard, for a cosmetic
-  gain. Doing neither costs one line of explanation, which is this one.
+  This section used to argue the opposite: that `room-display` was the
+  installation, that two names were deliberate, and that a flag day was "a
+  migration on hardware nobody can reach with a keyboard, for a cosmetic gain".
+  That argument was wrong in its premise. There were never two names — there
+  were **three**. The unit was `display-agent`, which is neither the repo name
+  nor the install name, and it is the one you type most: `systemctl --user
+  status crossdrop` is the obvious guess and it used to fail, while
+  `systemctl --user list-units 'room-display*'` listed the three timers and
+  missed the agent itself. That is not cosmetic, it is the thing you reach for
+  at the moment something is broken.
 
-  What *was* worth fixing is the thing the mismatch was pointing at. The data
-  dir was the last path that was neither passed in nor named in `config.toml` —
-  spelled out once in `agent/settings.py` and again in
-  `deploy/pi/profile-snapshot.sh`, two copies with nothing keeping them in step.
-  A box where those disagree snapshots into a directory the agent never reads,
-  and looks like a working install until the reboot that needed the snapshot.
-  Now: `settings.DATA_DIR`, one `ROOM_DATA` variable that moves both halves
-  together (systemd applies `Environment=` to `ExecStartPre` and `ExecStopPost`,
-  so the unit covers the script too), and a test that fails if the two defaults
-  drift. A future move is a deployment decision rather than a code edit.
+  What changed the cost side was `tests/test_install_roundtrip.py`. The old
+  argument priced a migration as unverifiable, and it was: nothing ran the
+  install or the uninstall, so the only way to find out was on hardware. The
+  round-trip harness runs both against a temp tree with stubbed `sudo`, `apt`
+  and `systemctl`, so the migration is covered by tests that fail in CI rather
+  than on a wall.
 
-  Still unchecked: `setup.sh` hardcodes `github.com/Kramav/CrossDrop`, so if that
-  repo is private both the README's `curl | bash` line and the clone fail on a
-  git credential prompt in a pipeline with no tty.
+  How it was done, and why each piece is where it is:
+
+  - **`deploy/pi/migrate.sh`, not `update.sh`.** `update.sh` cannot rename its
+    own root, for four independent reasons, any one fatal: the update timer's
+    `ExecStart` is frozen at the old path (update.sh has never rewritten unit
+    files, only setup.sh does); bash reads a script as it runs, so `mv` truncates
+    everything after it *including the rollback block*; `WorkingDirectory=`
+    breaks the restart that rollback itself issues; and reloading the unit set
+    from inside a unit in that set is a knot.
+  - **The code is disposable; the state is not.** `migrate.sh` never moves
+    `/opt` — it moves the token and `profile.tar.gz` (the browser logins), backs
+    the config up beside itself, and hands off to `setup.sh`, which is
+    idempotent and is the half with the round-trip test behind it. `/opt` is
+    rebuilt from git because it is a checkout and nothing else.
+  - **`ROOM_*` → `CROSSDROP_*`, no compatibility fallback.** A fallback would
+    make the half-migrated state *work*, which means nobody migrates and the
+    fallback is permanent. `agent/selfcheck.py` refuses instead, and because
+    `update.sh` gates the swap on selfcheck, an unmigrated Pi that reaches the
+    v2 tag **does not swap** — it keeps running the release it has, stays
+    healthy, and prints the migrate command into its own journal.
+  - **`uninstall.sh` knows both layouts.** After a migration the old
+    uninstall.sh is gone from the box, so the new one has to be able to clean a
+    Pi that never migrated.
+  - **`roomctl` is not renamed.** It is the client, not a deploy. Renaming it
+    breaks `pyproject`, the console script, the Windows tray app's relative
+    path resolution, and — worst — `roomctl/__init__.py`'s default targets
+    path, which means a user's bearer tokens live inside the installed package
+    and would be silently orphaned. Product plus tool is a normal shape:
+    docker/docker-compose, git/gh.
+
+  The data-dir fix the old text describes still stands and is unchanged:
+  `settings.DATA_DIR`, one `CROSSDROP_DATA` that moves the agent and
+  `profile-snapshot.sh` together, and a test that fails if the two defaults
+  drift.
+
+  Still unchecked: `setup.sh` hardcodes `github.com/Kramav/CrossDrop`, so if
+  that repo is private both the README's `curl | bash` line and the clone fail
+  on a git credential prompt in a pipeline with no tty.
 
 ## 12. Open items for you
 1. Confirm A2 (SD boot), A4 (64-bit OS), A5 (desktop auto-login), A6 (private repo).

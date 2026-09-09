@@ -17,10 +17,10 @@
 >
 > | Path | What lives there |
 > |---|---|
-> | `/opt/room-display/current` | the code — a symlink to the running release |
-> | `/opt/room-display/releases/` | past releases, and the `.failed-*` markers |
-> | `/etc/room-display/config.toml` | the token and install-time facts, root-owned |
-> | `~/.local/share/room-display/` | screen settings, and the profile snapshot |
+> | `/opt/crossdrop/current` | the code — a symlink to the running release |
+> | `/opt/crossdrop/releases/` | past releases, and the `.failed-*` markers |
+> | `/etc/crossdrop/config.toml` | the token and install-time facts, root-owned |
+> | `~/.local/share/crossdrop/` | screen settings, and the profile snapshot |
 
 A runbook for the box on the wall, from your desk. The *mechanism* — tags,
 `selfcheck`, rollback, pruning — is [README.md §11](README.md); this is the
@@ -54,7 +54,7 @@ systemd *user* unit, and an SSH session is not the graphical one:
 
 ```sh
 # on the Pi
-systemctl --user status display-agent
+systemctl --user status crossdrop-agent
 ```
 
 If that says `Failed to connect to bus`, the session did not inherit the user
@@ -100,7 +100,7 @@ git tag v1.3.0 && git push --tags
 ```
 
 That is the whole of the normal path — you never touch the Pi. If
-`room-display-update.timer` is enabled it picks the tag up within ~30 min
+`crossdrop-update.timer` is enabled it picks the tag up within ~30 min
 (`OnUnitActiveSec=30min`, plus up to 5 min of jitter), so wait, then check it
 landed:
 
@@ -114,8 +114,8 @@ code is a decision, not a side effect of running `setup.sh`:
 
 ```sh
 # on the Pi
-systemctl --user enable --now room-display-update.timer
-systemctl --user list-timers room-display-update.timer
+systemctl --user enable --now crossdrop-update.timer
+systemctl --user list-timers crossdrop-update.timer
 ```
 
 ---
@@ -124,8 +124,8 @@ systemctl --user list-timers room-display-update.timer
 
 ```sh
 # on the Pi
-systemctl --user start room-display-update
-journalctl --user -u room-display-update -f          # watch it decide
+systemctl --user start crossdrop-update
+journalctl --user -u crossdrop-update -f          # watch it decide
 ```
 
 That is the same unit the timer runs, so it behaves identically — including
@@ -133,7 +133,7 @@ rolling itself back. It is safe to run when there is nothing to do: with no new
 tag it prints `up to date (v1.3.0)` and writes nothing at all, which is what
 keeps a 48×/day timer off the SD card.
 
-> `room-display-update.service` runs `/opt/room-display/current/deploy/pi/update.sh`
+> `crossdrop-update.service` runs `/opt/crossdrop/current/deploy/pi/update.sh`
 > — the copy in the release that is **currently running**, not the one being
 > deployed. So a change to `update.sh` itself only takes effect on the update
 > *after* the one that ships it. Worth knowing when the thing you changed is the
@@ -148,7 +148,7 @@ every 30 minutes and restarting the kiosk twice a cycle:
 
 ```sh
 # on the Pi
-ls -a /opt/room-display/releases/ | grep failed
+ls -a /opt/crossdrop/releases/ | grep failed
 #  .failed-v1.3.0
 #  .failed-v1.3.0.jpg      <- what the wall was showing when it failed
 ```
@@ -159,15 +159,15 @@ diagnosis:
 ```sh
 # on your machine — the .jpg lands in the directory you run this from
 cd ~/Downloads
-scp room@<pi-tailnet-ip>:/opt/room-display/releases/.failed-v1.3.0.jpg .
+scp room@<pi-tailnet-ip>:/opt/crossdrop/releases/.failed-v1.3.0.jpg .
 ```
 
 Then fix the cause, and clear the latch to let it try again:
 
 ```sh
 # on the Pi
-rm /opt/room-display/releases/.failed-v1.3.0
-systemctl --user start room-display-update
+rm /opt/crossdrop/releases/.failed-v1.3.0
+systemctl --user start crossdrop-update
 ```
 
 The broken release is left in `releases/<tag>/` on purpose, so you can read it.
@@ -182,8 +182,8 @@ deliberately cannot write it (`root:<user> 640`). It needs `sudo` and a restart
 
 ```sh
 # on the Pi — absolute path, any directory
-sudo nano /etc/room-display/config.toml
-systemctl --user restart display-agent
+sudo nano /etc/crossdrop/config.toml
+systemctl --user restart crossdrop-agent
 ```
 
 **Turning on typing** is this, and it is the one setting worth spelling out. Add:
@@ -202,18 +202,18 @@ roomctl status | jq -r '.supports | join(" ")'
 ```
 
 `input` present means clicking and typing are live. Absent means the block did
-not take — check you edited the file `ROOM_CONFIG` points at
-(`systemctl --user show display-agent -p Environment`).
+not take — check you edited the file `CROSSDROP_CONFIG` points at
+(`systemctl --user show crossdrop-agent -p Environment`).
 
 Screen names, home URLs, positions and sizes are **not** here — those are the
 web UI's Settings panel, they apply live, and they survive updates
-(`~/.local/share/room-display/settings.json`).
+(`~/.local/share/crossdrop/settings.json`).
 
 ---
 
 ## 7. A plain checkout, before there are any tags
 
-`setup.sh` leaves `/opt/room-display/current` as a real git checkout. Until the
+`setup.sh` leaves `/opt/crossdrop/current` as a real git checkout. Until the
 first tag is deployed there is nothing to roll back to, so this path has no
 safety net — prefer §3 once you have tags.
 
@@ -223,9 +223,9 @@ loaded:
 
 ```sh
 # on the Pi — absolute paths, any directory
-git -C /opt/room-display/current pull --ff-only
-/opt/room-display/current/.venv/bin/pip install -q -r \
-    /opt/room-display/current/agent/requirements.txt
+git -C /opt/crossdrop/current pull --ff-only
+/opt/crossdrop/current/.venv/bin/pip install -q -r \
+    /opt/crossdrop/current/agent/requirements.txt
 ```
 
 **Then check the new code can even start**, while the old one is still up. This
@@ -234,20 +234,20 @@ it is safe with the kiosk live:
 
 ```sh
 # on the Pi
-cd /opt/room-display/current \
-  && ROOM_CONFIG=/etc/room-display/config.toml .venv/bin/python -m agent selfcheck
+cd /opt/crossdrop/current \
+  && CROSSDROP_CONFIG=/etc/crossdrop/config.toml .venv/bin/python -m agent selfcheck
 ```
 
 Exit 0 means it loads, imports and answers `/v1/status`. Exit 1 means **stop
 here** — restarting would trade a working display for a boot loop. The agent on
 the wall is still the old code, so nothing is broken yet; undo the pull with
-`git -C /opt/room-display/current reset --hard HEAD@{1}` and leave it running.
+`git -C /opt/crossdrop/current reset --hard HEAD@{1}` and leave it running.
 
 **Only then restart**, which is the moment the wall actually changes:
 
 ```sh
 # on the Pi
-systemctl --user restart display-agent
+systemctl --user restart crossdrop-agent
 ```
 
 ---
@@ -280,15 +280,15 @@ aimed. **Stop the agent first**; it holds the debug port the tests need, and
 they refuse to start otherwise:
 
 ```sh
-# on the Pi — run from /opt/room-display/current, not /etc/room-display
-systemctl --user stop display-agent
-cd /opt/room-display/current
-DISPLAY=:0 ROOM_BROWSER=chromium ROOM_SMOKE=1 \
+# on the Pi — run from /opt/crossdrop/current, not /etc/crossdrop
+systemctl --user stop crossdrop-agent
+cd /opt/crossdrop/current
+DISPLAY=:0 CROSSDROP_BROWSER=chromium CROSSDROP_SMOKE=1 \
   .venv/bin/python -m pytest tests/test_smoke.py -q
-systemctl --user start display-agent
+systemctl --user start crossdrop-agent
 ```
 
-13 passed, about 20 seconds, one fullscreen window that closes itself. The wall
+14 passed, about 20 seconds, one fullscreen window that closes itself. The wall
 comes back to what it was showing. Full walkthrough, including what each test
 proves and what to do when one fails:
 [smoke-on-the-pi.md](smoke-on-the-pi.md).
@@ -304,11 +304,11 @@ automatic check can catch.
 ```sh
 # on the Pi — absolute paths, any directory. Do NOT cd into `current` first:
 # it is the symlink you are about to move out from under yourself.
-ls -1 /opt/room-display/releases/          # what is available
-readlink /opt/room-display/current         # what is running
+ls -1 /opt/crossdrop/releases/          # what is available
+readlink /opt/crossdrop/current         # what is running
 
-ln -sfn /opt/room-display/releases/v1.2.0 /opt/room-display/current
-systemctl --user restart display-agent
+ln -sfn /opt/crossdrop/releases/v1.2.0 /opt/crossdrop/current
+systemctl --user restart crossdrop-agent
 ```
 
 Confirm the old version is the one answering:
@@ -322,22 +322,22 @@ Then stop the timer putting the bad one straight back:
 
 ```sh
 # on the Pi
-systemctl --user stop room-display-update.timer
-touch /opt/room-display/releases/.failed-v1.3.0     # or delete the tag upstream
+systemctl --user stop crossdrop-update.timer
+touch /opt/crossdrop/releases/.failed-v1.3.0     # or delete the tag upstream
 ```
 
 Updates swap **code only** — the symlink move cannot touch your token, your
 logins or your screen settings. Those live outside the release tree:
 
-    /etc/room-display/config.toml                       token, install-time facts
-    ~/.local/share/room-display/settings.json           screens, home urls
-    ~/.local/share/room-display/profile.tar.gz          the logins
-    /opt/room-display/extensions/                       ad blockers
+    /etc/crossdrop/config.toml                       token, install-time facts
+    ~/.local/share/crossdrop/settings.json           screens, home urls
+    ~/.local/share/crossdrop/profile.tar.gz          the logins
+    /opt/crossdrop/extensions/                       ad blockers
 
-> **The paths say `room-display`, the repo says CrossDrop.** That is deliberate
-> and settled — CrossDrop is the source, `room-display` is the installation. See
-> PLAN.md §11 "Naming". The data dir is the one you can move, with `ROOM_DATA`
-> in `display-agent.service`; it moves the snapshot script with it.
+> **The paths say `crossdrop`, the repo says CrossDrop.** That is deliberate
+> and settled — CrossDrop is the source, `crossdrop` is the installation. See
+> PLAN.md §11 "Naming". The data dir is the one you can move, with `CROSSDROP_DATA`
+> in `crossdrop-agent.service`; it moves the snapshot script with it.
 
 ---
 
@@ -345,14 +345,14 @@ logins or your screen settings. Those live outside the release tree:
 
 ```sh
 # on the Pi — any directory
-journalctl --user -u display-agent -n 100 --no-pager      # this boot
-journalctl --user -u display-agent -f                     # follow
-journalctl --user -u display-agent | grep /v1/            # what was asked of it
+journalctl --user -u crossdrop-agent -n 100 --no-pager      # this boot
+journalctl --user -u crossdrop-agent -f                     # follow
+journalctl --user -u crossdrop-agent | grep /v1/            # what was asked of it
 systemctl --user list-units --failed
 ```
 
 Every request is logged: `POST /v1/navigate -> 200 in 41ms`. Mutations at INFO,
-reads at DEBUG — add `Environment=ROOM_LOG=DEBUG` to the unit for the polls too.
+reads at DEBUG — add `Environment=CROSSDROP_LOG=DEBUG` to the unit for the polls too.
 
 **The journal is in RAM and does not survive a reboot**
 ([journald-volatile.conf](journald-volatile.conf)) — read it *before* you reboot
@@ -374,7 +374,7 @@ wedged kiosk. It costs the current page, and any running autoscroll:
 
 ```sh
 # on the Pi
-systemctl --user restart display-agent
+systemctl --user restart crossdrop-agent
 ```
 
 The Pi does this to itself nightly at 04:00 anyway (README.md §6), which is why
@@ -392,7 +392,7 @@ what you left on screen comes back afterwards.
   extensions still cannot rewrite its own credentials.
 - **Don't run the agent as root.** Chromium refuses to start, and it needs to be
   the user who owns the graphical session anyway.
-- **Don't `systemctl stop display-agent` and walk away.** That leaves the
+- **Don't `systemctl stop crossdrop-agent` and walk away.** That leaves the
   monitors with no one to wake them — `roomctl window minimized` is the way to
   free the desktop without giving up display power.
 - **Don't reboot to read logs.** They are in RAM. See §10.

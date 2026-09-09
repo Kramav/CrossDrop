@@ -2,7 +2,7 @@
 
 Findings from an adversarial review of the whole repo, 2026-09-07, and what was
 done about them. Suite was green at review time (265 passed, 16 skipped) and is
-green now (281 passed, 16 skipped — the skips are still the `ROOM_SMOKE=1`
+green now (281 passed, 16 skipped — the skips are still the `CROSSDROP_SMOKE=1`
 browser tests, which CI now runs in their own job).
 
 One thing below is **not verified**: the new CI smoke job, which is a workflow
@@ -74,7 +74,7 @@ see that entry.
   `ubuntu-latest`: symlinks the runner's preinstalled Chrome to `chromium`,
   relaxes the 24.04 AppArmor userns restriction (Chromium's sandbox needs it —
   better than `--no-sandbox`, which no Pi runs), and runs `tests/test_smoke.py`
-  under `xvfb-run` with `ROOM_SMOKE=1`. `chromium --version` runs first and
+  under `xvfb-run` with `CROSSDROP_SMOKE=1`. `chromium --version` runs first and
   fails the job loudly, because the kiosk fixture *skips* when it finds no
   binary and a silent skip is what let this gap last.
 

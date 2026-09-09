@@ -1,0 +1,3 @@
+#!/bin/sh
+printf 'journalctl\t%s\n' "$*" >> "$STUB_LOG"
+exit 0

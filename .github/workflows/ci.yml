@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -r agent/requirements.txt
+      - run: pip install --require-hashes -r agent/requirements.txt
       - run: pip install -e .
       # Errors only, not style: undefined names, syntax, unused imports. The
       # things that make a release fail to boot on a box with no keyboard.
@@ -43,9 +43,38 @@ jobs:
         run: |
           ! grep -rnE 'startScreencast|Page\.screencast|scrot|grim|\bmss\b|pyautogui|uinput|CopyFromScreen|import -window' \
             agent/ roomctl/ web/ deploy/
+      # shellcheck over the deploy scripts. These run unattended at 04:00 on a
+      # box with no keyboard, and `bash -n` only catches syntax -- not an
+      # unquoted expansion or a `set -e` that will not fire inside a function.
+      - name: shellcheck
+        run: |
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning deploy/pi/*.sh
+      # PowerShell had zero coverage: test_deploy.py globs *.sh, and both CI jobs
+      # are linux, so roomtray.ps1 could not even fail to parse.
+      - name: powershell parses
+        run: |
+          pwsh -NoProfile -Command '
+            $bad = 0
+            Get-ChildItem deploy -Recurse -Filter *.ps1 | ForEach-Object {
+              $e = $null
+              [System.Management.Automation.Language.Parser]::ParseFile(
+                $_.FullName, [ref]$null, [ref]$e) | Out-Null
+              if ($e) { $e | ForEach-Object { Write-Host $_ }; $bad = 1 }
+            }
+            exit $bad'
       # `python -m`, not bare `pytest`: the agent package is imported from the
       # repo root and only -m puts the working directory on sys.path.
       - run: python -m pytest -q
+      # One version number. This is the only one a pip install sees; the
+      # deployed one comes from the tag, and 0.1.0 sat under v1.3.0 for a while
+      # with nothing to notice. Drift is now untaggable.
+      - name: pyproject version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v=$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
+          test "$v" = "${GITHUB_REF_NAME#v}" \
+            || { echo "pyproject says $v, tag says ${GITHUB_REF_NAME#v}"; exit 1; }
 
   # browser.py is the riskiest file in the repo and every test that speaks real
   # CDP was skipped in CI, so the protocol code was only ever exercised by hand.
@@ -63,7 +92,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: pip install -r agent/requirements.txt && pip install -e .
+      - run: pip install --require-hashes -r agent/requirements.txt && pip install -e .
       # The runner already ships Google Chrome; browser._exe looks for
       # `chromium` on PATH, so one symlink beats an apt or snap install that
       # would be slower and, for chromium on Ubuntu, a snap transitional package.
@@ -82,6 +111,6 @@ jobs:
           chromium --version
       - name: real browser over CDP
         env:
-          ROOM_SMOKE: '1'
-          ROOM_BROWSER: chromium
+          CROSSDROP_SMOKE: '1'
+          CROSSDROP_BROWSER: chromium
         run: xvfb-run -a python -m pytest -q -s tests/test_smoke.py

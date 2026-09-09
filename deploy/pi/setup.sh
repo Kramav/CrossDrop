@@ -23,8 +23,109 @@ VIDEO="${VIDEO:-}"   # empty = auto-detect (default). Override only for a Pi tha
                      # boots with no monitor attached: VIDEO=HDMI-A-1:1920x1080@60D
 PORT="${PORT:-8080}"
 
+# PREFIX exists so tests/test_install_roundtrip.py can run this script for real
+# against a temp tree. Empty in production, and every path below is then the
+# absolute one it always was. Do not add a path here that is not derived from it.
+PREFIX="${PREFIX:-}"
+OPT="${OPT:-$PREFIX/opt/crossdrop}"
+ETC="${ETC:-$PREFIX/etc/crossdrop}"
+CFG="${CFG:-$ETC/config.toml}"
+RUN="${RUN:-$PREFIX/run/user/$(id -u)/crossdrop}"
+SYSTEMD_SYS="${SYSTEMD_SYS:-$PREFIX/etc/systemd/system}"
+JOURNALD_D="${JOURNALD_D:-$PREFIX/etc/systemd/journald.conf.d}"
+CMDLINE="${CMDLINE:-$PREFIX/boot/firmware/cmdline.txt}"
+DRM="${DRM:-$PREFIX/sys/class/drm}"
+UNITS="${UNITS:-$HOME/.config/systemd/user}"
+DATA="${CROSSDROP_DATA:-$HOME/.local/share/crossdrop}"
+
+# A v1 box (room-display / display-agent) must migrate, not install alongside.
+# Two trees means two agents racing for :8080 and two autostart units, and the
+# one that wins is whichever systemd started first -- on a box with no keyboard.
+# MIGRATE=1 does it inline, for the one-command case.
+OLD_OPT="${OLD_OPT:-$PREFIX/opt/room-display}"
+# Note the missing `&& [ ! -d "$OPT" ]`. That guard failed open on exactly the
+# state it most needed to catch: migrate.sh creates $OPT (to move the extensions
+# into) before it deletes $OLD_OPT, so an interrupted migration has *both*. A
+# re-run then installed alongside, left both unit sets enabled, and minted a
+# second bearer token while the live one was still in the old config -- verbatim
+# the outcome this refusal exists to prevent. The presence of $OLD_OPT is the
+# whole condition; a half-migrated box needs migrate.sh more, not less.
+if [ -d "$OLD_OPT" ]; then
+  # migrate.sh ships in v2 and no v1 tag contains it, so it is NOT on a v1 box:
+  # $OLD_OPT/current is a v1 checkout. And $0 is "bash" under `curl ... | bash`,
+  # which is the only install method documented. So the only command we can
+  # print that actually works is one that fetches it.
+  MIGRATE_URL="${MIGRATE_URL:-https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/migrate.sh}"
+  HERE=""
+  case "$0" in
+    */*) if [ -f "$(dirname "$0")/migrate.sh" ]; then HERE="$(dirname "$0")"; fi ;;
+  esac
+  if [ "${MIGRATE:-0}" = 1 ]; then
+    echo "== migrating the v1 install first"
+    if [ -n "$HERE" ]; then
+      exec bash "$HERE/migrate.sh"
+    fi
+    # Piped, or run from a v1 checkout that predates migrate.sh: fetch it.
+    TMP_MIG="$(mktemp)"
+    if curl -fsSL "$MIGRATE_URL" -o "$TMP_MIG" && [ -s "$TMP_MIG" ]; then
+      # `exec` never returns, so the copy cannot be cleaned up afterwards --
+      # hand it to migrate.sh's own EXIT trap instead.
+      exec env CROSSDROP_MIGRATE_TMP="$TMP_MIG" bash "$TMP_MIG"
+    fi
+    rm -f "$TMP_MIG"
+    echo "MIGRATE=1 but migrate.sh could not be fetched from $MIGRATE_URL" >&2
+    exit 1
+  fi
+  cat >&2 <<EOF
+This box has a v1 install at $OLD_OPT, which used the name "room-display".
+Installing beside it would leave two agents fighting for port $PORT, two
+autostart units, and two different bearer tokens.
+
+Migrate it instead -- the token, the logins and the extensions are carried
+over. migrate.sh is new in v2, so it is not on this box yet:
+
+  curl -fsSL $MIGRATE_URL | bash
+
+or re-run this installer with MIGRATE=1 to fetch it and do both in one step:
+
+  curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | MIGRATE=1 bash
+
+To start from nothing instead, from the v1 box's own copy:
+
+  bash $OLD_OPT/current/deploy/pi/uninstall.sh
+EOF
+  exit 1
+fi
+
 IS_PI=0
 if command -v raspi-config >/dev/null 2>&1; then IS_PI=1; fi
+
+# Argument checks first, before anything is installed or changed. These used to
+# live at "== display mode", by which point apt, the Tailscale login and
+# `raspi-config do_boot_behaviour B4` had already altered the box -- so a typo
+# in VIDEO= left it half-provisioned and exited 1.
+if [ -n "$VIDEO" ]; then
+  case "$VIDEO" in
+    *:*) ;;
+    *) echo "VIDEO must be <connector>:<mode>, e.g. HDMI-A-1:1920x1080@60D" >&2
+       exit 1 ;;
+  esac
+  if [ "$IS_PI" = 0 ]; then
+    # The write is Pi-only (cmdline.txt is a Pi bootloader file), so accepting
+    # VIDEO= here would be the same silent no-op in a different place.
+    echo "VIDEO= only applies to a Raspberry Pi (it edits cmdline.txt). On a" >&2
+    echo "plain Debian box set the mode in your X config instead." >&2
+    exit 1
+  fi
+  if [ ! -f "$CMDLINE" ]; then
+    # Silently doing nothing is the one outcome that matters: VIDEO= is for a
+    # Pi that boots with no monitor attached, and that Pi comes up dark.
+    echo "VIDEO=$VIDEO was given but $CMDLINE does not exist. On older images" >&2
+    echo "it is /boot/cmdline.txt -- pass CMDLINE=/boot/cmdline.txt, or drop" >&2
+    echo "VIDEO= to let the kernel auto-detect every connected output." >&2
+    exit 1
+  fi
+fi
 
 # Ask the kernel, don't trust the environment: `su room` without the `-` leaves
 # $USER pointing at the previous account, and this name is baked into an
@@ -83,8 +184,15 @@ if ! tailscale ip -4 >/dev/null 2>&1; then
     sudo tailscale up                        # prints a URL; open it
   fi
 fi
-TS_IP="$(tailscale ip -4 | head -1)"
-echo "   $TS_IP"
+# `|| true`, because `set -e` on this pipeline killed the script here with no
+# message at all -- after apt had run, before anything was written. The empty
+# case is handled at the config step, which is the only place it matters.
+TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+if [ -n "$TS_IP" ]; then
+  echo "   $TS_IP"
+else
+  echo "   no tailscale address yet (is this node authenticated?)"
+fi
 
 if [ "$IS_PI" = 1 ]; then
 echo "== raspi-config"
@@ -108,9 +216,9 @@ echo "== X session"
 # a keyboard-less box that blanks with nothing able to wake it is the exact bug
 # this project exists to avoid.
 sudo apt install -y xserver-xorg xinit x11-xserver-utils openbox
-sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+sudo mkdir -p "$SYSTEMD_SYS/getty@tty1.service.d"
 printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin %s --noclear %%I $TERM\n' "$USER" \
-  | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null
+  | sudo tee "$SYSTEMD_SYS/getty@tty1.service.d/autologin.conf" >/dev/null
 sudo systemctl daemon-reload
 [ -f "$HOME/.xinitrc" ] || echo 'exec openbox-session' > "$HOME/.xinitrc"
 # bash reads .bash_profile when it exists and .profile only when it does not, so
@@ -122,72 +230,104 @@ if ! grep -q CrossDrop "$PROF" 2>/dev/null; then
 # CrossDrop kiosk session. -nocursor because there is no mouse to park the
 # pointer out of the way. The agent is a systemd *user* unit, so logging in here
 # is also what starts it; it may lose the race with X and retry, which is what
-# Restart=always in display-agent.service is for.
+# Restart=always in crossdrop-agent.service is for.
 [ "$(tty)" = /dev/tty1 ] && [ -z "${DISPLAY:-}" ] && exec startx -- -nocursor
 EOF
 fi
 fi
 
 echo "== display mode"
-if [ "$IS_PI" = 1 ]; then
-CMDLINE=/boot/firmware/cmdline.txt
+if [ "$IS_PI" = 1 ] && [ -f "$CMDLINE" ]; then
 # ponytail: no pinning by default. The kernel reads EDID and brings every
 # connected output up at its own preferred mode, which is the dynamic behaviour
 # we want. Pinning one `video=HDMI-A-1:...` forces that output and leaves the
 # second monitor dark — pin only on a Pi that boots with nothing plugged in.
 if [ -n "$VIDEO" ]; then
-  case "$VIDEO" in *:*) ;; *) echo "VIDEO must be <connector>:<mode>, e.g. HDMI-A-1:1920x1080@60D"; exit 1 ;; esac
   sudo sed -i -e '1s| video=[^ ]*||g' -e "1s|\$| video=$VIDEO|" "$CMDLINE"
+  # Leave a marker so uninstall.sh can tell *our* pin from one the admin set
+  # before ever hearing of this project. Without it the uninstaller strips any
+  # video= it finds, and a pin removed at random is a Pi that boots dark.
+  sudo mkdir -p "$ETC"
+  echo "$VIDEO" | sudo tee "$ETC/.video-pin" >/dev/null
   echo "   pinned: $VIDEO"
 elif grep -q 'video=' "$CMDLINE"; then
   sudo sed -i '1s| video=[^ ]*||g' "$CMDLINE"              # single line, edit in place
+  sudo rm -f "$ETC/.video-pin"
   echo "   removed a previous pin — outputs auto-detect again (reboot to apply)"
 fi
 fi
 # Not gated: /sys/class/drm is kernel-generic, so this reports connected outputs
 # on a PC's iGPU exactly as it does on the Pi.
-for s in /sys/class/drm/card*-HDMI-A-*/status; do
+for s in "$DRM"/card*-HDMI-A-*/status; do
   [ -e "$s" ] || continue
   n="${s%/status}"; n="${n##*/}"
   echo "   ${n#*-}: $(cat "$s")"
 done
 
 echo "== code"
-sudo mkdir -p /opt/room-display
-sudo chown "$USER" /opt/room-display
-if [ -d /opt/room-display/current/.git ]; then
-  git -C /opt/room-display/current pull --ff-only
+sudo mkdir -p "$OPT"
+sudo chown "$USER" "$OPT"
+if [ -d "$OPT/current/.git" ]; then
+  git -C "$OPT/current" pull --ff-only
+elif [ -e "$OPT/current" ]; then
+  # After any auto-update `current` is a symlink into releases/<tag>, which
+  # update.sh built with `git archive` and so has no .git. The else branch then
+  # ran `git clone` into a path that already exists -- fatal, exit 128, and
+  # under `set -e` that ended the install at "== code", after apt and the
+  # raspi-config edits, with nothing installed and no banner. The header says
+  # "Re-runnable" and uninstall.sh points here as the reinstall path.
+  #
+  # Leave it alone: update.sh owns that symlink and the release it points at,
+  # and a working auto-updated box does not need its code replaced by a re-run
+  # of the installer. Everything after this point is idempotent.
+  echo "   $OPT/current is managed by update.sh — leaving the code alone"
 else
-  git clone "$REPO" /opt/room-display/current
+  git clone "$REPO" "$OPT/current"
 fi
-cd /opt/room-display/current
+cd "$OPT/current"
 [ -d .venv ] || python3 -m venv .venv
 # Checked, not assumed. This used to run under `set -e` with no message of its
 # own: a wheel that failed to build left the venv half-populated, the script
 # carried on and enabled the service, and the first you heard of it was a
 # journalctl dump at the end. Say which step failed, at the step that failed.
-if ! .venv/bin/pip install -q -r agent/requirements.txt; then
+if ! .venv/bin/pip install -q --require-hashes -r agent/requirements.txt; then
   echo "pip install failed — not enabling the service. Fix the error above and" >&2
   echo "re-run this script; nothing before this point needs undoing." >&2
   exit 1
 fi
 
 echo "== config"
-CFG=/etc/room-display/config.toml
-sudo mkdir -p /etc/room-display
+sudo mkdir -p "$ETC"
 if [ -f "$CFG" ]; then
   echo "   $CFG exists, left alone"
 else
+  # home_url is the one that has to be the *tailnet* url, not the shipped
+  # "/home". The unit passes --host "$(tailscale ip -4)" and never reads
+  # [server], so the path form resolves to http://127.0.0.1:8080/home -- a port
+  # nothing is listening on. Every screen then comes up on Chromium's error
+  # page, /v1/inspect reports error_page: true forever, and update.sh's rollback
+  # gate fires on *every* release and latches it. Auto-update was dead on
+  # arrival on any box this script built. tests/test_install_roundtrip.py pins
+  # that what lands here is loadable and points at the bound address.
+  if [ -z "$TS_IP" ]; then
+    echo "   no tailscale address — writing home_url as a loopback url. Fix it" >&2
+    echo "   in $CFG once the node is up, or the kiosk shows an error page." >&2
+    HOME_URL="http://127.0.0.1:$PORT/home"
+  else
+    HOME_URL="http://$TS_IP:$PORT/home"
+  fi
   sed -e "s|^token = .*|token = \"$(openssl rand -hex 32)\"|" \
+      -e "s|^home_url = .*|home_url = \"$HOME_URL\"|" \
       -e "s|^kind = .*|kind = \"chromium\"|" \
-      -e "s|^profile_dir = .*|profile_dir = \"/run/user/$(id -u)/room-display/profile\"|" \
-      -e "s|^extensions_dir = .*|extensions_dir = \"/opt/room-display/extensions\"|" \
-      -e "s|^dir = .*|dir = \"/run/user/$(id -u)/room-display/uploads\"|" \
+      -e "s|^profile_dir = .*|profile_dir = \"$RUN/profile\"|" \
+      -e "s|^extensions_dir = .*|extensions_dir = \"$OPT/extensions\"|" \
+      -e "s|^dir = .*|dir = \"$RUN/uploads\"|" \
       agent/config.example.toml | sudo tee "$CFG" >/dev/null
+  echo "   home_url = $HOME_URL"
 fi
 sudo chown root:"$USER" "$CFG"
 sudo chmod 640 "$CFG"                      # it holds the bearer token
-mkdir -p "$HOME/.local/share/room-display"
+mkdir -p "$DATA"
 
 # Pi only: this trades persistent logs for SD card life. A server logs to an SSD
 # that does not care, and taking a hypervisor's journal away to save writes it
@@ -195,49 +335,58 @@ mkdir -p "$HOME/.local/share/room-display"
 if [ "$IS_PI" = 1 ]; then
 echo "== logs in RAM"
 # See journald-volatile.conf for why this rather than log2ram, and what it costs.
-sudo mkdir -p /etc/systemd/journald.conf.d
-sudo cp deploy/pi/journald-volatile.conf /etc/systemd/journald.conf.d/room-display.conf
+sudo mkdir -p "$JOURNALD_D"
+sudo cp deploy/pi/journald-volatile.conf "$JOURNALD_D/crossdrop.conf"
 sudo systemctl restart systemd-journald
 fi
 
 # Empty is fine and is the normal state: the agent loads whatever is in here at
 # launch, so this only has to exist for install-extension.sh to drop into.
-mkdir -p /opt/room-display/extensions
+mkdir -p "$OPT/extensions"
 
 echo "== service"
 chmod +x deploy/pi/profile-snapshot.sh deploy/pi/update.sh
-mkdir -p ~/.config/systemd/user
-cp deploy/pi/display-agent.service ~/.config/systemd/user/
+mkdir -p "$UNITS"
+cp deploy/pi/crossdrop-agent.service "$UNITS/"
 # Timer stays installed-but-disabled: PLAN.md §9 default is snapshot-on-stop.
-# Enable it if the study loses power often: systemctl --user enable --now room-display-snapshot.timer
-cp deploy/pi/room-display-snapshot.service deploy/pi/room-display-snapshot.timer ~/.config/systemd/user/
+# Enable it if the study loses power often: systemctl --user enable --now crossdrop-snapshot.timer
+cp deploy/pi/crossdrop-snapshot.service deploy/pi/crossdrop-snapshot.timer "$UNITS/"
 # Phase 8 auto-update, also installed-but-disabled. Handing a Pi the right to
 # replace its own code unattended is a decision to make on purpose, not a side
 # effect of running a setup script:
-#   systemctl --user enable --now room-display-update.timer
-cp deploy/pi/room-display-update.service deploy/pi/room-display-update.timer ~/.config/systemd/user/
+#   systemctl --user enable --now crossdrop-update.timer
+cp deploy/pi/crossdrop-update.service deploy/pi/crossdrop-update.timer "$UNITS/"
 # This one *is* enabled: Chromium left on one page for days grows until it OOMs,
 # and the 04:00 restart is the only thing standing between that and a wall
 # showing "Aw, Snap!" until somebody carries a keyboard to it.
-cp deploy/pi/room-display-restart.service deploy/pi/room-display-restart.timer ~/.config/systemd/user/
+cp deploy/pi/crossdrop-restart.service deploy/pi/crossdrop-restart.timer "$UNITS/"
 systemctl --user daemon-reload
-systemctl --user enable --now display-agent room-display-restart.timer
+systemctl --user enable --now crossdrop-agent crossdrop-restart.timer
 
 # An existing config is never rewritten, so a Pi provisioned before Phase 6 still
 # points its profile at the SD card and silently keeps grinding it.
-if ! sudo grep -q '^profile_dir = "/run/user/' "$CFG"; then
+if ! sudo grep -q "^profile_dir = \"$RUN/" "$CFG"; then
   echo "   NOTE: profile_dir in $CFG is not on tmpfs — Phase 6 is not active."
-  echo "         Set it to /run/user/$(id -u)/room-display/profile and restart."
+  echo "         Set it to $RUN/profile and restart."
+fi
+# Same class of problem, and the expensive one: a config written before this
+# script set home_url points the kiosk at 127.0.0.1, which nothing binds. Every
+# screen sits on an error page and update.sh rolls back every release.
+if sudo grep -qE '^home_url = "(/|http://127\.0\.0\.1)' "$CFG"; then
+  echo "   WARNING: home_url in $CFG resolves to loopback, but the unit binds"
+  echo "            $TS_IP. The kiosk will show an error page and auto-update"
+  echo "            will roll back every release. Set it to:"
+  echo "              home_url = \"http://$TS_IP:$PORT/home\""
 fi
 
 # Diagnostics only. Nothing below may abort the script: the install is already
 # done by this point, and `set -e` turning a failed *check* into a failed *run*
 # is what hid the summary and the token the first time.
 echo "== checks"
-if findmnt -no FSTYPE "/run/user/$(id -u)" | grep -qx tmpfs; then
+if findmnt -no FSTYPE "$(dirname "$RUN")" 2>/dev/null | grep -qx tmpfs; then
   echo "   profile + uploads on tmpfs: ok"
 else
-  echo "   WARNING: /run/user/$(id -u) is not tmpfs - Phase 6 buys you nothing"
+  echo "   WARNING: $(dirname "$RUN") is not tmpfs - Phase 6 buys you nothing"
 fi
 if [ -n "$CHROMIUM" ]; then
   echo "   $("$CHROMIUM" --version)"
@@ -254,11 +403,11 @@ else
   echo "         On Wayland, monitors may blank with no keyboard to wake them."
 fi
 sleep 5
-if systemctl --user is-active --quiet display-agent; then
-  echo "   display-agent: active"
+if systemctl --user is-active --quiet crossdrop-agent; then
+  echo "   crossdrop-agent: active"
 else
-  echo "   display-agent is NOT active:"
-  journalctl --user -u display-agent -n 20 --no-pager || true
+  echo "   crossdrop-agent is NOT active:"
+  journalctl --user -u crossdrop-agent -n 20 --no-pager || true
 fi
 
 # The token is deliberately *not* printed. It used to be, for the copy-paste

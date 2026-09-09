@@ -986,7 +986,7 @@ function drawExtensions(body) {
   if (!body.installed.length) $("#extlist").textContent = "None installed.";
   $("#extnote").textContent = body.pending_restart
     ? "Restart to apply: it happens nightly at 04:00, or run "
-      + "`systemctl --user restart display-agent` on the Pi."
+      + "`systemctl --user restart crossdrop-agent` on the Pi."
     : "";
 }
 

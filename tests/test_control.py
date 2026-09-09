@@ -34,7 +34,7 @@ def write_config(tmp_path, kind="chromium", names=("left", "right")):
 @pytest.fixture
 def two_screens(tmp_path, monkeypatch):
     """A two-monitor chromium agent in-process, with no browser behind it."""
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
     with TestClient(app) as client:
         yield client
 
@@ -47,7 +47,7 @@ def live(request, tmp_path, monkeypatch):
     anything; `two_screens` above is enough for everything server-side.
     """
     kind = getattr(request, "param", "chromium")
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, kind=kind)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path, kind=kind)))
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0,
                                            log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)

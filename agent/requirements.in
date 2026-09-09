@@ -1,8 +1,12 @@
 # What the agent actually depends on. Edit this file, never requirements.txt --
 # that one is the lock, and every consumer (CI, setup.sh, update.sh) installs it.
 #
-#   uv pip compile --universal --python-version 3.11 --no-header \
-#       -o agent/requirements.txt agent/requirements.in
+#   uv pip compile --universal --python-version 3.11 --generate-hashes \
+#       --no-header -o agent/requirements.txt agent/requirements.in
+#
+# --generate-hashes is not optional: every consumer installs the lock with
+# --require-hashes, which hard-fails on a lock that has none. Regenerating
+# without it produces a file that cannot be installed anywhere.
 #
 # --universal, because one file has to install on three platforms: the Pi
 # (aarch64 Linux), CI (x86_64 Linux, 3.11 and 3.13) and a Windows dev box. It

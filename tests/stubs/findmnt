@@ -1,0 +1,3 @@
+#!/bin/sh
+printf 'findmnt\t%s\n' "$*" >> "$STUB_LOG"
+echo tmpfs

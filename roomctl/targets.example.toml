@@ -5,7 +5,7 @@ default = "study"            # used when --target is omitted
 
 [study]
 url = "http://100.x.y.z:8080"   # the Pi's tailnet address; `tailscale ip -4` on it
-token = "<the token from /etc/room-display/config.toml on that Pi>"
+token = "<the token from /etc/crossdrop/config.toml on that Pi>"
 
 # A second Pi, e.g. the spare you test release tags on:
 # [spare]

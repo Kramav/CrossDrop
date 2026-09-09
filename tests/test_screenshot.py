@@ -173,7 +173,7 @@ def write_config(tmp_path, kind="chromium"):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch, cdp):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
     with TestClient(app) as c:
         yield c
 
@@ -226,7 +226,7 @@ def test_status_advertises_it(client):
 
 @pytest.mark.parametrize("cdp_kind", ["firefox"])
 def test_firefox_501s_through_the_route(tmp_path, monkeypatch, cdp, cdp_kind):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, kind=cdp_kind)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path, kind=cdp_kind)))
     with TestClient(app) as c:
         r = c.post("/v1/screenshot", headers=H, json={})
         assert r.status_code == 501

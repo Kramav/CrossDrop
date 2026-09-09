@@ -1,4 +1,4 @@
-"""Run: pytest. Real-browser smoke test: ROOM_SMOKE=1 pytest -s"""
+"""Run: pytest. Real-browser smoke test: CROSSDROP_SMOKE=1 pytest -s"""
 
 import os
 import time
@@ -27,7 +27,7 @@ def write_config(tmp_path, autolaunch=False, kind=None):
     p = tmp_path / "config.toml"
     p.write_text(
         f'token = "{TOKEN}"\nhome_url = "about:blank"\n'
-        f'[browser]\nkind = "{kind or os.getenv("ROOM_BROWSER", "firefox")}"\n'
+        f'[browser]\nkind = "{kind or os.getenv("CROSSDROP_BROWSER", "firefox")}"\n'
         f"autolaunch = {str(autolaunch).lower()}\n"
         f'[upload]\nmax_mb = 1\nkeep = 2\n',
         encoding="utf-8",
@@ -37,7 +37,7 @@ def write_config(tmp_path, autolaunch=False, kind=None):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
     with TestClient(app) as c:
         yield c
 
@@ -290,7 +290,7 @@ def live_server(tmp_path, monkeypatch):
     import httpx
     import uvicorn
 
-    monkeypatch.setenv("ROOM_CONFIG", str(write_config(tmp_path, autolaunch=True)))
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path, autolaunch=True)))
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -308,10 +308,10 @@ def live_server(tmp_path, monkeypatch):
     # holding 9222, and the next agent then silently drives that stale browser
     # instead of the one it launched — which is how this got noticed.
     with pytest.raises(RuntimeError):
-        browser.wait_ready(os.getenv("ROOM_BROWSER", "firefox"), 9222, timeout=10)
+        browser.wait_ready(os.getenv("CROSSDROP_BROWSER", "firefox"), 9222, timeout=10)
 
 
-@pytest.mark.skipif(not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
+@pytest.mark.skipif(not os.getenv("CROSSDROP_SMOKE"), reason="set CROSSDROP_SMOKE=1 to drive a real browser")
 def test_smoke_navigate(live_server):
     c = live_server
     r = c.post("/v1/navigate", json={"url": "https://example.com"})
@@ -327,7 +327,7 @@ def test_smoke_navigate(live_server):
     assert c.get("/v1/status").json()["current_url"] == "about:blank"
 
 
-@pytest.mark.skipif(not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
+@pytest.mark.skipif(not os.getenv("CROSSDROP_SMOKE"), reason="set CROSSDROP_SMOKE=1 to drive a real browser")
 def test_smoke_pdf_drop(live_server):
     """PLAN.md §7 Phase 4 acceptance: drop a PDF, it lands on the display."""
     c = live_server

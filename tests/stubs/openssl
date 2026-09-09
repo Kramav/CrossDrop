@@ -1,0 +1,6 @@
+#!/bin/sh
+# Deterministic, so the test can assert on the exact token that was written.
+printf 'openssl\t%s\n' "$*" >> "$STUB_LOG"
+case "$*" in *"rand -hex 32"*)
+  echo "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff" ;;
+esac

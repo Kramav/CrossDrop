@@ -1,0 +1,15 @@
+#!/bin/sh
+# Records what it was asked *and the world it saw*. The interesting ordering --
+# `disable --now` before the unit files are deleted -- spans a stub call and a
+# real `rm`, and stubbing rm is not worth it. So the stub counts the units that
+# still exist at the moment it is called, and the test asserts on one line.
+n=0
+for f in "$HOME/.config/systemd/user"/*.service "$HOME/.config/systemd/user"/*.timer; do
+  [ -e "$f" ] && n=$((n + 1))
+done
+printf 'systemctl\tunits_present=%s\t%s\n' "$n" "$*" >> "$STUB_LOG"
+case "$*" in
+  *is-active*) exit 0 ;;
+  *is-enabled*) echo disabled; exit 1 ;;
+esac
+exit 0

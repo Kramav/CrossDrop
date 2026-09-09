@@ -1,0 +1,5 @@
+#!/bin/sh
+# Nothing in an install test may reach the network. Loud, not silent.
+printf 'curl\t%s\n' "$*" >> "$STUB_LOG"
+echo "STUB REFUSED: curl tried to reach the network: $*" >&2
+exit 91

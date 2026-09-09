@@ -1,0 +1,4 @@
+#!/bin/sh
+printf 'tailscale\t%s\n' "$*" >> "$STUB_LOG"
+case "$*" in *"ip -4"*) echo 100.64.0.1 ;; esac
+exit 0

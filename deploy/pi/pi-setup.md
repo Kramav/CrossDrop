@@ -165,7 +165,7 @@ tr '\0' '\n' < /proc/$(pgrep -u "$USER" labwc | head -1)/environ \
 ```
 
 If `WAYLAND_DISPLAY` is anything other than `wayland-0`, edit that line in
-`~/.config/systemd/user/display-agent.service` to match.
+`~/.config/systemd/user/crossdrop-agent.service` to match.
 
 `XDG_RUNTIME_DIR` should be `/run/user/1000`. If your user isn't uid 1000,
 adjust the `upload.dir` path in the agent config accordingly — check with `id -u`.

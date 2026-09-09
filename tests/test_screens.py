@@ -565,7 +565,7 @@ def test_duplicate_screen_names_rejected(tmp_path):
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("ROOM_CONFIG", str(write_cfg(tmp_path, """
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_cfg(tmp_path, """
 [[screen]]
 name = "left"
 [[screen]]
@@ -677,3 +677,147 @@ def test_cli_scroll_up_is_negative(spy, capsys):
 def test_cli_scroll_bottom_and_screen(spy, capsys):
     assert cli.main(["--screen", "right", "scroll", "--bottom"]) == 0
     assert spy["to"] == "bottom" and spy["screen"] == "right"
+
+
+# --- the settings swap ------------------------------------------------------
+
+def test_a_rename_stops_a_running_autoscroll(running_autoscroll, monkeypatch):
+    """`_autoscroll` is keyed by screen *name*, so a rename moves the name out
+    from under a live loop: /v1/screens then reports autoscroll: false for every
+    screen, the UI's stop button resolves the new name and pops nothing, and
+    browser.autoscroll goes on driving the target it resolved before the rename.
+    A display scrolling with nothing able to stop it but a restart."""
+    cfg = running_autoscroll
+    appmod._autoscroll_start(cfg, "left", 40)
+    assert started("left")
+    appmod.swap_config(cfg, dict(cfg))
+    assert started("left", want=False), "the loop outlived the name it was under"
+
+
+def test_home_status_does_not_name_the_release(client):
+    """Unauthenticated. The tag is the one field here an attacker actually wants
+    -- it says which known bugs this box has -- and the idle page never showed
+    it. /v1/status still carries it, behind the token."""
+    body = client.get("/home-status").json()
+    assert "version" not in body, body
+    assert client.get("/v1/status", headers=AUTH).json()["version"]
+
+
+def test_a_window_matched_by_position_will_not_be_typed_into(monkeypatch):
+    """Navigate may act on a positional match; input may not.
+
+    Showing the wrong monitor a web page is a visible mistake somebody corrects.
+    Typing into the wrong monitor is a password in a box nobody meant to open --
+    and because _targets caches the match, the call that discovers the doubt is
+    never the call that acts on it. So the doubt is remembered, not just logged.
+    """
+    third = {"type": "page", "id": "T3", "url": "http://three/",
+             "webSocketDebuggerUrl": "ws://three"}
+    with_pages(monkeypatch, [third, *PAGES], bounds={
+        "T3": {"left": 9000, "top": 0}, "T1": {"left": 0, "top": 0},
+        "T2": {"left": 1366, "top": 0}})
+    cfg = make_cfg()
+    cfg["screens"][1]["position"] = "1366,0"
+    cfg["interact"] = {"enabled": True, "max_actions": 40, "deadline_ms": 30000}
+
+    assert browser._cdp_page(cfg, "right")["id"] == "T2"        # good enough
+    with pytest.raises(RuntimeError, match="not by identity"):
+        browser._cdp_page(cfg, "right", exact=True)             # not good enough
+    # And through the route that matters, including on the cached second call.
+    with pytest.raises(RuntimeError, match="not by identity"):
+        browser.input(cfg, "right", [{"do": "type", "text": "hunter2"}])
+
+
+def test_a_window_matched_by_index_is_still_typed_into(monkeypatch):
+    """The guard must not refuse the normal case: as many windows as screens is
+    an identity match, and that is every healthy box."""
+    with_pages(monkeypatch, [*PAGES])
+    cfg = make_cfg()
+    cfg["interact"] = {"enabled": True, "max_actions": 40, "deadline_ms": 30000}
+    assert browser._cdp_page(cfg, "right", exact=True)["id"] == "T2"
+
+
+def test_the_doubt_clears_once_the_windows_line_up_again(monkeypatch):
+    """_guessed latched for the life of the process, because _cdp_page answers
+    from the _targets cache and never re-runs _identify.
+
+    So a transient extra target -- an OAuth popup, which is exactly what
+    /v1/input exists to get past -- made one guess, and input was refused for
+    that screen until the browser was relaunched, long after the popup had
+    closed and the count had gone back to matching.
+
+    with_pages() clears _targets, which is the cache under test, so the second
+    half re-stubs /json by hand and leaves the cache alone. Without that this
+    test passed with the fix deleted.
+    """
+    third = {"type": "page", "id": "T3", "url": "http://three/",
+             "webSocketDebuggerUrl": "ws://three"}
+    cfg = make_cfg()
+    cfg["screens"][1]["position"] = "1366,0"
+
+    with_pages(monkeypatch, [third, *PAGES], bounds={
+        "T3": {"left": 9000, "top": 0}, "T1": {"left": 0, "top": 0},
+        "T2": {"left": 1366, "top": 0}})
+    assert browser._cdp_page(cfg, "right")["id"] == "T2"
+    with pytest.raises(RuntimeError, match="not by identity"):
+        browser._cdp_page(cfg, "right", exact=True)
+    assert "right" in browser._guessed
+
+    # The popup closes. Re-stub /json only -- _targets keeps its cached T2, so
+    # this exercises the cache path the bug lived on.
+    monkeypatch.setattr(browser, "_get",
+                        lambda port, path, **k: list(PAGES) if path == "/json"
+                        else {"webSocketDebuggerUrl": "ws://browser"})
+    assert browser._cdp_page(cfg, "right", exact=True)["id"] == "T2"
+    assert "right" not in browser._guessed
+
+
+def test_a_cached_guess_that_no_longer_matches_is_dropped(monkeypatch):
+    """Clearing the doubt on the window *count* alone was worse than latching.
+
+    The cached id was written while the counts disagreed, and "it is still one
+    of the open windows" says nothing about which screen it belongs to. A
+    window closed and reopened left both screens resolving to the same target
+    with the flag cleared -- so /v1/input was accepted and typed into the wrong
+    monitor, which is the whole thing _guessed exists to prevent.
+    """
+    cfg = make_cfg()
+    cfg["screens"][1]["position"] = "1366,0"
+
+    # One window missing: 'right' can only be matched by position, onto T1.
+    with_pages(monkeypatch, [PAGES[0]], bounds={"T1": {"left": 0, "top": 0}})
+    assert browser._cdp_page(cfg, "right")["id"] == "T1"
+    assert browser._guessed == {"right"}
+
+    # The window reopens. Counts match again, but the cached T1 is the *left*
+    # screen's window, so the doubt must not simply be dropped.
+    monkeypatch.setattr(browser, "_get",
+                        lambda port, path, **k: list(PAGES) if path == "/json"
+                        else {"webSocketDebuggerUrl": "ws://browser"})
+    assert browser._cdp_page(cfg, "right", exact=True)["id"] == "T2",         "it kept the stale window and would have typed into the wrong monitor"
+    assert browser._cdp_page(cfg, "left")["id"] == "T1"
+
+
+def test_a_rename_drops_the_screen_to_window_cache(monkeypatch, tmp_path):
+    """browser._targets is keyed by screen *name* and is otherwise only cleared
+    by launch(). Swap two labels in the settings editor and every name still
+    resolves to the window it named before -- navigate, screenshot and inspect
+    all address the wrong panel, and because the mapping came from the cache
+    rather than from _identify, `_guessed` is empty, `_refuse_guess` passes, and
+    /v1/input types into it. The sibling `_autoscroll` dict is cleared for the
+    same reason with a much milder failure.
+    """
+    cfg = make_cfg(names=("left", "right"))
+    with_pages(monkeypatch, [*PAGES])
+    assert browser._cdp_page(cfg, "left")["id"] == "T1"
+    assert browser._cdp_page(cfg, "right")["id"] == "T2"
+    assert browser._targets == {"left": "T1", "right": "T2"}
+
+    # The names swap. Whatever the new mapping is, the old one must not survive.
+    monkeypatch.setattr(appmod.app.state, "cfg", cfg, raising=False)
+    appmod.swap_config(cfg, make_cfg(names=("right", "left")))
+    assert browser._targets == {}, browser._targets
+    assert browser._guessed == set()
+
+    # And the next lookup derives it again, from the new order.
+    assert browser._cdp_page(cfg, "right")["id"] == "T1"

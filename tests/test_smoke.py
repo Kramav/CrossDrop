@@ -1,6 +1,6 @@
 """Real-browser smoke tests — the things a stub cannot prove.
 
-    ROOM_BROWSER=chromium ROOM_SMOKE=1 pytest tests/test_smoke.py -s
+    CROSSDROP_BROWSER=chromium CROSSDROP_SMOKE=1 pytest tests/test_smoke.py -s
 
 Skipped without both. Everything here is CDP-only, so it needs chromium or edge;
 on the Pi that is what runs anyway, and this file is the closest thing to an
@@ -28,7 +28,7 @@ import time
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    not os.getenv("ROOM_SMOKE"), reason="set ROOM_SMOKE=1 to drive a real browser")
+    not os.getenv("CROSSDROP_SMOKE"), reason="set CROSSDROP_SMOKE=1 to drive a real browser")
 
 TOKEN = "test-token"
 
@@ -89,9 +89,9 @@ def kiosk(tmp_path_factory):
     from agent import browser
     from agent.app import app
 
-    kind = os.getenv("ROOM_BROWSER", "chromium")
+    kind = os.getenv("CROSSDROP_BROWSER", "chromium")
     if kind == "firefox":
-        pytest.skip("these routes are CDP-only; set ROOM_BROWSER=chromium")
+        pytest.skip("these routes are CDP-only; set CROSSDROP_BROWSER=chromium")
     try:
         browser._exe(kind)
     except RuntimeError as e:
@@ -113,7 +113,7 @@ def kiosk(tmp_path_factory):
     else:
         pytest.fail("debug port 9222 is already in use — almost certainly the "
                     "live agent. Stop it first: systemctl --user stop "
-                    "display-agent  (see deploy/pi/smoke-on-the-pi.md)")
+                    "crossdrop-agent  (see deploy/pi/smoke-on-the-pi.md)")
 
     tmp = tmp_path_factory.mktemp("smoke")
     cfg = tmp / "config.toml"
@@ -122,8 +122,8 @@ def kiosk(tmp_path_factory):
                    f'[interact]\nenabled = true\n', encoding="utf-8")
 
     with pytest.MonkeyPatch.context() as mp:
-        mp.setenv("ROOM_CONFIG", str(cfg))
-        mp.setenv("ROOM_SETTINGS", str(tmp / "settings.json"))
+        mp.setenv("CROSSDROP_CONFIG", str(cfg))
+        mp.setenv("CROSSDROP_SETTINGS", str(tmp / "settings.json"))
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0,
                                                log_level="warning"))
         thread = threading.Thread(target=server.run, daemon=True)
@@ -136,12 +136,19 @@ def kiosk(tmp_path_factory):
             # The browser comes up on a background thread now, so wait for it
             # rather than racing it: /v1/status carries `error` until it lands,
             # and reports why if it never does.
-            for _ in range(60):
-                if c.get("/v1/status").json()["browser"] == "ok":
-                    break
+            #
+            # 120s, not 30. Chromium under a bare Xvfb with no window manager,
+            # no dbus and no GPU is slow and *variable* -- on a shared CI runner
+            # it has taken anywhere from 15s to over 30s to open its debug port.
+            # At 30s this failed while printing `'browser': 'ok'` in the very
+            # status call it made to build the message, which is the signature of
+            # a timeout rather than a broken browser. Waiting longer costs
+            # nothing on a good run: the loop breaks as soon as it is up.
+            deadline = time.monotonic() + 120
+            while (last := c.get("/v1/status").json())["browser"] != "ok":
+                if time.monotonic() > deadline:
+                    pytest.fail(f"browser never came up in 120s: {last}")
                 time.sleep(0.5)
-            else:
-                pytest.fail(f"browser never came up: {c.get('/v1/status').json()}")
             yield c
         server.should_exit = True
         thread.join(30)

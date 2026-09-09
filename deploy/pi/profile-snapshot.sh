@@ -6,18 +6,18 @@
 #
 # The profile lives on tmpfs (RAM) so a 24/7 kiosk stops grinding the SD card.
 # Nothing in RAM survives a reboot, so the snapshot is also what keeps you
-# logged in to a school page across one. Wired into display-agent.service as
+# logged in to a school page across one. Wired into crossdrop-agent.service as
 # ExecStartPre / ExecStopPost; the hourly timer is opt-in (PLAN.md §9).
 set -euo pipefail
 
-PROFILE="${PROFILE:-/run/user/$(id -u)/room-display/profile}"
+PROFILE="${PROFILE:-/run/user/$(id -u)/crossdrop/profile}"
 # Kept in step with agent/settings.py DATA_DIR by a test, not by hand: the agent
 # and this script each carry their own copy of the default, and a box where the
 # two disagree snapshots into a directory the agent never reads -- which looks
 # exactly like a working install until the reboot that needed the snapshot.
-# Setting ROOM_DATA in display-agent.service covers both, since systemd applies
+# Setting CROSSDROP_DATA in crossdrop-agent.service covers both, since systemd applies
 # Environment= to ExecStartPre and ExecStopPost as well.
-DATA="${ROOM_DATA:-$HOME/.local/share/room-display}"
+DATA="${CROSSDROP_DATA:-$HOME/.local/share/crossdrop}"
 SNAP="${SNAP:-$DATA/profile.tar.gz}"
 
 # Whole profile minus caches. Auth is not just Cookies: Local Storage and

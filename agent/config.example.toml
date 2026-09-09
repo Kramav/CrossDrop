@@ -1,5 +1,5 @@
 # Copy to config.toml (git-ignored). On the Pi this lives at
-# /etc/room-display/config.toml and is pointed at with ROOM_CONFIG.
+# /etc/crossdrop/config.toml and is pointed at with CROSSDROP_CONFIG.
 
 token = "change-me"          # bearer token for every /v1 route
 home_url = "/home"           # page the kiosk opens on launch. http, https,
@@ -66,6 +66,19 @@ autolaunch = true            # false = drive a browser you started yourself
 debug_port = 9222            # 127.0.0.1 only. Debug port == full browser control.
 disk_cache_mb = 100          # On the Pi the profile is tmpfs, so this is RAM.
                              # Uncapped, Chromium fills /run/user/<uid>. Lower on a 2 GB Pi.
+# Which extensions POST /v1/extensions may install. Empty or absent = any valid
+# Web Store id, which is how this shipped and stays the default: a list nobody
+# set must not stop a working display adding an ad blocker.
+#
+# Worth setting on a box that matters. An extension is unpacked into the profile
+# holding every session this kiosk is logged in to, so it can read them all --
+# this is the only route here that writes executable code onto the box, and the
+# only other check is that the id is 32 characters of a-p, which a mistyped or
+# squatted id also satisfies. File-only and needs a restart, like [interact]:
+# an allowlist the API can add to for itself is not an allowlist.
+#
+# allow_extensions = ["ddkjiahejlhfcafbddmgiahcphecmpfh"]   # uBlock Origin Lite
+
 extensions_dir = ""          # chromium/edge only. Every child directory of this
                              # holding a manifest.json is loaded unpacked. The
                              # agent installs into it (/v1/extensions, or the
@@ -85,7 +98,7 @@ extensions_dir = ""          # chromium/edge only. Every child directory of this
                                # if it was last used inside this window; older
                                # than that and it comes up on home_url instead.
                                # 0 = always home. This is what makes the nightly
-                               # restart (deploy/pi/room-display-restart.timer)
+                               # restart (deploy/pi/crossdrop-restart.timer)
                                # invisible: the chart you left up is still up.
 
 # POST /v1/input -- click, drag, type, press keys. OFF unless you turn it on.
