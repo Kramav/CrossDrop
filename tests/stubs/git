@@ -7,11 +7,23 @@
 # $STUB_REAL_GIT, not `git`: this stub is first on PATH, so a bare `git` here is
 # this file calling itself.
 printf 'git\t%s\n' "$*" >> "$STUB_LOG"
-case "$1" in
+
+# The subcommand is not always $1 -- `git -C DIR remote get-url origin` puts it
+# third. Scan for it, and for the -C directory, so `remote` can be answered.
+sub=""; dir=""; prev=""
+for a in "$@"; do
+  case "$a" in
+    -C) : ;;
+    -*) : ;;
+    *) if [ "$prev" = "-C" ]; then dir="$a"; elif [ -z "$sub" ]; then sub="$a"; fi ;;
+  esac
+  prev="$a"
+done
+
+case "$sub" in
   clone)
-    shift
     dest=""
-    for a in "$@"; do case "$a" in -*) ;; *) dest="$a" ;; esac; done
+    for a in "$@"; do case "$a" in -*|clone) ;; *) dest="$a" ;; esac; done
     [ -n "$dest" ] || exit 1
     mkdir -p "$dest"
     "$STUB_REAL_GIT" -C "$STUB_REPO" ls-files --cached --others --exclude-standard \
@@ -20,6 +32,20 @@ case "$1" in
           mkdir -p "${d%/*}"
           cp "$STUB_REPO/$f" "$d" 2>/dev/null || true
         done
+    ;;
+  remote)
+    # Stands in for `remote get-url origin`. A real checkout answers from .git;
+    # here a directory "has a remote" iff a .stub-remote file names one. That is
+    # what lets a test build the shape a real Pi is in -- a `current` with no
+    # .git at all, because update.sh unpacks releases with `git archive` -- and
+    # still exercise the cache-repo the box does have.
+    [ -n "$dir" ] || dir="."
+    if [ -f "$dir/.stub-remote" ]; then
+      cat "$dir/.stub-remote"
+    else
+      echo "fatal: not a git repository: $dir" >&2
+      exit 128
+    fi
     ;;
 esac
 exit 0
