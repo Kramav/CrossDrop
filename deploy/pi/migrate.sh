@@ -104,9 +104,21 @@ if [ -d "$NEW_ETC" ] && [ ! -f "$NEW_ETC/config.toml" ]    && [ ! -f "$OLD_ETC/c
   echo "Nothing has been changed. Restore a config to either path first." >&2
   exit 1
 fi
+# The bare cache clone FIRST, the way update.sh does it, because on the box most
+# likely to be migrated `current` has no remote to ask. Any box that has ever
+# auto-updated has `current` as a symlink into releases/<tag>, and update.sh
+# builds those with `git archive | tar -x` deliberately -- a release is code and
+# nothing else, so there is no .git in it. Only checking `current` meant the
+# common case failed with "no repo url: set REPO=...", and /v1/status reporting a
+# tag rather than "dev" is the tell that a box is in exactly that state.
+[ -n "$REPO" ] || REPO="$(git -C "$OLD_OPT/cache-repo" remote get-url origin 2>/dev/null || true)"
+[ -n "$REPO" ] || REPO="$(git -C "$NEW_OPT/cache-repo" remote get-url origin 2>/dev/null || true)"
 [ -n "$REPO" ] || REPO="$(git -C "$OLD_OPT/current" remote get-url origin 2>/dev/null || true)"
 [ -n "$REPO" ] || REPO="$(git -C "$NEW_OPT/current" remote get-url origin 2>/dev/null || true)"
-[ -n "$REPO" ] || { echo "no repo url: set REPO=..." >&2; exit 1; }
+# And the same default setup.sh carries, so the documented one-liner works with
+# no arguments on a stock box. Overriding REPO= still wins, which is what a fork
+# or a private mirror needs.
+[ -n "$REPO" ] || REPO="https://github.com/Kramav/CrossDrop.git"
 sudo -v
 
 # --- 2. fetch the new code BEFORE destroying the old --------------------------

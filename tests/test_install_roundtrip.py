@@ -572,3 +572,42 @@ def test_a_partly_migrated_box_can_be_finished(box):
     cfg = (box.prefix / f"etc/{NAME}/config.toml").read_text(encoding="utf-8")
     assert V1_TOKEN in cfg, "the token was lost while finishing the migration"
     assert not (box.prefix / f"opt/{OLD_NAME}").exists()
+
+
+# --- finding the repo url ----------------------------------------------------
+# Every migrate test above passes REPO= explicitly, so the derivation was never
+# exercised -- and it was wrong for the commonest box in the field.
+
+def test_migrating_finds_the_repo_on_a_box_that_has_auto_updated(box):
+    """The failure a real Pi hit: `no repo url: set REPO=...`.
+
+    migrate.sh derived REPO from `$OLD_OPT/current` only. Any box that has ever
+    auto-updated has `current` as a symlink into releases/<tag>, and update.sh
+    builds those with `git archive | tar -x` on purpose -- a release is code and
+    nothing else, so there is no .git to ask. update.sh itself checks the bare
+    cache clone *first* for exactly this reason; migrate.sh copied the wrong half.
+
+    /v1/status reporting a tag rather than "dev" is the tell that a box is in
+    this state, because that value only exists if update.sh wrote a VERSION file.
+    """
+    v1_box(box)
+    cache = box.prefix / f"opt/{OLD_NAME}/cache-repo"
+    cache.mkdir(parents=True)
+    (cache / ".stub-remote").write_text("https://example.test/mirror.git\n",
+                                        encoding="utf-8")
+    # No REPO in the environment, which is the whole point.
+    r = box.run(ROOT / "deploy/pi/migrate.sh", pi=True, SETUP=str(SETUP))
+    assert "no repo url" not in r.stderr, r.stderr
+    assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
+    # And it used the mirror the box was actually installed from, not the default.
+    assert any("mirror.git" in c for c in box.calls() if c.startswith("git\t")), \
+        [c for c in box.calls() if c.startswith("git\t")]
+
+
+def test_migrating_falls_back_to_the_public_repo(box):
+    """No cache clone and no remote anywhere: the documented one-liner still has
+    to work on a stock box, so the same default setup.sh carries applies here."""
+    v1_box(box)
+    r = box.run(ROOT / "deploy/pi/migrate.sh", pi=True, SETUP=str(SETUP))
+    assert "no repo url" not in r.stderr, r.stderr
+    assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
