@@ -1,9 +1,10 @@
 """Run: pytest.
 
 The screens editor (PLAN.md §7, v1.1.0). What matters here is that a bad edit
-never reaches disk — the Pi has no keyboard, so a saved position that breaks
-placement is not something you can undo at the box — and that a rename carries
-through to the idle page's ?screen=.
+never reaches disk — the Pi has no keyboard, so a bad save is not something you
+can undo at the box — that a rename carries through to the idle page's
+?screen=, and that the monitor layout is always xrandr's rather than a saved
+copy of it that goes stale.
 """
 
 import json
@@ -85,11 +86,16 @@ def test_apply_matches_by_index_not_name(store):
     assert [s["name"] for s in cfg["screens"]] == ["Samsung", "Acer"]
 
 
-def test_blank_override_falls_back_to_detected(store):
-    """Blanking position in the UI is the re-detect path."""
+def test_a_saved_layout_never_beats_the_detected_one(store):
+    """The whole point of the dynamic layout: settings.json may rename a screen
+    and repoint its home_url, but geometry always comes from what is attached
+    right now. A stale saved position used to put both windows on one monitor."""
     cfg = base_cfg()
-    settings.apply(cfg, {"screens": [{"name": "x", "position": ""}]})
+    settings.apply(cfg, {"screens": [
+        {"name": "x", "position": "9999,9999", "size": "1x1"}]})
+    assert cfg["screens"][0]["name"] == "x", "the rename still applies"
     assert cfg["screens"][0]["position"] == "0,0"
+    assert cfg["screens"][0]["size"] == "800x600"
 
 
 def test_extra_saved_screens_are_ignored(store):
@@ -127,8 +133,7 @@ def put(client, screens):
 
 
 def ok_screens(**over):
-    s = [{"name": "left", "home_url": HOME, "position": "0,0", "size": "800x600"},
-         {"name": "right", "home_url": HOME, "position": "800,0", "size": "800x600"}]
+    s = [{"name": "left", "home_url": HOME}, {"name": "right", "home_url": HOME}]
     s[1].update(over)
     return s
 
@@ -148,8 +153,6 @@ def test_get_reports_current_screens(client):
     (ok_screens(name="   "), "empty name"),
     (ok_screens(name="left"), "duplicate name"),
     (ok_screens(home_url="file:///etc/passwd"), "bad scheme"),
-    (ok_screens(position="1366"), "position missing a comma"),
-    (ok_screens(size="2560*1440"), "size with the wrong separator"),
 ])
 def test_bad_edits_are_rejected_and_nothing_is_written(client, store, screens, why):
     assert put(client, screens).status_code == 422, why
@@ -179,21 +182,40 @@ def test_config_dict_identity_survives_a_save(client):
     assert app.state.cfg is before
 
 
-def test_a_dead_browser_does_not_fail_the_save(client, store):
+def test_a_dead_browser_does_not_fail_the_save(tmp_path, store, monkeypatch):
     """The settings are already on disk by then; a window that could not be
-    moved is a note, not a 500."""
-    r = put(client, ok_screens(position="1920,0"))
-    assert r.status_code == 200
-    assert "not moved" in r.json()["note"]
-    assert json.loads(store.read_text())["screens"][1]["position"] == "1920,0"
+    moved is a note, not a 500.
+
+    Reaching place() at all now means the layout moved under the agent, which is
+    exactly the case the windows have to follow -- no [[screen]] blocks, so the
+    geometry comes from detect() and can differ between the request's two loads.
+    """
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
+                   '[browser]\nkind = "chromium"\nautolaunch = false\n',
+                   encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
+    calls = []
+
+    def detect():                   # the monitor moves between the two loads
+        calls.append(1)
+        return [{"output": "HDMI-1", "size": "800x600",
+                 "position": "1920,0" if len(calls) > 1 else "0,0"}]
+
+    monkeypatch.setattr(appmod.display, "detect", detect)
+    with TestClient(app) as c:
+        r = c.put("/v1/settings", headers=AUTH,
+                  json={"screens": [{"name": "only", "home_url": HOME}]})
+    assert r.status_code == 200, r.text
+    assert "not moved" in r.json()["note"], r.text
 
 
-def test_blank_position_is_saved_as_a_reset(client, store):
-    r = put(client, ok_screens(position="", size=""))
-    assert r.status_code == 200
-    assert json.loads(store.read_text())["screens"][1]["position"] == ""
-    # Nothing to place, so no note about a window that was never asked to move.
-    assert r.json()["note"] == ""
+def test_geometry_is_never_written_to_disk(client, store):
+    """settings.json holds intent -- a name and a home_url. Hardware facts stay
+    with the hardware, or the next monitor swap is fought by the last one."""
+    assert put(client, ok_screens(name="Acer")).status_code == 200
+    saved = json.loads(store.read_text())["screens"]
+    assert all("position" not in s and "size" not in s for s in saved), saved
 
 
 def test_an_unplugged_monitor_does_not_delete_its_saved_screen(tmp_path, store,

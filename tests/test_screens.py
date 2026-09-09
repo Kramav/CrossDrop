@@ -83,9 +83,11 @@ def test_lost_window_falls_back_to_config_order(cdp):
 
 
 # --- which window is which --------------------------------------------------
-# The fallback maps screens to windows by position in /json's list. That is the
-# order the windows were opened in -- but only while the list holds nothing but
-# those windows, and a browser with extensions loaded does not guarantee that.
+# Screens map to windows by where those windows sit, asked of the browser. NOT
+# by their place in /json's list: that list is ordered most-recently-used, so it
+# reorders itself whenever focus moves and never meant "the order they opened
+# in". List order survives only as the last resort, for a session with no
+# geometry to match on at all.
 
 def with_pages(monkeypatch, pages, bounds=None):
     """Re-stub /json with `pages`, and optionally give each window a position."""
@@ -181,6 +183,58 @@ def test_a_window_a_few_pixels_off_still_matches(monkeypatch):
     cfg = make_cfg()
     cfg["screens"][1]["position"] = "1366,0"
     assert browser._cdp_page(cfg, "right")["id"] == "T2"
+
+
+def test_focus_order_does_not_cross_the_screens(monkeypatch):
+    """The bug, on real hardware. Chromium's /json is ordered most-recently-used,
+    not by creation, so `pages[i]` handed screen 1 whichever window was touched
+    last. /v1/screens reported the left monitor showing the right one's idle page
+    and the right one showing the left's, both panels named the wrong screen, and
+    /v1/input accepted it because list order counted as identity.
+
+    Bounds do not move when focus does. T2 is listed first here, as it was on the
+    Pi, and the mapping must not follow it.
+    """
+    cfg = make_cfg()
+    cfg["screens"][0]["position"] = "0,0"
+    cfg["screens"][1]["position"] = "2560,0"
+    with_pages(monkeypatch, [PAGES[1], PAGES[0]], bounds={
+        "T1": {"left": 0, "top": 0}, "T2": {"left": 2560, "top": 0}})
+
+    assert browser._cdp_page(cfg, "left")["id"] == "T1"
+    assert browser._cdp_page(cfg, "right")["id"] == "T2"
+    # And this is identity, not a guess: refusing input here would make the fix
+    # useless on the only box that has two monitors.
+    assert browser._guessed == set(), browser._guessed
+
+
+def test_launch_names_the_first_window_while_it_is_the_only_one(tmp_path,
+                                                                monkeypatch):
+    """Window 1 is opened by --kiosk carrying screen 1's url and never announces
+    itself, so this is the one moment it can be identified with certainty. Once
+    open_window has run there is nothing left to tell the windows apart but
+    bounds -- and on a mirrored session not even those.
+    """
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda argv, **kw: None)
+    monkeypatch.setattr(browser, "wait_ready", lambda *a, **kw: None)
+    monkeypatch.setattr(browser, "_exe", lambda kind, path="": "/usr/bin/chromium")
+    # Only window 1 exists when launch() looks; open_window makes the second.
+    monkeypatch.setattr(browser, "_get", lambda port, path, **k:
+                        [PAGES[0]] if path == "/json"
+                        else {"webSocketDebuggerUrl": "ws://browser"})
+
+    @contextlib.contextmanager
+    def rpc(ws_url):
+        yield lambda method, params=None: {"targetId": "T2", "windowId": 7,
+                                           "bounds": {}}
+
+    monkeypatch.setattr(browser, "_rpc", rpc)
+    cfg = make_cfg()
+    cfg["browser"] |= {"path": "", "disk_cache_mb": 100,
+                       "profile_dir": str(tmp_path / "profile")}
+
+    browser.launch(cfg)
+    assert browser._targets == {"left": "T1", "right": "T2"}, browser._targets
 
 
 def test_an_unmatched_count_with_nothing_to_match_on_says_so(monkeypatch):

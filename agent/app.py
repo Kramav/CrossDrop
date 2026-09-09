@@ -618,8 +618,6 @@ class ScreenOut(BaseModel):
 class ScreenSettingIn(BaseModel):
     name: str
     home_url: str
-    position: str = ""      # "" means "use what xrandr detected" — the reset path
-    size: str = ""
 
 
 class SettingsIn(BaseModel):
@@ -627,8 +625,11 @@ class SettingsIn(BaseModel):
 
 
 class ScreenSettingOut(ScreenSettingIn):
-    detected_position: str = ""     # what xrandr says right now, for placeholders
-    detected_size: str = ""
+    # Reported, never accepted: geometry comes from xrandr at every load, so
+    # these are what the agent resolved to, for the UI to show. See
+    # settings.SCREEN_FIELDS.
+    position: str = ""
+    size: str = ""
 
 
 class SettingsOut(BaseModel):
@@ -1049,15 +1050,12 @@ def remove_extension(name: str) -> ExtensionsOut:
 # agent runs; config.toml is never made agent-writable.
 
 def _settings_out(note: str = "") -> SettingsOut:
-    found = display.detect()
     return SettingsOut(
         path=str(settings.path()), note=note,
         screens=[ScreenSettingOut(
             name=s["name"], home_url=s["home_url"],
-            position=s["position"], size=s["size"],
-            detected_position=found[i]["position"] if i < len(found) else "",
-            detected_size=found[i]["size"] if i < len(found) else "")
-            for i, s in enumerate(app.state.cfg["screens"])])
+            position=s["position"], size=s["size"])
+            for s in app.state.cfg["screens"]])
 
 
 @app.get("/v1/settings", response_model=SettingsOut, dependencies=[Depends(auth)])
@@ -1084,19 +1082,11 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     for s in body.screens:
         if not s.home_url.startswith(("http://", "https://")):
             raise HTTPException(422, f"{s.home_url!r}: home_url must be http or https")
-        # browser._pair is the one place that knows these formats and it already
-        # names the offending value; a second regex here would only drift.
-        try:
-            if s.position.strip():
-                browser._pair(s.position.strip(), ",", "position")
-            if s.size.strip():
-                browser._pair(s.size.strip(), "x", "size")
-        except RuntimeError as e:
-            raise HTTPException(422, str(e))
 
     before = [(s["position"], s["size"]) for s in cfg["screens"]]
-    rows = [{"name": n, "home_url": s.home_url.strip(),
-             "position": s.position.strip(), "size": s.size.strip()}
+    # Name and home_url only. Geometry is never written here -- see
+    # settings.SCREEN_FIELDS for why a saved layout was worse than no layout.
+    rows = [{"name": n, "home_url": s.home_url.strip()}
             for n, s in zip(names, body.screens)]
     # Merged, not replaced: the editor only ever sees the monitors detected right
     # now, and a save with one unplugged must not delete the other screen's saved
@@ -1122,9 +1112,14 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     # place, not reassigned: display.watch() closed over this dict.
     swap_config(cfg, load_config())
 
-    # The live half, and the only reason this beats editing a file: the window
-    # moves while you watch. It must not fail the request -- the settings are
-    # already saved, and a dead browser is not a bad save.
+    # The live half. swap_config reloaded through load_config(), which re-ran
+    # display.detect() -- so if a monitor was swapped, unplugged or replugged
+    # since this agent started, `before` and the new geometry differ here and the
+    # windows follow the current layout without a restart. Saving the screens is
+    # therefore also the manual "re-sync my monitors" button.
+    #
+    # It must not fail the request -- the settings are already saved, and a dead
+    # browser is not a bad save.
     # zip, not before[i]: `before` was taken from the old config and the swap
     # above reloads from disk, so the two lists need not be the same length. A
     # monitor plugged in during the request made this an IndexError -- a 500 out
