@@ -352,7 +352,7 @@ async function api(path, body) {
   });
 }
 
-async function act(fn) {
+async function act(fn, recapture = true) {
   $("#status").textContent = "…";
   // Whatever this is about to do, any picture already on the page is of the
   // state before it. Here rather than in req(), because "non-GET" is not the
@@ -364,7 +364,28 @@ async function act(fn) {
   // look() and inputThen() go through it too and clear the mark themselves when
   // the replacement pictures land.
   markStale();
-  try { await fn(); $("#status").textContent = ""; }
+  try {
+    await fn();
+    // Whatever just ran changed the page, so the picture on the stage is of the
+    // state before it — a dropped file, a new link, a scroll. Retake it, but
+    // only when there *was* one: an empty stage has nothing misleading on it,
+    // and a capture nobody asked for costs a CDP round trip plus a PNG encode
+    // on a Pi that is already busy rendering the page being captured.
+    //
+    // Off for the two that photograph themselves (look, inputThen) and the two
+    // with nothing worth photographing afterwards: a minimized window renders
+    // offscreen, and a display just switched off is dark.
+    if (recapture && shown.length && can("screenshot")) {
+      // The old picture is still up and dimmed here, so say what the wait is
+      // for rather than leaving it looking wedged.
+      $("#badgetext").textContent = "waiting for the page…";
+      const names = shotScreens();
+      // Independent polls, so "all" waits once rather than once per monitor.
+      await Promise.all(names.map(settle));
+      await lookAt(names);
+    }
+    $("#status").textContent = "";
+  }
   catch (e) { $("#status").textContent = "✗ " + e.message; }
   refresh();
 }
@@ -441,7 +462,15 @@ async function shotFigure(s) {
   return fig;
 }
 
+// Bumped by every lookAt. Switching screens now captures on its own, so two
+// can be in flight at once — and a slow capture of the screen you just left
+// must not land after the fast one of the screen you are on. It would leave
+// `shown` naming one monitor while the stage shows another, which is what
+// aims the next click at the wrong panel.
+let lookSeq = 0;
+
 async function lookAt(names) {
+  const seq = ++lookSeq;
   // Build the replacements first, swap them in once. Clearing up front left an
   // empty stage for the whole round trip — worst right after a click, which is
   // exactly when you are watching. The old picture stays up, dimmed, until
@@ -452,9 +481,11 @@ async function lookAt(names) {
   const shots = [];
   for (const name of names) {
     const s = await api("/v1/screenshot", { screen: name });
+    if (seq !== lookSeq) return;    // superseded: stop spending round trips too
     shots.push(s);
     figures.push(await shotFigure(s));
   }
+  if (seq !== lookSeq) return;
   // Decoded and ready to paint by here, so this is the only frame that changes.
   $("#shots").replaceChildren(...figures);
   $("#shots").classList.remove("stale");
@@ -486,7 +517,7 @@ function markStale() {
 
 function look() {
   shown = [];                             // re-read the armed screen
-  return act(() => lookAt(shotScreens()));
+  return act(() => lookAt(shotScreens()), false);   // this *is* the capture
 }
 
 // --- input ------------------------------------------------------------------
@@ -553,7 +584,7 @@ async function inputThen(screen, actions) {
     $("#badgetext").textContent = "waiting for the page…";
     await settle(screen);
     await lookAt([screen]);
-  });
+  }, false);                              // captures the acted screen itself
 }
 
 const clickAt = (screen, x, y) => inputThen(screen, [{ do: "click", x, y }]);
@@ -623,9 +654,16 @@ function drawScreens() {
     b.textContent = (name === "all" ? label : name)
       + (row && row.autoscroll ? " ⏬" : "");
     b.onclick = () => {
+      // Was there a picture up? Switching screens left the *other* monitor's
+      // capture on the stage, so you were looking at one screen while every
+      // control aimed at another — and nothing on the page said so.
+      const wasShowing = shown.length > 0;
       target = localStorage.screen = name;
       shown = [];                       // the picture is of the other screen now
       drawScreens();
+      // Only when one was up: an empty stage is not misleading, and a capture
+      // nobody asked for is a round trip and a PNG encode on a busy Pi.
+      if (wasShowing && can("screenshot")) look();
     };
     return b;
   }));
@@ -726,14 +764,19 @@ const ACT = {
   })),
   // Two commands, not a toggle: the page never learns that someone minimized the
   // window from the Pi's own keyboard, so a toggle would lie half the time.
-  aside: () => act(() => api("/v1/window", { state: "minimized" })),
+  // No recapture on either: a minimized window renders offscreen, so the
+  // picture would be of nothing, and it would put the stale badge back on a
+  // stage the user just deliberately set aside.
+  aside: () => act(() => api("/v1/window", { state: "minimized" }), false),
   full: () => act(() => api("/v1/window", { state: "fullscreen" })),
   power: () => act(() => req("/v1/display", {
     // Not api(): /v1/display takes no screen — the monitors sleep together.
     method: "POST",
     headers: { "Content-Type": "application/json", ...auth() },
     body: JSON.stringify({ action: awake ? "off" : "on" }),
-  })),
+    // A display being switched off has nothing worth photographing; switching
+    // it on lands on whatever was already there, which the stage still shows.
+  }), false),
   home: () => act(() => api("/v1/home")),
   reload: () => act(() => api("/v1/reload")),
 };
