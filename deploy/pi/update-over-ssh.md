@@ -177,14 +177,29 @@ The broken release is left in `releases/<tag>/` on purpose, so you can read it.
 ## 6. Config-only change
 
 `config.toml` holds the token and the install-time facts, and the agent
-deliberately cannot write it (`root:<user> 640`). It needs `sudo` and a restart
-— nothing here is picked up live.
+deliberately cannot write it (`root:<user> 640`). It needs `sudo`.
 
 ```sh
 # on the Pi — absolute path, any directory
 sudo nano /etc/crossdrop/config.toml
+```
+
+The agent re-reads the file within a few seconds of a save, so the token, the
+`[[screen]]` blocks and `[interact]` take effect on their own. `[browser]`
+settings — `kind`, `profile_dir`, `debug_port`, `extensions_dir` — do **not**:
+the browser is already running with them, so those still want a restart:
+
+```sh
+# on the Pi
 systemctl --user restart crossdrop-agent
 ```
+
+A malformed edit costs you the edit, not the display: the agent logs why and
+goes on serving the config it already has until the file parses again. Which
+file it loaded, and how long the token in it is, are the first thing it prints —
+`config: /etc/crossdrop/config.toml (token 64 chars)`. A length that is not 64
+is a token that got wrapped or truncated by an editor, which reads as "my token
+stopped working".
 
 **Turning on typing** is this, and it is the one setting worth spelling out. Add:
 

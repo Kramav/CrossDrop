@@ -356,7 +356,7 @@ this whole project cannot otherwise recover from.
 `POST /v1/input` is the way out, and it **ships off**:
 
 ```toml
-# /etc/crossdrop/config.toml, then restart the agent
+# /etc/crossdrop/config.toml — picked up within seconds, no restart
 [interact]
 enabled = true
 ```

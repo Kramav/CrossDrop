@@ -699,3 +699,57 @@ def test_an_autoscroll_starting_during_a_swap_is_still_stopped(monkeypatch):
     appmod.swap_config(cfg, fresh)
     assert "left" not in appmod._autoscroll, \
         "a loop is running under a name no screen has; only a restart stops it"
+
+
+# --- config.toml follows the file -------------------------------------------
+
+def test_an_edited_token_takes_effect_without_a_restart(tmp_path, monkeypatch):
+    """config.toml is root-owned and edited with sudo, so the natural loop is
+    "edit it, then check whether it worked". auth() compares against the token
+    loaded at boot, so before this the file and the running agent diverged in
+    silence: the correct token out of the file 401'd, and nothing on either side
+    said why. The whole config is reloaded, not just the token -- swap_config is
+    the same path the settings editor uses.
+    """
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('token = "first"\nhome_url = "https://e.test/"\n'
+                        '[browser]\nautolaunch = false\n', encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg_path))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(appmod, "CONFIG_TICK", 0.02)
+
+    with TestClient(app) as c:
+        assert c.get("/v1/screens",
+                     headers={"Authorization": "Bearer first"}).status_code == 200
+        cfg_path.write_text('token = "second"\nhome_url = "https://e.test/"\n'
+                            '[browser]\nautolaunch = false\n', encoding="utf-8")
+        ok = until(lambda: c.get("/v1/screens", headers={
+            "Authorization": "Bearer second"}).status_code == 200)
+        assert ok, "the agent kept the token it booted with"
+        assert c.get("/v1/screens",
+                     headers={"Authorization": "Bearer first"}).status_code == 401
+
+
+def test_a_malformed_edit_does_not_take_the_agent_down(tmp_path, monkeypatch):
+    """The box has no keyboard. A half-saved or mistyped config.toml must cost
+    you the edit, not the display -- the agent goes on serving the config it
+    already loaded until the file parses again."""
+    cfg_path = tmp_path / "config.toml"
+    good = ('token = "first"\nhome_url = "https://e.test/"\n'
+            '[browser]\nautolaunch = false\n')
+    cfg_path.write_text(good, encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg_path))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(appmod, "CONFIG_TICK", 0.02)
+
+    with TestClient(app) as c:
+        auth = {"Authorization": "Bearer first"}
+        assert c.get("/v1/screens", headers=auth).status_code == 200
+        cfg_path.write_text("token = \nthis is not toml\n", encoding="utf-8")
+        time.sleep(0.2)                     # long enough for several ticks
+        assert c.get("/v1/screens", headers=auth).status_code == 200, \
+            "a bad edit took the running config down with it"
+        # And it recovers on the next good save, without a restart.
+        cfg_path.write_text(good.replace("first", "third"), encoding="utf-8")
+        assert until(lambda: c.get("/v1/screens", headers={
+            "Authorization": "Bearer third"}).status_code == 200)

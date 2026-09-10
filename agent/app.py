@@ -84,6 +84,13 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         log.warning("%s: token has non-ASCII characters in it, so it can never "
                     "be sent in an Authorization header -- every request will "
                     "401. Use hex or base64: openssl rand -hex 32", path)
+    # Which file, and how long the token in it is. auth() compares against the
+    # token loaded *here*, so editing config.toml without restarting leaves the
+    # file and the running agent disagreeing with nothing on either side saying
+    # so -- you hold the right token, every call 401s, and the file looks fine.
+    # The length alone is enough to spot a truncated or line-wrapped one (a hex
+    # token is 64), and it is not a secret the way the token itself is.
+    log.info("config: %s (token %d chars)", path, len(str(cfg["token"])))
 
     # No [[screen]] blocks -> ask X, so a fresh install drives every connected
     # monitor with no config edit. Explicit blocks win; nothing detected
@@ -245,6 +252,50 @@ def targets(cfg: dict, name: str | None) -> list[dict]:
     return list(cfg["screens"]) if name == "all" else [screen_of(cfg, name)]
 
 
+CONFIG_TICK = 5.0                   # seconds between config.toml mtime checks
+
+
+def watch_config(cfg: dict, stop: threading.Event) -> None:
+    """Re-read config.toml when it changes on disk. Returns when `stop` is set.
+
+    auth() compares against cfg["token"] on every request and screen_of() reads
+    the screen list on every request, so an edit to either lands as soon as this
+    notices. What does *not* land is anything the browser was launched with --
+    profile_dir, debug_port, browser.kind, the extensions directory -- because
+    that browser is already running. Same rule the settings editor lives by, and
+    the reason `[browser]` changes still want a restart.
+
+    The failure this removes: config.toml is root-owned and edited with sudo, so
+    the natural thing is to edit it and check whether it worked. Before this, the
+    running agent went on serving the token it loaded at boot, every call 401'd
+    with the correct token in hand, and nothing anywhere said the file and the
+    process disagreed.
+    """
+    path = Path(os.getenv("CROSSDROP_CONFIG") or Path(__file__).parent / "config.toml")
+    try:
+        seen = path.stat().st_mtime_ns
+    except OSError:
+        return                          # no file to watch; load_config already ran
+    while not stop.wait(CONFIG_TICK):
+        try:
+            now = path.stat().st_mtime_ns
+            if now == seen:
+                continue
+            seen = now                  # before the load, so a bad edit is not retried
+            fresh = load_config()
+        except OSError as e:            # mid-save rename, or the file went away
+            log.warning("config: %s could not be read: %s", path, e)
+        except Exception as e:
+            # Never raise out of here. A malformed edit must cost you the *edit*,
+            # not the display -- the box has no keyboard, and the agent goes on
+            # serving the config it already has until the file parses again.
+            log.error("config: %s did not load, keeping the running config: %s",
+                      path, e)
+        else:
+            swap_config(cfg, fresh)
+            log.info("config: reloaded %s", path)
+
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
@@ -260,6 +311,11 @@ async def lifespan(app: FastAPI):
     app.state.proc = None
     app.state.launch_error = ""
     app.state.stopping = threading.Event()
+    # Not gated on `launch`: selfcheck exits in seconds and a config reload
+    # touches no monitor, but an agent driving a browser it did not start still
+    # wants its token to follow the file.
+    threading.Thread(target=watch_config, args=(cfg, app.state.stopping),
+                     daemon=True).start()
     watching = None
     if launch:
         # Only when we own the kiosk -- selfcheck must not blank real monitors.
