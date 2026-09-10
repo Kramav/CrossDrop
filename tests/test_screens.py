@@ -208,6 +208,51 @@ def test_focus_order_does_not_cross_the_screens(monkeypatch):
     assert browser._guessed == set(), browser._guessed
 
 
+def test_a_half_screen_is_sized_and_never_fullscreened(cdp):
+    """The primitive the whole split rests on. `size` is cosmetic for a screen
+    that ends up fullscreen anyway; for a half it is the entire point, so the
+    fullscreen call must not come along and undo it."""
+    cfg = make_cfg()
+    cfg["screens"][1] |= {"position": "1280,0", "size": "1280x1440",
+                          "fullscreen": False}
+    # Resolve the window up front, so what `cdp` records is _place's own calls
+    # and not _cdp_page working out which window it is.
+    browser._targets["right"] = "T2"
+    browser.place(cfg, cfg["screens"][1])
+
+    methods = [m for _, m, _ in cdp]
+    assert "fullscreen" not in str(cdp), "a half was fullscreened away"
+    # Leaves fullscreen first, then moves -- a bounds change made to a window
+    # that is still fullscreen lands on its restored bounds, not on the window.
+    assert methods == ["Browser.getWindowForTarget", "Browser.setWindowBounds",
+                       "Browser.setWindowBounds"], methods
+    assert cdp[1][2]["bounds"] == {"windowState": "normal"}
+    assert cdp[2][2]["bounds"] == {"left": 1280, "top": 0, "width": 1280,
+                                   "height": 1440, "windowState": "normal"}
+
+
+def test_two_windows_at_one_origin_are_both_refused(monkeypatch):
+    """A tie is not an identity, and only this side of the comparison sees it.
+
+    Two screens sharing a panel -- two halves of a split, or a compositor that
+    re-fullscreened both -- report the same bounds. Asking for the *left* one
+    then finds both windows at gap 0 and compares that against the *right*
+    screen's origin, which passes: `alone` came back true, nothing was flagged,
+    and /v1/input would have typed into whichever window /json listed first.
+    Both halves must be doubted, not one.
+    """
+    cfg = make_cfg()
+    cfg["screens"][0]["position"] = "0,0"
+    cfg["screens"][1]["position"] = "1280,0"
+    with_pages(monkeypatch, [*PAGES], bounds={          # both on the panel origin
+        "T1": {"left": 0, "top": 0}, "T2": {"left": 0, "top": 0}})
+
+    browser._cdp_page(cfg, "left")
+    assert "left" in browser._guessed, "a tie was accepted as an identity"
+    with pytest.raises(RuntimeError, match="not by identity"):
+        browser._cdp_page(cfg, "left", exact=True)
+
+
 def test_launch_names_the_first_window_while_it_is_the_only_one(tmp_path,
                                                                 monkeypatch):
     """Window 1 is opened by --kiosk carrying screen 1's url and never announces
@@ -582,14 +627,21 @@ def test_a_path_home_url_resolves_to_this_agent(tmp_path):
     assert cfg["screens"][0]["home_url"].endswith("?screen=main")
 
 
-def test_the_shipped_example_config_is_loadable(tmp_path):
+def test_the_shipped_example_config_is_loadable(tmp_path, monkeypatch):
     """config.example.toml is copied verbatim on a fresh install. It shipped a
-    home_url that PUT /v1/settings rejected and Page.navigate could not use."""
+    home_url that PUT /v1/settings rejected and Page.navigate could not use.
+
+    The example carries no token any more -- that is its own file -- so this
+    also pins that a config with nothing secret in it still loads.
+    """
     example = (Path(__file__).parent.parent / "agent/config.example.toml"
                ).read_text(encoding="utf-8")
     p = tmp_path / "config.toml"
-    p.write_text(example.replace('token = "change-me"', 'token = "t"'),
-                 encoding="utf-8")
+    p.write_text(example, encoding="utf-8")
+    tok = tmp_path / "token"
+    tok.write_text("t", encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_TOKEN", str(tok))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "none.json"))
     cfg = appmod.load_config(p)
     assert cfg["screens"][0]["home_url"].startswith(("http://", "https://"))
 

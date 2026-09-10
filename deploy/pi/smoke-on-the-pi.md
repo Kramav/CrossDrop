@@ -8,7 +8,8 @@
 > | Path | What lives there |
 > |---|---|
 > | `/opt/crossdrop/current` | the code, `tests/`, and `.venv` — **run from here** |
-> | `/etc/crossdrop/config.toml` | the token and install-time facts |
+> | `/etc/crossdrop/token` | the bearer token, and nothing else |
+> | `/etc/crossdrop/config.toml` | install-time facts; no secret, safe to read |
 > | `~/.local/share/crossdrop/` | settings, and the profile snapshot |
 
 `pytest` on its own needs no browser and proves the agent's logic. The **smoke**

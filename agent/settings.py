@@ -25,6 +25,27 @@ from pathlib import Path
 # keyboard.
 SCREEN_FIELDS = ("name", "home_url")
 
+# The partition, beside SCREEN_FIELDS: the non-screen settings the API may
+# write. Deliberately short. A key earns a place here by being something the web
+# UI actually changes -- not merely by being harmless.
+#
+# Everything else stays in config.toml, which is root-owned and which the agent
+# cannot write: `browser.path` is what launch() execs, `extensions_dir` is where
+# unpacked code is loaded from, `[interact]` is the typing switch, `[server]` is
+# what the agent binds. Those decide *what runs* on the box.
+#
+# The install-time tuning -- home_url, the display timers, disk_cache_mb, the
+# upload caps -- stays there too, for a duller reason: nothing edits it. Moving
+# a key here that no caller writes would buy a second place to look and a
+# precedence rule to remember, which is the confusion this partition exists to
+# remove.
+#
+# (section, key); section None would mean the top level.
+SAFE_KEYS = (
+    ("browser", "mode"),        # kiosk / fullscreen, toggled from the UI
+    ("display", "splits"),      # which outputs are cut in half, by connector
+)
+
 # The deployed name, not the repo name -- PLAN.md §11 "Naming". Renaming an
 # installation is a migration on hardware nobody can reach with a keyboard.
 DATA_DIR = ".local/share/crossdrop"
@@ -100,9 +121,15 @@ def merge_screens(rows: list[dict]) -> dict:
 def apply(cfg: dict, data: dict | None = None) -> dict:
     """Overlay saved settings onto a freshly loaded config, in place.
 
-    By **index**, not by name: the name is itself editable, so matching on it
-    would make every rename look like a new screen and drop the override.
-    `display.detect()` sorts left to right, so the index is the identity.
+    Matched on `output` -- the connector a screen came from ("HDMI-1"), or one
+    half of it ("HDMI-1-L") -- falling back to list index for rows saved before
+    that field existed.
+
+    Not by *name*: the name is editable, so matching on it would make every
+    rename look like a new screen and drop the override. Index was the identity
+    until splitting arrived; a split adds and removes rows, so every saved name
+    after the split point would slide onto the wrong screen. `output` is the one
+    thing here that neither the user nor the layout can change.
     """
     data = load() if data is None else data
     # Shape-checked, not just type-checked. `load()` only proved the top level is
@@ -118,15 +145,56 @@ def apply(cfg: dict, data: dict | None = None) -> dict:
             log.error("settings.json: `screens` is %s, not a list — ignoring the "
                       "saved overrides", type(rows).__name__)
         rows = []
-    for screen, over in zip(cfg["screens"], rows):
-        if not isinstance(over, dict):
-            log.error("settings.json: a screen entry is %s, not an object — "
-                      "ignoring it", type(over).__name__)
-            continue
-        for f in SCREEN_FIELDS:
-            # Truthy, not `is not None`: blanking a field in the UI must fall
-            # back to what xrandr detected rather than store an empty position
-            # and leave a window unplaceable. That is the whole re-detect path.
-            if over.get(f):
-                screen[f] = over[f]
+    rows = [r for r in rows if _an_object(r)]
+    # Rows that name an output are matched to the screen from that output; the
+    # rest fall back to their old positional meaning. A file written before
+    # `output` existed therefore behaves exactly as it did, and gets stamped on
+    # the next save -- which is the whole migration.
+    by_output = {r["output"]: r for r in rows if r.get("output")}
+    positional = [r for r in rows if not r.get("output")]
+    for screen, over in zip(cfg["screens"], positional):
+        _overlay(screen, over)
+    for screen in cfg["screens"]:
+        over = by_output.get(screen.get("output"))
+        if over:
+            _overlay(screen, over)
+
     return cfg
+
+
+def apply_keys(cfg: dict, data: dict | None = None) -> dict:
+    """Overlay the saved non-screen settings (SAFE_KEYS) onto `cfg`, in place.
+
+    Separate from apply(), and called before it, because the screen list is
+    *derived* from two of these: `display.splits` says how many screens there
+    are, and `browser.mode` decides whether a split is allowed at all. They have
+    to be in place before there is a list to overlay screen rows onto.
+    """
+    data = load() if data is None else data
+    for section, key in SAFE_KEYS:
+        src = data.get(section) if section else data
+        if not isinstance(src, dict):
+            continue
+        # `in`, not truthiness: a saved value of 0 or "" is a real answer here,
+        # while the screen fields want the opposite rule -- which is the other
+        # reason these are two functions.
+        if key in src:
+            (cfg[section] if section else cfg)[key] = src[key]
+    return cfg
+
+
+def _an_object(row) -> bool:
+    if isinstance(row, dict):
+        return True
+    log.error("settings.json: a screen entry is %s, not an object — ignoring it",
+              type(row).__name__)
+    return False
+
+
+def _overlay(screen: dict, over: dict) -> None:
+    for f in SCREEN_FIELDS:
+        # Truthy, not `is not None`: blanking a field in the UI must fall back
+        # to what was detected rather than store an empty name and leave a
+        # screen unaddressable.
+        if over.get(f):
+            screen[f] = over[f]

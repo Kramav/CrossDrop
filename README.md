@@ -40,7 +40,8 @@ power control in `display.py` and the self-rolling-back updater. **The browser i
 driven remotely**, over CDP for Chromium/Edge and WebDriver BiDi for Firefox;
 scroll and media need CDP, so Firefox gets `501` on those.
 
-A **target** is a Pi. A **screen** is one monitor on it.
+A **target** is a Pi. A **screen** is one kiosk window on it — usually a
+monitor, optionally half of one.
 
 ### Where things live
 
@@ -53,9 +54,9 @@ that you only have to open one.
 | [agent/browser.py](agent/browser.py) | Launches the kiosk browser, drives the tab. CDP *and* BiDi over one JSON-RPC helper. Navigate, scroll, media, window placement. |
 | [agent/display.py](agent/display.py) | Monitor power only, via `xrandr`/DPMS. Idle watcher; every screen-touching route wakes the display first. X11 only. |
 | [agent/storage.py](agent/storage.py) | Upload store. Extension allowlist, size cap, keep-newest-N sweep. It's tmpfs, so it's RAM. |
-| [agent/settings.py](agent/settings.py) | The subset of config the agent may rewrite at runtime (screen names, home URLs, geometry) → `settings.json`. Everything else stays file-only in `config.toml`. |
+| [agent/settings.py](agent/settings.py) | The subset of config the agent may rewrite at runtime — screen names, home URLs, the window mode, which monitors are split → `settings.json`. Everything that decides *what runs* stays file-only in `config.toml`; `SAFE_KEYS` is the whole list. |
 | [agent/selfcheck.py](agent/selfcheck.py) | `python -m agent selfcheck` — in-process boot check that gates a release swap. |
-| [agent/config.example.toml](agent/config.example.toml) | Install-time config: token, browser kind, ports, paths. Real one is git-ignored. |
+| [agent/config.example.toml](agent/config.example.toml) | Install-time config: browser kind, ports, paths. No secret — the token is its own file, `/etc/crossdrop/token`. Real one is git-ignored. |
 | [roomctl/__init__.py](roomctl/__init__.py) | The client library — one function per route. `eve` imports this. |
 | [roomctl/cli.py](roomctl/cli.py) | argparse shell over the above; prints the agent's JSON verbatim. |
 | [web/index.html](web/index.html) | The controller UI the agent serves at `/`. Single file, no build step, no framework. |
@@ -128,15 +129,29 @@ why, rather than present and returning 501. An agent too old to report
 **Settings** also holds the screens editor — each monitor's name and home URL,
 applied live with no restart. Above the rows is a scale map of the monitors
 drawn where `xrandr` reports them, numbered to match the rows: screens are named
-by index, left to right, and the map is what tells you which index is the panel
-on the left.
+left to right, and the map is what tells you which row is the panel on the left.
 
-The layout itself is **not** editable, by design. Position and size are read
-from `xrandr` at every load and never saved, so they cannot go stale — a layout
-saved against one set of monitors used to win over the set actually attached, and
-put both kiosk windows on one screen. Rearranging the monitors is the session's
-job (`xrandr`, or the desktop's own display settings); pinning one by hand is
-`[[screen]]` in `config.toml`.
+The *arrangement* is not editable, by design. Position and size are read from
+`xrandr` at every load and never saved, so they cannot go stale — a layout saved
+against one set of monitors used to win over the set actually attached, and put
+both kiosk windows on one screen. Rearranging monitors is the session's job
+(`xrandr`, or the desktop's own display settings).
+
+What **is** editable is how many screens a panel is cut into. **Split** a
+monitor left/right or top/bottom and each half becomes an ordinary screen with
+its own name, home page, captures and input — two monitors split gives four. The
+halves are derived from `xrandr` too, so they follow a monitor that changes.
+
+Splitting needs the **fullscreen** window mode, which the same panel toggles: a
+`--kiosk` window is entitled to refuse half-screen bounds, and two halves that
+both came up fullscreen would sit on top of each other. Choosing a split
+switches the mode with it.
+
+Neither applies on click. Both change how the browser was *launched*, so they
+stage as a proposal — the map previews the result in dashed outline — and
+**Confirm choices** saves them and relaunches the browser. That costs the wall
+15–30 seconds of black; each screen comes back to what it was showing. There is
+no way to make it cheaper, which is why it is behind a confirmation.
 
 Edits persist to `~/.local/share/crossdrop/settings.json`, which the agent
 owns and `update.sh` never touches. They do **not** go into
@@ -471,7 +486,8 @@ before it keeps working unchanged.
 | `DELETE /v1/extensions/{id}` | — | as `GET` |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
-| `PUT /v1/settings` | `{"screens": [{"name", "home_url"}]}` | saves, re-reads the layout from `xrandr`, then moves the windows live |
+| `PUT /v1/settings` | `{"screens": [{"name", "home_url"}], "splits"?, "mode"?}` | saves, re-reads the layout from `xrandr`, then moves the windows live |
+| `POST /v1/relaunch` | — | restarts the kiosk browser; the only way to apply `mode` or a split |
 | `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"`, `"error"` |
 
 Three things to know if the caller is a program rather than a person:

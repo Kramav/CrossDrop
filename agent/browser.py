@@ -136,9 +136,20 @@ def launch(cfg: dict) -> subprocess.Popen:
     scr = screens(cfg)
     home = scr[0]["home_url"]
 
+    # "fullscreen" is a fullscreen *window* rather than a locked-down one: F11
+    # and alt-tab still work, which is what you want on a box someone also sits
+    # at. "kiosk" is the wall-mounted default. app.load_config has already
+    # rejected anything else, so this is a two-way choice by the time it lands.
+    kiosk = b.get("mode", "kiosk") != "fullscreen"
+
     if kind == "firefox":
+        # Firefox has no windowed-fullscreen switch, so `fullscreen` just gets a
+        # normal window. The agent cannot fullscreen it afterwards either --
+        # /v1/window is CDP-only (see _CDP_ONLY) -- so on firefox this mode
+        # means "windowed", and F11 is the user's job.
         argv = [_exe(kind, b["path"]), "--remote-debugging-port", str(port),
-                "--profile", str(profile), "--no-remote", "--kiosk", home]
+                "--profile", str(profile), "--no-remote",
+                *(["--kiosk"] if kiosk else []), home]
     else:
         argv = [_exe(kind, b["path"]), f"--remote-debugging-port={port}",
                 # No --remote-allow-origins=*. Chrome >= 111 blocks CDP
@@ -146,7 +157,11 @@ def launch(cfg: dict) -> subprocess.Popen:
                 # content off the debug port, and the page here is arbitrary by
                 # design. _rpc sends no Origin at all, so the flag bought
                 # nothing and disabled that defense for every rendered page.
-                f"--user-data-dir={profile}", "--kiosk",
+                f"--user-data-dir={profile}",
+                # --start-fullscreen is a normal window opened fullscreen, so
+                # F11 leaves it and the tab strip comes back. --kiosk has no way
+                # out at all, which is the point on a wall.
+                "--kiosk" if kiosk else "--start-fullscreen",
                 # Never the system keyring: under desktop autologin the login
                 # keyring is locked (nobody typed a password), so libsecret puts
                 # a modal unlock dialog over the kiosk, forever. "basic" is
@@ -225,19 +240,37 @@ def _pair(value: str, sep: str, field: str) -> tuple[int, int]:
             f"screen {field} must look like {sep.join(('1920', '1080'))}, got {value!r}")
 
 
-def _place(call, target_id: str, position: str, size: str = "") -> None:
-    """Move a window onto the monitor containing `position`, then fullscreen it."""
+def _place(call, target_id: str, position: str, size: str = "",
+           full: bool = True) -> None:
+    """Move a window onto the monitor containing `position`.
+
+    Fullscreen it afterwards unless `full` is off -- a screen that is half a
+    panel has to *stay* the size it was given, which is the one case where
+    `size` stops being cosmetic and becomes the whole point.
+    """
     if not position:
         return
     x, y = _pair(position, ",", "position")
-    # Sized to the monitor when we know it: the window is briefly visible
-    # between the move and the fullscreen. Cosmetic -- fullscreen overrides.
+    # Sized to the monitor when we know it: for a fullscreen screen the window
+    # is only briefly visible between the move and the fullscreen, so this is
+    # cosmetic and fullscreen overrides it. For a half it is load-bearing.
     w, h = _pair(size, "x", "size") if size else (800, 600)
     win = call("Browser.getWindowForTarget", {"targetId": target_id})["windowId"]
+    if not full:
+        # Leave fullscreen in a call of its own, *before* the move. Chromium
+        # applies a bounds change made to a still-fullscreen window to the
+        # restored bounds it will use later rather than to the window now -- a
+        # screen that ends up fullscreen anyway never noticed, which is why the
+        # order below has always worked. A half has to see the move land.
+        call("Browser.setWindowBounds",
+             {"windowId": win, "bounds": {"windowState": "normal"}})
+        time.sleep(PLACE_SETTLE)
     # Move first, fullscreen second: Chromium refuses to move a window that is
     # already fullscreen, and "normal" is what un-fullscreens a --kiosk one.
     call("Browser.setWindowBounds", {"windowId": win, "bounds": {
         "left": x, "top": y, "width": w, "height": h, "windowState": "normal"}})
+    if not full:
+        return
     # ponytail: let the move land before asking for fullscreen. CDP returns as
     # soon as Chromium has *sent* the request; a compositor that applies it
     # asynchronously would otherwise fullscreen against the window's old output
@@ -249,12 +282,20 @@ def _place(call, target_id: str, position: str, size: str = "") -> None:
 
 
 def place(cfg: dict, screen: dict) -> str:
-    """Move the window already belonging to `screen` onto its monitor."""
+    """Move the window already belonging to `screen` onto its monitor.
+
+    For a half screen this is also what `window(state="fullscreen")` means: back
+    to your own bounds, not over the whole panel. Genuinely fullscreening a half
+    would bury its sibling with nothing in the UI to get it back.
+    """
     _require(cfg, "screens")
     port = cfg["browser"]["debug_port"]
     page = _cdp_page(cfg, screen["name"])
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
-        _place(call, page["id"], screen["position"], screen.get("size", ""))
+        # .get, not [...]: the fallback screen dict in screens() and plenty of
+        # callers build a screen without the key.
+        _place(call, page["id"], screen["position"], screen.get("size", ""),
+               screen.get("fullscreen", True))
     return page["id"]
 
 
@@ -304,7 +345,8 @@ def open_window(cfg: dict, screen: dict) -> str:
     with _rpc(_get(port, "/json/version")["webSocketDebuggerUrl"]) as call:
         tid = call("Target.createTarget",
                    {"url": screen["home_url"], "newWindow": True})["targetId"]
-        _place(call, tid, screen["position"], screen.get("size", ""))
+        _place(call, tid, screen["position"], screen.get("size", ""),
+               screen.get("fullscreen", True))
     with _targets_lock:
         _targets[screen["name"]] = tid
     return tid
@@ -1281,7 +1323,14 @@ def _by_bounds(cfg: dict, i: int, origins: list[str], pages: list[dict]
     # beats the nth entry of a list that never meant what it looked like.
     placed.sort(key=lambda t: t[0])
     mine, rival, page = placed[0]
-    return page, mine < rival
+    # Two *windows* equally close is the same doubt as two screens with an equal
+    # claim, seen from the other side -- and only this side catches it. Ask for
+    # the left half of a panel whose two windows both sit at the panel's origin:
+    # both gap 0, so `mine < rival` compares 0 against the *right* half's origin
+    # and passes. The answer is then whichever window /json happened to list
+    # first, unflagged, and /v1/input will type into it. A tie is not an identity.
+    tied = len(placed) > 1 and placed[1][0] == mine
+    return page, mine < rival and not tied
 
 
 def _bidi_url(port: int) -> str:

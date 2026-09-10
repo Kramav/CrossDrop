@@ -184,7 +184,10 @@ def test_the_installer_never_prints_the_token():
                           what="setup.sh closing banner"):]
     assert "\\$TOKEN" in banner, "the placeholder should stay unexpanded"
     # The reader is shown the command that reads it, and runs it themselves.
-    assert "sed -n" in banner
+    # Its own file now, so that is a plain `cat` rather than a sed out of the
+    # config -- which is also why editing the screen layout can no longer damage
+    # the credential.
+    assert "cat $TOKENF" in banner, banner
 
 
 def test_the_installer_stops_if_pip_fails():
@@ -361,12 +364,21 @@ def test_the_installer_sets_home_url_to_the_address_the_unit_binds(tmp_path,
     out = tmp_path / "config.toml"
     ts_ip, port = "100.73.78.36", "8080"
     # The same two expressions setup.sh applies, and the string assertion below
-    # is what keeps them the same two.
-    r = _sh("-c", f'sed -e \'s|^token = .*|token = "deadbeef"|\' '
+    # is what keeps them the same two. The token is *deleted* rather than
+    # substituted now -- it has its own file, so a config this script writes
+    # holds no secret at all.
+    r = _sh("-c", f'sed -e \'/^token = /d\' '
                   f'-e \'s|^home_url = .*|home_url = "http://{ts_ip}:{port}/home"|\' '
                   f'"{example.as_posix()}" > "{out.as_posix()}"')
     assert r.returncode == 0, r.stderr
+    # No assignment, comments about where it went notwithstanding.
+    assert not [ln for ln in out.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("token = ")]
 
+    tok = tmp_path / "token"
+    tok.write_text("deadbeef", encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_TOKEN", str(tok))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "none.json"))
     monkeypatch.setenv("CROSSDROP_CONFIG", str(out))
     from agent.app import load_config
 

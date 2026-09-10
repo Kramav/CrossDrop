@@ -19,7 +19,8 @@
 > |---|---|
 > | `/opt/crossdrop/current` | the code — a symlink to the running release |
 > | `/opt/crossdrop/releases/` | past releases, and the `.failed-*` markers |
-> | `/etc/crossdrop/config.toml` | the token and install-time facts, root-owned |
+> | `/etc/crossdrop/token` | the bearer token, and nothing else, root-owned |
+> | `/etc/crossdrop/config.toml` | install-time facts, root-owned but readable |
 > | `~/.local/share/crossdrop/` | screen settings, and the profile snapshot |
 
 A runbook for the box on the wall, from your desk. The *mechanism* — tags,
@@ -176,8 +177,10 @@ The broken release is left in `releases/<tag>/` on purpose, so you can read it.
 
 ## 6. Config-only change
 
-`config.toml` holds the token and the install-time facts, and the agent
-deliberately cannot write it (`root:<user> 640`). It needs `sudo`.
+`config.toml` holds the install-time facts. It has no secret in it — the token
+is its own file, `/etc/crossdrop/token` — so it is readable (`644`), but the
+agent deliberately cannot write it: `browser.path` is what `launch()` execs.
+Editing it needs `sudo`.
 
 ```sh
 # on the Pi — absolute path, any directory
@@ -196,10 +199,21 @@ systemctl --user restart crossdrop-agent
 
 A malformed edit costs you the edit, not the display: the agent logs why and
 goes on serving the config it already has until the file parses again. Which
-file it loaded, and how long the token in it is, are the first thing it prints —
+file it loaded, and how long the token is, are the first thing it prints —
 `config: /etc/crossdrop/config.toml (token 64 chars)`. A length that is not 64
-is a token that got wrapped or truncated by an editor, which reads as "my token
-stopped working".
+is a token an editor wrapped or truncated, which reads as "my token stopped
+working".
+
+**Rotating the token** is now its own operation, and cannot disturb anything
+else:
+
+```sh
+# on the Pi
+openssl rand -hex 32 | sudo tee /etc/crossdrop/token
+systemctl --user restart crossdrop-agent
+```
+
+Then paste the new one into the web UI's Settings and any `targets.toml`.
 
 **Turning on typing** is this, and it is the one setting worth spelling out. Add:
 
@@ -220,12 +234,29 @@ roomctl status | jq -r '.supports | join(" ")'
 not take — check you edited the file `CROSSDROP_CONFIG` points at
 (`systemctl --user show crossdrop-agent -p Environment`).
 
-Screen names and home URLs are **not** here — those are the web UI's Settings
-panel, they apply live, and they survive updates
-(`~/.local/share/crossdrop/settings.json`). Positions and sizes are not stored
-anywhere: the agent reads them from `xrandr` every time it loads. `[[screen]]`
-blocks in this file can still pin them, and a stale pin outranks the monitors
-you actually have — check for one here before believing a layout is wrong.
+**What is not in this file.** Screen names, home URLs, the browser window mode
+and which monitors are split all live in the web UI's Settings panel, saved to
+`~/.local/share/crossdrop/settings.json`, and they survive updates. That is the
+whole partition: `config.toml` decides *what runs* (the browser binary, the
+extensions directory, typing, what the agent binds), and `settings.json` holds
+what the UI may change.
+
+Positions and sizes are stored in neither — the agent reads them from `xrandr`
+every time it loads. `[[screen]]` blocks in this file can still pin them, and a
+stale pin outranks the monitors you actually have. **Check for one here before
+believing a layout is wrong**; a pin written when a 1366-wide panel was first
+puts both windows on one monitor once a wider one takes its place.
+
+Two settings need the browser relaunched rather than just a reload, because they
+are what it was *launched* with — `mode`, and any split:
+
+```sh
+# on your machine — any directory
+roomctl relaunch
+```
+
+The wall is dark for 15–30s and each screen comes back to what it was showing.
+The Settings panel does this for you behind its **Confirm choices** button.
 
 ---
 
@@ -347,7 +378,8 @@ touch /opt/crossdrop/releases/.failed-v1.3.0     # or delete the tag upstream
 Updates swap **code only** — the symlink move cannot touch your token, your
 logins or your screen settings. Those live outside the release tree:
 
-    /etc/crossdrop/config.toml                       token, install-time facts
+    /etc/crossdrop/token                             the bearer token
+    /etc/crossdrop/config.toml                       install-time facts
     ~/.local/share/crossdrop/settings.json           screens, home urls
     ~/.local/share/crossdrop/profile.tar.gz          the logins
     /opt/crossdrop/extensions/                       ad blockers
@@ -405,9 +437,10 @@ what you left on screen comes back afterwards.
 - **Don't edit files under `releases/<tag>/`.** The next update replaces that
   directory wholesale and your change disappears without a trace. Change the
   repo, tag it.
-- **Don't make `config.toml` agent-writable.** It holds the bearer token; the
-  `640` and the root ownership are the reason an API that can install browser
-  extensions still cannot rewrite its own credentials.
+- **Don't make `config.toml` agent-writable.** It no longer holds the token, so
+  it is readable (`644`) — but it is still root-owned, because `browser.path` is
+  what `launch()` execs. Readable and writable are different questions: an API
+  that can install browser extensions must not also choose the binary.
 - **Don't run the agent as root.** Chromium refuses to start, and it needs to be
   the user who owns the graphical session anyway.
 - **Don't `systemctl stop crossdrop-agent` and walk away.** That leaves the

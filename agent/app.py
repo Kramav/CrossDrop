@@ -22,7 +22,14 @@ from . import browser, display, extensions, settings, storage
 DEFAULTS = {
     "kind": "firefox", "path": "", "profile_dir": "", "autolaunch": True,
     "debug_port": 9222, "disk_cache_mb": 100, "extensions_dir": "",
+    # "kiosk"      -- no browser UI and no way out of it. The wall-mounted case.
+    # "fullscreen" -- a fullscreen *window*: F11 and alt-tab still work, so the
+    #                 box is usable as a desktop with the display on it. Chosen
+    #                 at install time (setup.sh MODE=), because which one you
+    #                 want is a fact about where the box lives.
+    "mode": "kiosk",
 }
+BROWSER_MODES = ("kiosk", "fullscreen")
 UPLOAD_DEFAULTS = {"dir": "", "max_mb": 25, "keep": 5}
 # POST /v1/input, off unless config.toml turns it on: the only route that acts
 # *as* whoever the kiosk is logged in as. In config.toml and not settings.json
@@ -32,7 +39,12 @@ INTERACT_DEFAULTS = {"enabled": False, "max_actions": 40, "deadline_ms": 30_000}
 # §10 — never 0.0.0.0). Here and not only in the systemd unit, so something
 # other than systemd can start the agent.
 SERVER_DEFAULTS = {"host": "127.0.0.1", "port": 8080}
-SCREEN_DEFAULTS = {"name": "", "position": "", "size": "", "home_url": ""}
+# `fullscreen` false means "stay the size you were given" -- a screen that is
+# half a panel. Derived, like position and size: display.split() sets it, or a
+# [[screen]] block says so by hand. It must never reach settings.json; see
+# settings.SCREEN_FIELDS.
+SCREEN_DEFAULTS = {"name": "", "output": "", "position": "", "size": "",
+                   "home_url": "", "fullscreen": True}
 
 # To stderr, which under crossdrop-agent.service is journald:
 # `journalctl --user -u crossdrop-agent`. Without it "the wall was showing the
@@ -62,6 +74,40 @@ def setup_logging() -> None:
     log.setLevel(os.getenv("CROSSDROP_LOG", "INFO").upper())
 
 
+# The token lives on its own, so that editing the thing that holds the screen
+# layout can never damage the credential -- which is exactly what happened once,
+# and presented as "my token stopped working" with a file that looked fine.
+# CROSSDROP_TOKEN names the file, following CROSSDROP_CONFIG / _SETTINGS / _DATA.
+TOKEN_FILE = "/etc/crossdrop/token"
+
+
+def _token(path: Path, in_config: str | None) -> str:
+    """The bearer token: its own file, or config.toml on a box not yet migrated.
+
+    The file wins. A `token = ` still sitting in config.toml is honoured and
+    named, because the alternative is a box that stops authenticating the moment
+    it takes an update -- and nobody can log in to fix it. Absent from both stays
+    a hard error, exactly as a missing token always has been.
+    """
+    p = Path(os.getenv("CROSSDROP_TOKEN") or TOKEN_FILE)
+    try:
+        # .strip(): a file written with `echo` or edited by hand ends in a
+        # newline, and a token with \n on the end authenticates from `cat` but
+        # not from anything that sends it as a header -- a miserable thing to
+        # debug, and free to prevent.
+        token = p.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        token = ""
+    if token:
+        return token
+    if in_config:
+        log.warning("%s: the token now lives in %s. Still reading it from here, "
+                    "but re-run setup.sh to move it -- editing this file is how "
+                    "a token gets damaged.", path, p)
+        return str(in_config)
+    raise RuntimeError(f"no token in {p}, and none in {path}")
+
+
 def load_config(path: str | os.PathLike | None = None) -> dict:
     path = Path(path or os.getenv("CROSSDROP_CONFIG") or Path(__file__).parent / "config.toml")
     # utf-8-sig: Windows editors and PowerShell write a BOM that tomllib chokes on.
@@ -75,29 +121,60 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         cfg["browser"]["profile_dir"] = str(path.parent / "profile")
     if not cfg["upload"]["dir"]:
         cfg["upload"]["dir"] = str(path.parent / "uploads")
-    if not cfg.get("token"):
-        raise RuntimeError(f"{path}: token is required")
+    cfg["token"] = _token(path, cfg.get("token"))
     # Warn, never raise: a bad token must not be why a keyboard-less display
     # fails to boot. But an HTTP header is latin-1, so a non-ASCII token cannot
     # be *sent* -- every request 401s while the config looks perfectly fine.
     if not str(cfg["token"]).isascii():
-        log.warning("%s: token has non-ASCII characters in it, so it can never "
+        log.warning("the token has non-ASCII characters in it, so it can never "
                     "be sent in an Authorization header -- every request will "
-                    "401. Use hex or base64: openssl rand -hex 32", path)
-    # Which file, and how long the token in it is. auth() compares against the
-    # token loaded *here*, so editing config.toml without restarting leaves the
-    # file and the running agent disagreeing with nothing on either side saying
-    # so -- you hold the right token, every call 401s, and the file looks fine.
-    # The length alone is enough to spot a truncated or line-wrapped one (a hex
-    # token is 64), and it is not a secret the way the token itself is.
+                    "401. Use hex or base64: openssl rand -hex 32")
+    # Which file, and how long the token is. auth() compares against the token
+    # loaded *here*, so a token edited without a reload leaves the file and the
+    # running agent disagreeing with nothing on either side saying so -- you hold
+    # the right token, every call 401s, and the file looks fine. The length alone
+    # is enough to spot a truncated or line-wrapped one (a hex token is 64), and
+    # it is not a secret the way the token itself is.
     log.info("config: %s (token %d chars)", path, len(str(cfg["token"])))
+    # Read once and used twice: the screen list is *derived* from two saved
+    # values, so they have to land before there is a list to overlay rows onto.
+    saved = settings.load()
+    settings.apply_keys(cfg, saved)
+    # After the overlay, not before: settings.json may set browser.mode, and a
+    # value the API wrote needs normalising just as much as one somebody typed
+    # into config.toml -- more so, since nobody read it back.
+    #
+    # Normalised here rather than at the launch site: a typo must not be
+    # discovered as a browser that fails to start on a box with no keyboard.
+    # Warn and take the safe one; kiosk is what every install had before this key
+    # existed, so falling back to it can never change a working box.
+    if cfg["browser"]["mode"] not in BROWSER_MODES:
+        log.warning("browser.mode is %r, expected one of %s -- using 'kiosk'",
+                    cfg["browser"]["mode"], ", ".join(BROWSER_MODES))
+        cfg["browser"]["mode"] = "kiosk"
+    splits = cfg["display"]["splits"]
+    # A --kiosk window is entitled to refuse non-fullscreen bounds, and a half
+    # that silently comes up fullscreen sits exactly on top of its sibling --
+    # which _by_bounds then has to refuse, taking /v1/input with it. So the two
+    # are simply not offered together. The UI switches modes for you; this is the
+    # backstop for a config.toml edited by hand.
+    if splits and cfg["browser"]["mode"] != "fullscreen":
+        log.warning("display.splits is set but browser.mode is %r -- a kiosk "
+                    "window will not hold half-screen bounds, so the monitors "
+                    "are staying whole. Set mode = \"fullscreen\" to split.",
+                    cfg["browser"]["mode"])
+        splits = {}
 
     # No [[screen]] blocks -> ask X, so a fresh install drives every connected
     # monitor with no config edit. Explicit blocks win; nothing detected
     # (Windows, no DISPLAY) -> one screen called "main", as it always was.
     blocks = cfg.get("screen") or [
-        {"name": d["output"], "position": d["position"], "size": d["size"]}
-        for d in display.detect()
+        # `output` is the stable identity a saved name is matched on -- the
+        # connector, or one half of it. A hand-written [[screen]] has none and
+        # falls back to list order; see settings.apply.
+        {"name": d["output"], "output": d["output"], "position": d["position"],
+         "size": d["size"], "fullscreen": d.get("fullscreen", True)}
+        for d in display.split(display.detect(), splits)
     ]
     cfg["screens"] = [SCREEN_DEFAULTS | s for s in (blocks or [{}])]
     # Defaults first, then the duplicate check, then the saved overrides.
@@ -109,6 +186,18 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     # the defaults in first and check what the config really resolves to.
     for i, s in enumerate(cfg["screens"]):
         s["name"] = s["name"] or ("main" if i == 0 else f"screen{i + 1}")
+        # A screen that will not be fullscreened has to know how big to be, or
+        # it comes up as browser._place's 800x600 fallback in the corner of a
+        # wall-mounted panel and reads as broken. Warn and take the safe one,
+        # the same answer browser.mode gives a typo: a fullscreen window is at
+        # least a working display. Unreachable from display.split(), which
+        # always supplies both -- this guards a hand-written [[screen]].
+        if not s["fullscreen"] and not (s["position"] and s["size"]):
+            log.warning("%s: screen %r has fullscreen = false but no %s, so it "
+                        "has no size to hold -- showing it fullscreen instead",
+                        path, s["name"],
+                        "position" if not s["position"] else "size")
+            s["fullscreen"] = True
     # config.toml's own duplicates are a typo by somebody who had a keyboard when
     # they wrote them: refuse and name them. settings.json's duplicates get the
     # opposite answer, because nobody can fix those without a keyboard -- see
@@ -118,7 +207,7 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
         raise RuntimeError(f"{path}: duplicate screen names {written}")
     # Saved edits from the web UI, before the home urls are finalised below — a
     # renamed screen has to get its new name stamped into its home url.
-    settings.apply(cfg)
+    settings.apply(cfg, saved)
     _dedupe(cfg)
     for s in cfg["screens"]:
         s["home_url"] = _home_url(cfg, s["home_url"] or cfg.get("home_url", "about:blank"))
@@ -233,6 +322,30 @@ def swap_config(cfg: dict, fresh: dict) -> None:
         log.warning("stopping autoscroll on %r: no screen by that name any more",
                     name)
         _autoscroll_stop(name)
+    _open_missing_windows(cfg)
+
+
+def _open_missing_windows(cfg: dict) -> None:
+    """Give a window to any screen that does not have one.
+
+    browser.launch() opens one window per screen and is the *only* thing that
+    ever did. So a screen list that grows while the agent is running -- a monitor
+    plugged back in, or a panel split in two -- left the new screen with no
+    window at all, and _identify handed its name whichever window happened to
+    sort into that slot. That is the bug where both monitors showed the same
+    page and each named the other: not a placement fault, a missing window.
+
+    Best-effort and never fatal. The settings are already saved by the time this
+    runs, and a browser that cannot open a window is a note in the journal, not a
+    failed save -- the next relaunch opens them all anyway.
+    """
+    if not app.state.proc:
+        return                          # not our browser, or not up yet
+    with contextlib.suppress(*_BROWSER_ERRORS):
+        have = len(browser._pages(cfg["browser"]["debug_port"]))
+        for s in cfg["screens"][have:]:
+            log.info("opening a window for screen %r", s["name"])
+            browser.open_window(cfg, s)
 
 
 def screen_of(cfg: dict, name: str | None) -> dict:
@@ -372,6 +485,54 @@ def _launch(cfg: dict, stopping: threading.Event) -> None:
         log.info("browser launched")
         _home_when_ready(cfg)
         return
+
+
+# Held for the *whole* relaunch, stop through launch -- not just long enough to
+# start the thread. _launch can sit in wait_ready for 30s, and a second relaunch
+# arriving in that window would see proc as None, skip the stop, and start a
+# second browser against the same debug port. wait_ready would then answer from
+# the *first* one and report success, leaving an orphaned kiosk holding 9222 --
+# the failure tests/test_smoke.py's fixture exists to refuse.
+_relaunching = threading.Lock()
+
+
+def relaunch(cfg: dict) -> bool:
+    """Stop the kiosk browser and start it again. False if one is already going.
+
+    Returns as soon as the old browser is gone; the new one comes up on a thread,
+    because Chromium takes 15-30s and a request must not hold a worker that long.
+
+    The only way to apply anything the browser was *launched* with -- which is
+    what `browser.mode` is. Composed entirely from what lifespan already does at
+    shutdown and startup, in that order, so there is no second implementation of
+    "bring the kiosk up" to drift.
+
+    Reusing _launch is the point: it retries with backoff and records failures
+    into app.state.launch_error, which /v1/status reports. A relaunch that fails
+    therefore leaves the agent up and *saying why*, which is the only reason this
+    is safe to expose on a box nobody can walk up to.
+    """
+    if not _relaunching.acquire(blocking=False):
+        return False
+    try:
+        proc, app.state.proc = app.state.proc, None
+        if proc:
+            _save_shown(cfg)        # while the browser can still be asked
+            with contextlib.suppress(Exception):
+                browser.stop(cfg, proc)
+        browser.forget_targets()    # every cached window just went away
+
+        def run() -> None:
+            try:
+                _launch(cfg, app.state.stopping)
+            finally:                # only now may another relaunch start
+                _relaunching.release()
+
+        threading.Thread(target=run, daemon=True).start()
+    except BaseException:           # never leak the lock on a failed handover
+        _relaunching.release()
+        raise
+    return True
 
 
 def _home_when_ready(cfg: dict) -> None:
@@ -678,6 +839,15 @@ class ScreenSettingIn(BaseModel):
 
 class SettingsIn(BaseModel):
     screens: list[ScreenSettingIn]
+    # Which outputs are cut in half, by connector: {"HDMI-1": "lr"|"tb"}. Keyed
+    # by output and not by index because a split changes how many screens there
+    # *are*, so an index would name a different screen the moment it applied.
+    # None = leave the splits alone; {} = unsplit everything.
+    splits: dict[str, str] | None = None
+    # "kiosk" | "fullscreen". None = leave it alone. Changing it needs the
+    # browser relaunched -- it is a launch flag -- which is /v1/relaunch's job
+    # and never implicit.
+    mode: str | None = None
 
 
 class ScreenSettingOut(ScreenSettingIn):
@@ -686,12 +856,22 @@ class ScreenSettingOut(ScreenSettingIn):
     # settings.SCREEN_FIELDS.
     position: str = ""
     size: str = ""
+    # The connector this screen came from, or one half of it ("HDMI-1-L"). The
+    # UI groups halves by their parent and needs to know which is which.
+    output: str = ""
+    fullscreen: bool = True
 
 
 class SettingsOut(BaseModel):
     screens: list[ScreenSettingOut]
     path: str               # where these persist, so the UI can say so
     note: str = ""          # saved, but the live window move didn't happen
+    splits: dict[str, str] = {}
+    mode: str = ""
+    # Every output xrandr reports, whole -- what the UI offers to split. Derived
+    # here rather than inferred from `screens`, because a screen that is already
+    # half a panel cannot tell you what the panel was called.
+    outputs: list[str] = []
 
 
 class Status(BaseModel):
@@ -718,6 +898,10 @@ class Status(BaseModel):
     # is the whole point of the agent outliving a failed launch: without it the
     # only diagnosis available is a journal on a box you cannot log into.
     error: str = ""
+    # "kiosk" or "fullscreen". Reported because the UI's split control depends on
+    # it -- a kiosk window will not hold half-screen bounds, so splitting is only
+    # offered in fullscreen mode and the page has to know which it is looking at.
+    mode: str = ""
 
 
 # --- autoscroll -------------------------------------------------------------
@@ -1009,6 +1193,24 @@ def send_input(body: InputIn) -> InputOut:
     return InputOut(ok=all(r.ok for r in out), screen=s["name"], results=out)
 
 
+@app.post("/v1/relaunch", dependencies=[Depends(auth)])
+def relaunch_route() -> dict:
+    """Restart the kiosk browser. Returns as soon as the old one is gone.
+
+    For the settings the browser was *launched* with -- `browser.mode` above all,
+    which is a command-line flag and cannot be applied any other way. Everything
+    else that changes at runtime already applies live.
+
+    It costs the wall 15-30s of black while Chromium comes back, so it is never
+    implicit: the web UI asks for it only behind an explicit confirmation. Pages
+    return by themselves -- _save_shown writes what each screen had and
+    _restorable puts it back.
+    """
+    if not relaunch(app.state.cfg):
+        raise HTTPException(409, "a relaunch is already in progress")
+    return {"ok": True}
+
+
 @app.post("/v1/display", response_model=DisplayOut, dependencies=[Depends(auth)])
 def display_power(body: DisplayIn) -> DisplayOut:
     """Turn the monitors off when you leave, or back on. Every other /v1 route
@@ -1110,8 +1312,14 @@ def _settings_out(note: str = "") -> SettingsOut:
         path=str(settings.path()), note=note,
         screens=[ScreenSettingOut(
             name=s["name"], home_url=s["home_url"],
-            position=s["position"], size=s["size"])
-            for s in app.state.cfg["screens"]])
+            position=s["position"], size=s["size"],
+            output=s.get("output", ""), fullscreen=s.get("fullscreen", True))
+            for s in app.state.cfg["screens"]],
+        splits=dict(app.state.cfg["display"]["splits"]),
+        mode=app.state.cfg["browser"]["mode"],
+        # Whole panels, straight from xrandr: what there is to split. A screen
+        # that is already a half cannot name the panel it came from.
+        outputs=[d["output"] for d in display.detect()])
 
 
 @app.get("/v1/settings", response_model=SettingsOut, dependencies=[Depends(auth)])
@@ -1138,12 +1346,41 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     for s in body.screens:
         if not s.home_url.startswith(("http://", "https://")):
             raise HTTPException(422, f"{s.home_url!r}: home_url must be http or https")
+    if body.mode is not None and body.mode not in BROWSER_MODES:
+        raise HTTPException(422, f"mode must be one of {', '.join(BROWSER_MODES)}")
+    if body.splits is not None:
+        # The whole-request condition first, so the answer names the reason that
+        # applies to the request rather than to whichever output sorted first.
+        #
+        # A kiosk window is entitled to refuse half-screen bounds, and two halves
+        # that both come up fullscreen sit on top of each other -- a tie
+        # _by_bounds has to refuse, which costs /v1/input. load_config drops the
+        # splits in that case; refusing the save is where it can still be said.
+        mode = body.mode if body.mode is not None else cfg["browser"]["mode"]
+        if body.splits and mode != "fullscreen":
+            raise HTTPException(422, "splitting a monitor needs mode "
+                                     "\"fullscreen\": a kiosk window will not "
+                                     "hold half-screen bounds")
+        outputs = {d["output"] for d in display.detect()}
+        for out, how in body.splits.items():
+            if how not in display.SPLITS:
+                raise HTTPException(422, f"{out}: split must be one of "
+                                         f"{', '.join(display.SPLITS)}, not {how!r}")
+            # Named, not ignored: a split against a monitor that is not there is
+            # silently nothing happening, on a box you cannot look at.
+            if out not in outputs:
+                raise HTTPException(422, f"no output {out!r}; have: "
+                                         f"{', '.join(sorted(outputs)) or 'none'}")
 
     before = [(s["position"], s["size"]) for s in cfg["screens"]]
     # Name and home_url only. Geometry is never written here -- see
     # settings.SCREEN_FIELDS for why a saved layout was worse than no layout.
-    rows = [{"name": n, "home_url": s.home_url.strip()}
-            for n, s in zip(names, body.screens)]
+    # `output` is stamped on every row: it is the identity a saved name is
+    # matched on, and stamping here is what migrates a file written before the
+    # field existed -- see settings.apply.
+    rows = [{"name": n, "home_url": s.home_url.strip(),
+             **({"output": scr["output"]} if scr.get("output") else {})}
+            for n, s, scr in zip(names, body.screens, cfg["screens"])]
     # Merged, not replaced: the editor only ever sees the monitors detected right
     # now, and a save with one unplugged must not delete the other screen's saved
     # name and home_url. See settings.merge_screens.
@@ -1158,6 +1395,15 @@ def put_settings(body: SettingsIn) -> SettingsOut:
         raise HTTPException(422, f"that name is already taken by a screen this "
                                  f"editor cannot see (a monitor that is "
                                  f"unplugged right now): {saved_names}")
+    # Carried through whether or not this request touched them: save() rewrites
+    # the file whole, so anything not put back here is deleted. `None` means the
+    # caller left it alone; `{}` means it deliberately unsplit everything.
+    keep = settings.load()
+    merged["display"] = {"splits": body.splits if body.splits is not None
+                         else (keep.get("display") or {}).get("splits", {})}
+    merged["browser"] = {"mode": body.mode if body.mode is not None
+                         else (keep.get("browser") or {}).get(
+                             "mode", cfg["browser"]["mode"])}
     try:
         settings.save(merged)
     except (OSError, RuntimeError) as e:      # unwritable dir, or no resolvable home
@@ -1263,6 +1509,7 @@ def status() -> Status:
                   version=os.getenv("CROSSDROP_VERSION", "dev"), awake=display.awake(),
                   screens=[_screen_out(s) for s in cfg["screens"]],
                   kind=cfg["browser"]["kind"], supports=browser.supports(cfg),
+                  mode=cfg["browser"]["mode"],
                   started_at=getattr(app.state, "started_at", 0.0), error=error)
 
 

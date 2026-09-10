@@ -457,3 +457,123 @@ def test_a_wrong_shaped_settings_file_does_not_break_a_save(store, one_screen):
     assert r.status_code == 200, r.text
     saved = json.loads(store.read_text())["screens"]
     assert all(isinstance(row, dict) for row in saved), saved
+
+
+# --- splitting a panel, and the identity that survives it --------------------
+
+def split_cfg(tmp_path, monkeypatch, mode="fullscreen", splits=None, saved=None):
+    """A live load_config with two stub monitors and a settings.json."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
+                   '[browser]\nkind = "chromium"\nautolaunch = false\n',
+                   encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
+    monkeypatch.setattr(appmod.display, "detect", lambda: [
+        {"output": "HDMI-1", "position": "0,0", "size": "2560x1440"},
+        {"output": "HDMI-2", "position": "2560,0", "size": "1366x768"}])
+    data = {"browser": {"mode": mode}, **(saved or {})}
+    if splits is not None:
+        data["display"] = {"splits": splits}
+    settings.save(data)
+    return appmod.load_config()
+
+
+def test_a_split_makes_two_screens_out_of_one_panel(tmp_path, monkeypatch, store):
+    cfg = split_cfg(tmp_path, monkeypatch, splits={"HDMI-1": "lr"})
+    assert [s["output"] for s in cfg["screens"]] == ["HDMI-1-L", "HDMI-1-R", "HDMI-2"]
+    assert [s["position"] for s in cfg["screens"]] == ["0,0", "1280,0", "2560,0"]
+    assert [s["fullscreen"] for s in cfg["screens"]] == [False, False, True]
+
+
+def test_a_split_is_refused_in_kiosk_mode(tmp_path, monkeypatch, store, caplog):
+    """A --kiosk window may not hold half-screen bounds, and two halves that
+    both come up fullscreen sit on top of each other -- which _by_bounds then
+    has to refuse, taking /v1/input with it. Don't offer the combination."""
+    with caplog.at_level("WARNING"):
+        cfg = split_cfg(tmp_path, monkeypatch, mode="kiosk",
+                        splits={"HDMI-1": "lr"})
+    assert [s["output"] for s in cfg["screens"]] == ["HDMI-1", "HDMI-2"]
+    assert "staying whole" in caplog.text, caplog.text
+
+
+def test_a_name_follows_its_panel_across_a_split(tmp_path, monkeypatch, store):
+    """The reason rows are keyed by output. Splitting HDMI-1 inserts a row, so
+    under index-as-identity the name saved for HDMI-2 would slide onto the new
+    right half -- silently renaming two screens at once."""
+    saved = {"screens": [{"output": "HDMI-2", "name": "Acer",
+                          "home_url": "https://acer.test/"}]}
+    cfg = split_cfg(tmp_path, monkeypatch, splits={"HDMI-1": "lr"}, saved=saved)
+    by_out = {s["output"]: s["name"] for s in cfg["screens"]}
+    assert by_out["HDMI-2"] == "Acer"
+    assert by_out["HDMI-1-L"] == "HDMI-1-L", by_out
+    assert by_out["HDMI-1-R"] == "HDMI-1-R", by_out
+
+
+def test_a_row_saved_before_output_existed_still_applies(tmp_path, monkeypatch,
+                                                         store):
+    """The whole migration: an old settings.json is a list with no `output`, and
+    must keep meaning what it meant -- position in the list."""
+    saved = {"screens": [{"name": "Samsung"}, {"name": "Acer"}]}
+    cfg = split_cfg(tmp_path, monkeypatch, saved=saved)
+    assert [s["name"] for s in cfg["screens"]] == ["Samsung", "Acer"]
+
+
+def test_a_split_saved_through_the_route_takes_effect(tmp_path, monkeypatch, store):
+    """The UI's whole path: PUT the split, and the next load has four screens."""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
+                   '[browser]\nkind = "chromium"\nautolaunch = false\n'
+                   'mode = "fullscreen"\n', encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
+    monkeypatch.setattr(appmod.display, "detect", lambda: [
+        {"output": "HDMI-1", "position": "0,0", "size": "2560x1440"},
+        {"output": "HDMI-2", "position": "2560,0", "size": "1366x768"}])
+    with TestClient(app) as c:
+        body = c.get("/v1/settings", headers=AUTH).json()
+        assert body["outputs"] == ["HDMI-1", "HDMI-2"], body
+        assert body["mode"] == "fullscreen"
+        r = c.put("/v1/settings", headers=AUTH, json={
+            "screens": [{"name": s["name"], "home_url": s["home_url"]}
+                        for s in body["screens"]],
+            "splits": {"HDMI-1": "lr"}})
+        assert r.status_code == 200, r.text
+        assert [s["output"] for s in r.json()["screens"]] == [
+            "HDMI-1-L", "HDMI-1-R", "HDMI-2"]
+        assert [s["fullscreen"] for s in r.json()["screens"]] == [False, False, True]
+
+
+def test_the_route_refuses_a_split_in_kiosk_mode(client, store, monkeypatch):
+    """load_config would drop it silently on the next boot; refusing the save is
+    where it can still be explained to whoever pressed the button.
+
+    The monitor is real here, so the refusal has to be about the *mode* and not
+    about an output that happens not to exist on the machine running the tests.
+    """
+    monkeypatch.setattr(appmod.display, "detect", lambda: [
+        {"output": "HDMI-1", "position": "0,0", "size": "2560x1440"}])
+    r = client.put("/v1/settings", headers=AUTH, json={
+        "screens": ok_screens(), "splits": {"HDMI-1": "lr"}, "mode": "kiosk"})
+    assert r.status_code == 422
+    assert "fullscreen" in r.json()["detail"], r.text
+    assert not store.exists(), "a refused split reached disk"
+
+
+def test_the_route_refuses_a_split_of_a_monitor_that_is_not_there(client, store):
+    """Silently doing nothing is the worst answer on a box you cannot look at."""
+    r = client.put("/v1/settings", headers=AUTH, json={
+        "screens": ok_screens(), "splits": {"HDMI-9": "lr"}, "mode": "fullscreen"})
+    assert r.status_code == 422 and "no output" in r.json()["detail"]
+    assert not store.exists()
+
+
+def test_a_save_that_does_not_mention_splits_keeps_them(tmp_path, monkeypatch, store):
+    """save() rewrites the file whole, so anything not put back is deleted --
+    renaming a screen must not quietly un-split the wall."""
+    split_cfg(tmp_path, monkeypatch, mode="fullscreen", splits={"HDMI-1": "lr"})
+    with TestClient(app) as c:
+        body = c.get("/v1/settings", headers=AUTH).json()
+        r = c.put("/v1/settings", headers=AUTH, json={
+            "screens": [{"name": s["name"], "home_url": s["home_url"]}
+                        for s in body["screens"]]})
+        assert r.status_code == 200, r.text
+    assert json.loads(store.read_text())["display"]["splits"] == {"HDMI-1": "lr"}

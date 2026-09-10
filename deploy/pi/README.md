@@ -8,7 +8,8 @@ nothing here changes when auto-update lands.
 
     /opt/crossdrop/current               code + venv   (a plain dir now, a symlink in Phase 8)
     /opt/crossdrop/extensions            unpacked browser extensions (§10)
-    /etc/crossdrop/config.toml           token, paths  (never overwritten by updates)
+    /etc/crossdrop/token                 the bearer token, and nothing else (0640)
+    /etc/crossdrop/config.toml           install-time paths, safe to read (0644)
     /run/user/1000/crossdrop/profile     browser profile — tmpfs, so RAM (Phase 6)
     /run/user/1000/crossdrop/uploads     uploads — tmpfs too
     ~/.local/share/crossdrop/profile.tar.gz   the only thing that touches SD (0600)
@@ -19,6 +20,38 @@ nothing here changes when auto-update lands.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | bash
 ```
+
+**Kiosk or windowed?** `MODE=` picks how the browser opens, and it is the one
+install choice you cannot change without relaunching the browser:
+
+| `MODE` | What you get | For |
+|---|---|---|
+| `kiosk` (default) | No browser UI, no F11, no alt-tab. Nothing but the page. | A box bolted to a wall that nobody sits at. |
+| `fullscreen` | A fullscreen *window*. F11 leaves it, alt-tab works, the tab strip comes back. | A box someone also uses as a desktop. |
+
+```sh
+# clone first, so you can pass it an environment
+MODE=fullscreen bash deploy/pi/setup.sh
+```
+
+Both drive the display identically — every `/v1` route, the screen picker and
+the captures behave the same. The difference is only whether a person sitting at
+the box can get out of the page.
+
+`MODE=` is the **seed**. After install the web UI's Settings panel owns it, and
+changing it there relaunches the browser for you (`roomctl relaunch` does the
+same from a script). A relaunch is unavoidable either way: this is a
+command-line flag, so the running browser already has the old one.
+
+**Splitting a monitor needs `fullscreen`.** A `--kiosk` window is entitled to
+refuse the half-screen bounds a split depends on, and two halves that both came
+up fullscreen would sit on top of each other — which the window-identity check
+then has to refuse, taking `/v1/input` with it. So the two are never offered
+together: in kiosk mode a saved split is dropped with a warning, and the UI
+switches the mode as part of the same confirmation.
+
+On firefox, `fullscreen` just means a normal window — there is no such switch,
+and `/v1/window` is CDP-only.
 
 The rest of this page is what it does, for when a step needs debugging.
 
@@ -62,14 +95,13 @@ sudo cp /opt/crossdrop/current/agent/config.example.toml /etc/crossdrop/config.t
 sudo nano /etc/crossdrop/config.toml
 ```
 
-`setup.sh` writes this file for you, including a random token — the manual route
-below is for a hand-built Pi. Monitors are detected at startup and display
-timeouts default in code, so neither needs a line here.
+`setup.sh` writes this file for you, and mints the token into its own file —
+the manual route below is for a hand-built Pi. Monitors are detected at startup
+and display timeouts default in code, so neither needs a line here.
 
 Pi values — the rest of the file is fine as shipped:
 
 ```toml
-token = "<a long random string>"
 home_url = "http://100.x.y.z:8080/home"   # the tailnet address, not a path
 
 [browser]
@@ -84,11 +116,22 @@ dir = "/run/user/1000/crossdrop/uploads"
 uploads half of Phase 6 already done. `max_mb` × `keep` is the RAM ceiling:
 the shipped 25 × 20 can reach 500 MB, so lower `keep` on a 2 GB Pi.
 
-The token is a secret, and the file is world-readable by default:
+The token lives on its own, so that editing the screen layout can never damage
+the credential:
+
+```sh
+openssl rand -hex 32 | sudo tee /etc/crossdrop/token
+sudo chown root:"$USER" /etc/crossdrop/token
+sudo chmod 640 /etc/crossdrop/token          # the one that is secret
+```
+
+`config.toml` holds no secret, so it stays readable — but root-owned, because
+`browser.path` is what the agent execs and an API that can install extensions
+must not also choose the binary:
 
 ```sh
 sudo chown root:"$USER" /etc/crossdrop/config.toml
-sudo chmod 640 /etc/crossdrop/config.toml
+sudo chmod 644 /etc/crossdrop/config.toml
 ```
 
 ## 5. Service
@@ -174,6 +217,38 @@ Change the hour by editing `OnCalendar` in
 reads `xrandr --listmonitors` and makes one screen per connected output, named
 after the connector. Configure blocks below only to override that — to give the
 screens better names than `HDMI-1`, or to give one its own `home_url`.
+
+### Splitting one into two
+
+A screen is one kiosk window, and nothing says a panel only gets one. Split a
+monitor from the web UI's Settings panel and each half becomes an ordinary
+screen — its own name, home page, captures and input. Two monitors split gives
+four windows.
+
+    HDMI-1  2560x1440   →   HDMI-1-L  1280x1440 at 0,0
+                            HDMI-1-R  1280x1440 at 1280,0
+
+The halves are derived from `xrandr` every time the config loads, exactly like
+whole monitors, so they follow a panel that changes resolution. An odd width
+gives the extra column to the second half (1365 → 682 + 683), so the two tile
+the panel with no gap and no overlap — overlap is the dangerous one, because two
+windows reporting the same origin is a tie the window-identity check has to
+refuse, and that costs you `/v1/input`.
+
+Stored as `{"HDMI-1": "lr"}` (side by side) or `"tb"` (stacked) in
+`~/.local/share/crossdrop/settings.json`, under the connector name rather than a
+position in a list — a split changes how many screens there are, so an index
+would name a different screen the moment it applied.
+
+Two things to know before using it:
+
+- **It needs `mode = "fullscreen"`** (see the table at the top of this page).
+- **It relaunches the browser**, so the wall is dark for 15–30s. Each screen
+  comes back to what it was showing.
+
+For a geometry halves cannot express — thirds, 70/30 — write `[[screen]]` blocks
+by hand with `fullscreen = false` and explicit `position`/`size`. That is the
+same primitive the split uses, without the derivation.
 
 The study Pi runs an **X11 session** (Xorg + openbox under lightdm), where
 Chromium's `--window-position` is honoured directly. Check what you're on:

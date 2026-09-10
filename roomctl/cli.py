@@ -48,6 +48,9 @@ def main(argv: list[str] | None = None) -> int:
     cmd("screens", help="list this display's screens")
     cmd("reload", help="re-navigate to the current url")
     cmd("home", help="back to the configured home_url")
+    # No -s: the browser is per display, so relaunching it is too.
+    sub.add_parser("relaunch", parents=[common],
+                   help="restart the kiosk browser (dark for ~20s)")
     cmd("navigate", help="point the display at a url").add_argument("url")
     cmd("upload", help="send a file and show it").add_argument("path")
 
@@ -179,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
                 "screens": lambda: c.screens(),
                 "reload": lambda: c.reload(a.screen),
                 "home": lambda: c.home(a.screen),
+                "relaunch": lambda: c.relaunch(),
                 "navigate": lambda: c.navigate(a.url, a.screen),
                 "upload": lambda: c.upload(a.path, a.screen),
                 "extension": lambda: do_extension(c),

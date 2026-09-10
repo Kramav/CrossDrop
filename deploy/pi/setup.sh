@@ -22,6 +22,10 @@ REPO="${REPO:-https://github.com/Kramav/CrossDrop.git}"
 VIDEO="${VIDEO:-}"   # empty = auto-detect (default). Override only for a Pi that
                      # boots with no monitor attached: VIDEO=HDMI-A-1:1920x1080@60D
 PORT="${PORT:-8080}"
+# How the kiosk browser opens. "kiosk" is the wall-mounted default: no browser
+# UI, no way out. "fullscreen" opens a fullscreen *window* instead -- F11 and
+# alt-tab still work -- for a box somebody also sits at. MODE=fullscreen bash setup.sh
+MODE="${MODE:-kiosk}"
 
 # PREFIX exists so tests/test_install_roundtrip.py can run this script for real
 # against a temp tree. Empty in production, and every path below is then the
@@ -30,6 +34,7 @@ PREFIX="${PREFIX:-}"
 OPT="${OPT:-$PREFIX/opt/crossdrop}"
 ETC="${ETC:-$PREFIX/etc/crossdrop}"
 CFG="${CFG:-$ETC/config.toml}"
+TOKENF="${TOKENF:-$ETC/token}"     # the bearer token, and nothing else
 RUN="${RUN:-$PREFIX/run/user/$(id -u)/crossdrop}"
 SYSTEMD_SYS="${SYSTEMD_SYS:-$PREFIX/etc/systemd/system}"
 JOURNALD_D="${JOURNALD_D:-$PREFIX/etc/systemd/journald.conf.d}"
@@ -104,6 +109,11 @@ if command -v raspi-config >/dev/null 2>&1; then IS_PI=1; fi
 # live at "== display mode", by which point apt, the Tailscale login and
 # `raspi-config do_boot_behaviour B4` had already altered the box -- so a typo
 # in VIDEO= left it half-provisioned and exited 1.
+case "$MODE" in
+  kiosk|fullscreen) ;;
+  *) echo "MODE must be 'kiosk' or 'fullscreen', got '$MODE'" >&2
+     exit 1 ;;
+esac
 if [ -n "$VIDEO" ]; then
   case "$VIDEO" in
     *:*) ;;
@@ -316,17 +326,51 @@ else
   else
     HOME_URL="http://$TS_IP:$PORT/home"
   fi
-  sed -e "s|^token = .*|token = \"$(openssl rand -hex 32)\"|" \
+  # No token here any more -- see below. The line is stripped rather than
+  # substituted, so a config written by this script has nothing secret in it.
+  sed -e "/^token = /d" \
       -e "s|^home_url = .*|home_url = \"$HOME_URL\"|" \
       -e "s|^kind = .*|kind = \"chromium\"|" \
+      -e "s|^mode = .*|mode = \"$MODE\"|" \
       -e "s|^profile_dir = .*|profile_dir = \"$RUN/profile\"|" \
       -e "s|^extensions_dir = .*|extensions_dir = \"$OPT/extensions\"|" \
       -e "s|^dir = .*|dir = \"$RUN/uploads\"|" \
       agent/config.example.toml | sudo tee "$CFG" >/dev/null
   echo "   home_url = $HOME_URL"
+  echo "   mode = $MODE"
 fi
 sudo chown root:"$USER" "$CFG"
-sudo chmod 640 "$CFG"                      # it holds the bearer token
+# 644, not 640: with the token in its own file there is nothing secret left in
+# here, so it can be read and pasted freely. Still root-owned, because readable
+# and writable are different questions -- browser.path is what launch() execs,
+# and an API that can install extensions must not be able to choose the binary.
+sudo chmod 644 "$CFG"
+
+# The token, on its own. Editing the file that holds the screen layout is how a
+# token gets damaged, and the two have no reason to share a file. Written only
+# when absent: re-running this script must never invalidate the token every
+# controller on the tailnet already has.
+if [ -s "$TOKENF" ]; then
+  echo "   $TOKENF exists, left alone"
+else
+  # Migrate the token out of an older config rather than minting a new one, or a
+  # re-run silently locks out every box that already has it.
+  #
+  # Piped, never captured into a variable: the token has no business being in
+  # this script's environment, where a later `echo` or a set -x could put it on
+  # screen. tests/test_deploy.py pins that -- the whole file is checked for a
+  # token-shaped assignment.
+  if sudo grep -q '^token = ' "$CFG" 2>/dev/null; then
+    sudo sed -n 's|^token = "\(.*\)"|\1|p' "$CFG" | sudo tee "$TOKENF" >/dev/null
+    sudo sed -i '/^token = /d' "$CFG"
+    echo "   moved the token out of $CFG into $TOKENF"
+  else
+    openssl rand -hex 32 | sudo tee "$TOKENF" >/dev/null
+    echo "   new token in $TOKENF"
+  fi
+fi
+sudo chown root:"$USER" "$TOKENF"
+sudo chmod 640 "$TOKENF"                   # this is the one that is secret
 mkdir -p "$DATA"
 
 # Pi only: this trades persistent logs for SD card life. A server logs to an SSD
@@ -420,14 +464,16 @@ cat <<EOF
 Done. From a controller box, with the token this prints (do not paste it into
 anything that keeps history):
 
-  sudo sed -n 's|^token = "\\(.*\\)"|\\1|p' $CFG
+  sudo cat $TOKENF
 
   curl -H "Authorization: Bearer \$TOKEN" http://$TS_IP:$PORT/v1/status
 
 Or from this box, without the token ever being on screen:
 
-  curl -sH "Authorization: Bearer \$(sudo sed -n 's|^token = "\\(.*\\)"|\\1|p' $CFG)" \\
+  curl -sH "Authorization: Bearer \$(sudo cat $TOKENF)" \\
        http://$TS_IP:$PORT/v1/status
+
+$CFG holds no secret now and is safe to read, paste and diff.
 
 Still on you: disable this node's key expiry in the Tailscale admin console,
 or the Pi silently drops off the tailnet in ~6 months with no keyboard to fix it.

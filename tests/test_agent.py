@@ -337,3 +337,105 @@ def test_smoke_pdf_drop(live_server):
     assert c.get(f"/files/{file_id}").headers["content-type"] == "application/pdf"
     # the upload auto-navigated the kiosk to the file it just stored
     assert file_id in c.get("/v1/status").json()["current_url"]
+
+
+# --- kiosk vs windowed fullscreen -------------------------------------------
+# Which one you want is a fact about where the box lives: bolted to a wall, or
+# on a desk someone also uses. Chosen at install (setup.sh MODE=) and read from
+# config.toml, because changing it means relaunching the browser either way.
+
+def launch_argv(tmp_path, monkeypatch, **over):
+    seen = []
+    monkeypatch.setattr(browser.subprocess, "Popen", lambda argv, **kw: seen.append(argv))
+    monkeypatch.setattr(browser, "wait_ready", lambda *a, **kw: None)
+    monkeypatch.setattr(browser, "_exe", lambda kind, path="": "/usr/bin/" + kind)
+    browser.launch({"home_url": "about:blank",
+                    "browser": {"kind": "chromium", "path": "", "debug_port": 9222,
+                                "disk_cache_mb": 100,
+                                "profile_dir": str(tmp_path / "profile"), **over}})
+    return seen[0]
+
+
+def test_kiosk_is_the_default(tmp_path, monkeypatch):
+    """Every install that predates this key has no `mode` in its config.toml, so
+    the default has to be the behaviour those boxes already have."""
+    argv = launch_argv(tmp_path, monkeypatch)
+    assert "--kiosk" in argv
+    assert "--start-fullscreen" not in argv
+
+
+def test_fullscreen_mode_leaves_a_way_out(tmp_path, monkeypatch):
+    """--start-fullscreen is a normal window opened fullscreen: F11 leaves it and
+    alt-tab works. --kiosk has neither, which is the point on a wall and the
+    problem on a desk."""
+    argv = launch_argv(tmp_path, monkeypatch, mode="fullscreen")
+    assert "--start-fullscreen" in argv
+    assert "--kiosk" not in argv
+
+
+def test_a_typo_in_mode_falls_back_to_kiosk(tmp_path, monkeypatch):
+    """The box has no keyboard. A misspelled mode must not be discovered as a
+    browser that will not start -- and kiosk is what the box did before the key
+    existed, so falling back to it cannot change a working install."""
+    from agent.app import load_config
+
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('token = "t"\nhome_url = "https://e.test/"\n'
+                        '[browser]\nkind = "chromium"\nmode = "kiosc"\n',
+                        encoding="utf-8")
+    assert load_config(cfg_path)["browser"]["mode"] == "kiosk"
+
+
+# --- the token has its own file ---------------------------------------------
+# It shares no file with the screen layout, because editing the layout is how a
+# token got damaged once -- and that presents as "my token stopped working" with
+# a config that looks perfectly fine.
+
+def write_cfg(tmp_path, token_line='token = "in-config"\n'):
+    p = tmp_path / "config.toml"
+    p.write_text(f'{token_line}home_url = "https://e.test/"\n', encoding="utf-8")
+    return p
+
+
+def test_the_token_file_wins_over_a_config_left_behind(tmp_path, monkeypatch):
+    from agent.app import load_config
+
+    tok = tmp_path / "token"
+    tok.write_text("from-the-file", encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_TOKEN", str(tok))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "none.json"))
+    assert load_config(write_cfg(tmp_path))["token"] == "from-the-file"
+
+
+def test_a_box_not_yet_migrated_still_authenticates(tmp_path, monkeypatch, caplog):
+    """The one that matters: an update must never leave a box unable to accept
+    its own token, because nobody can log in to fix it."""
+    from agent.app import load_config
+
+    monkeypatch.setenv("CROSSDROP_TOKEN", str(tmp_path / "absent"))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "none.json"))
+    with caplog.at_level("WARNING"):
+        assert load_config(write_cfg(tmp_path))["token"] == "in-config"
+    assert "token now lives in" in caplog.text, caplog.text
+
+
+def test_no_token_anywhere_is_still_an_error(tmp_path, monkeypatch):
+    from agent.app import load_config
+
+    monkeypatch.setenv("CROSSDROP_TOKEN", str(tmp_path / "absent"))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "none.json"))
+    with pytest.raises(RuntimeError, match="no token"):
+        load_config(write_cfg(tmp_path, token_line=""))
+
+
+def test_a_trailing_newline_is_not_part_of_the_token(tmp_path, monkeypatch):
+    """`echo tok | sudo tee` is how anyone would write this file, and a token
+    with \n on the end authenticates from `cat` but not from any client that
+    sends it as a header -- a miserable afternoon, free to prevent."""
+    from agent.app import load_config
+
+    tok = tmp_path / "token"
+    tok.write_text("abc123\n", encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_TOKEN", str(tok))
+    monkeypatch.setenv("CROSSDROP_SETTINGS", str(tmp_path / "none.json"))
+    assert load_config(write_cfg(tmp_path))["token"] == "abc123"

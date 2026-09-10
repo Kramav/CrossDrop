@@ -140,10 +140,16 @@ def test_the_installer_writes_a_config_the_agent_can_load(box, pi, monkeypatch):
     cfg = box.prefix / f"etc/{NAME}/config.toml"
     monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
     monkeypatch.setenv("CROSSDROP_SETTINGS", str(box.prefix / "none.json"))
+    monkeypatch.setenv("CROSSDROP_TOKEN", str(box.prefix / f"etc/{NAME}/token"))
     from agent.app import load_config
 
     loaded = load_config()
     assert loaded["token"] and loaded["token"] != "change-me"
+    # The token is in its own file now, so the config the installer wrote holds
+    # no secret at all -- that is what makes it safe to read, paste and diff.
+    # No assignment; the comments explaining where it went are fine.
+    assert not [ln for ln in cfg.read_text(encoding="utf-8").splitlines()
+                if ln.startswith("token = ")]
     home = loaded["screens"][0]["home_url"]
     assert home.startswith("http://100.64.0.1:8080/home"), home
     assert "127.0.0.1" not in home, home
@@ -330,6 +336,11 @@ OLD_NAME = "room-display"
 V1_TOKEN = "1111111111111111111111111111111111111111111111111111111111111111"
 
 
+def token_of(box):
+    """The token as the agent will read it -- its own file, stripped."""
+    return (box.prefix / f"etc/{NAME}/token").read_text(encoding="utf-8").strip()
+
+
 def v1_box(box):
     """A box as setup.sh v1.3.0 left it: the paths, the token, the snapshot."""
     p, home = box.prefix, box.home
@@ -368,7 +379,10 @@ def test_migrating_keeps_the_token_and_the_logins(box):
     assert r.returncode == 0, f"{r.stdout}\n{r.stderr}"
 
     cfg = (box.prefix / f"etc/{NAME}/config.toml").read_text(encoding="utf-8")
-    assert V1_TOKEN in cfg, "the token was regenerated"
+    # Carried across, and into its own file -- a v1 box keeps the token it has,
+    # it just stops sharing a file with the screen layout.
+    assert token_of(box) == V1_TOKEN, "the token was regenerated"
+    assert V1_TOKEN not in cfg, "the token was left behind in the config"
     assert OLD_NAME not in cfg, cfg
     # The v1 default resolves to loopback while the unit binds the tailnet
     # address, so carrying it across intact is a migration that reports success
@@ -569,8 +583,7 @@ def test_a_partly_migrated_box_can_be_finished(box):
     r = box.run(ROOT / "deploy/pi/migrate.sh", pi=True, SETUP=str(SETUP), REPO="x")
     assert r.returncode == 0, f"a resumable state was refused\n{r.stdout}\n{r.stderr}"
     assert "resuming a partial migration" in r.stdout, r.stdout
-    cfg = (box.prefix / f"etc/{NAME}/config.toml").read_text(encoding="utf-8")
-    assert V1_TOKEN in cfg, "the token was lost while finishing the migration"
+    assert token_of(box) == V1_TOKEN, "the token was lost while finishing the migration"
     assert not (box.prefix / f"opt/{OLD_NAME}").exists()
 
 

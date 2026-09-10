@@ -19,7 +19,8 @@ import time
 # Overridable per deployment via a [display] block, but the defaults are the
 # point: nobody should have to edit a config file to stop a display sleeping.
 # 0 disables that timer.
-DEFAULTS = {"idle_off_minutes": 10, "content_off_minutes": 120,
+DEFAULTS = {"splits": {},
+            "idle_off_minutes": 10, "content_off_minutes": 120,
             # Not a power timeout, but the same kind of knob and the same block:
             # how long after its last activity a screen is still worth restoring
             # on the next start (app.py `_restorable`). 0 = always come up on home.
@@ -119,6 +120,55 @@ def detect() -> list[dict]:
     found = [{"output": m[1], "position": f"{m[4]},{m[5]}", "size": f"{m[2]}x{m[3]}"}
              for m in (_MONITOR.match(ln) for ln in (out or "").splitlines()) if m]
     return sorted(found, key=lambda s: int(s["position"].split(",")[0]))
+
+
+SPLITS = ("lr", "tb")           # side by side, or stacked
+
+
+def split(monitors: list[dict], splits: dict | None) -> list[dict]:
+    """Cut each named output into two screens. `splits` is {output: "lr"|"tb"}.
+
+    A monitor is one panel; a *screen* is one kiosk window, and nothing says a
+    panel only gets one. Half of a 2560-wide monitor is still a 1280-wide web
+    viewport, which is the whole point.
+
+    Derived from detect() rather than written as [[screen]] blocks so the halves
+    follow xrandr: hard-coding "1280,0" in config.toml is exactly the stale
+    geometry that put both windows on one monitor and cost an evening.
+
+    Halves are emitted **in place**, so the list stays in the left-to-right order
+    detect() produced and settings.apply's index fallback still means something.
+    That is also why a "tb" split needs no sort change: nothing re-sorts after
+    this, and T is emitted before B.
+    """
+    out = []
+    for m in monitors:
+        how = (splits or {}).get(m["output"])
+        if how not in SPLITS:
+            if how is not None:
+                print(f"display: {how!r} is not a way to split {m['output']} "
+                      f"(want {' or '.join(SPLITS)}) -- leaving it whole",
+                      flush=True)
+            out.append(m)
+            continue
+        x, y = (int(v) for v in m["position"].split(","))
+        w, h = (int(v) for v in m["size"].split("x"))
+        if how == "lr":
+            # The odd column goes to the second half: 1365 -> 682 + 683. No
+            # pixel is lost and the two never overlap, which _by_bounds needs --
+            # two windows at one origin is a tie it has to refuse.
+            a = w // 2
+            parts = [("L", f"{x},{y}", f"{a}x{h}"),
+                     ("R", f"{x + a},{y}", f"{w - a}x{h}")]
+        else:
+            a = h // 2
+            parts = [("T", f"{x},{y}", f"{w}x{a}"),
+                     ("B", f"{x},{y + a}", f"{w}x{h - a}")]
+        out += [{"output": f"{m['output']}-{side}", "position": pos, "size": size,
+                 # The one flag that stops browser._place fullscreening it away.
+                 "fullscreen": False}
+                for side, pos, size in parts]
+    return out
 
 
 def touch(screen: dict, url: str | None = None) -> None:

@@ -1,7 +1,16 @@
 # Copy to config.toml (git-ignored). On the Pi this lives at
 # /etc/crossdrop/config.toml and is pointed at with CROSSDROP_CONFIG.
 
-token = "change-me"          # bearer token for every /v1 route
+# NOT the token. That lives on its own, in /etc/crossdrop/token (root:<user>
+# 0640) -- so that editing the screen layout can never damage the credential,
+# which is exactly how a token got truncated once and presented as "my token
+# stopped working" with a file that looked perfectly fine. A `token = ` still
+# sitting here is honoured and named in the log, so an un-migrated box keeps
+# working; re-run setup.sh to move it.
+#
+# This file holds no secret and is readable (0644). It stays root-owned, because
+# readable and writable are different questions: `path` below is what the agent
+# execs, and an API that can install extensions must not also pick the binary.
 home_url = "/home"           # page the kiosk opens on launch. http, https,
                              # "about:blank" (a white screen), or a path -- a
                              # path is this agent's own page and is resolved
@@ -31,10 +40,20 @@ home_url = "/home"           # page the kiosk opens on launch. http, https,
 # Wayland ignores client positioning, so multi-screen forces Chromium under
 # XWayland. See deploy/pi/README.md before relying on it.
 #
-# `size` is cosmetic: the window is briefly visible between being moved and being
-# fullscreened, and matching it to the monitor avoids a small-window flash at
-# every boot. Omit it and you get 800x600 for that moment. Fullscreen wins either
-# way, so a wrong size costs you nothing but the flash.
+# `size` is cosmetic *for a screen that ends up fullscreen* -- the window is only
+# briefly visible between being moved and being fullscreened, and matching it to
+# the monitor avoids a small-window flash at boot. Omit it and you get 800x600
+# for that moment.
+#
+# It stops being cosmetic with `fullscreen = false`, which is how you hand a
+# screen half a panel: the size it is given is the size it keeps. A block with
+# `fullscreen = false` and no position or size falls back to fullscreen with a
+# warning, because an 800x600 window in the corner of a wall-mounted panel reads
+# as broken.
+#
+# You rarely want to write this by hand -- the web UI's split control derives the
+# halves from xrandr, which is how they stay correct when a monitor changes. Do
+# it here only for a geometry halves cannot express (thirds, 70/30).
 #
 # [[screen]]
 # name = "left"
@@ -61,6 +80,23 @@ kind = "firefox"             # "firefox" (WebDriver BiDi) | "edge" | "chromium" 
                              # only -- scroll, autoscroll, media and screens 2+
                              # all 501. /v1/status reports this as `supports`.
 path = ""                    # optional absolute path; empty = auto-detect
+mode = "kiosk"               # "kiosk" | "fullscreen"
+                             # kiosk: no browser UI and no way out of it -- the
+                             # wall-mounted case, and the default.
+                             # fullscreen: a fullscreen *window*. F11 and
+                             # alt-tab still work, so the box stays usable as a
+                             # desktop with the display running on it. Required
+                             # to split a monitor: a kiosk window is entitled to
+                             # refuse half-screen bounds.
+                             # The seed only. The web UI can change this, and
+                             # once it has, settings.json wins -- it is one of
+                             # the two keys the API may write (settings.py
+                             # SAFE_KEYS). Set the seed with setup.sh MODE=.
+                             # Either way the browser must be relaunched, since
+                             # this is a command-line flag: POST /v1/relaunch,
+                             # or `roomctl relaunch`.
+                             # On firefox `fullscreen` means plain windowed:
+                             # there is no such switch, and /v1/window is CDP-only.
 profile_dir = ""             # empty = ./profile next to this config
 autolaunch = true            # false = drive a browser you started yourself
 debug_port = 9222            # 127.0.0.1 only. Debug port == full browser control.
@@ -90,6 +126,12 @@ extensions_dir = ""          # chromium/edge only. Every child directory of this
 # Display power. Both keys are optional -- these are the defaults, and the point
 # is that a working install needs none of this written down. X11 only; on Wayland
 # the agent leaves the monitors alone. `0` disables that timer.
+#
+# `splits` is not written here: it is one of the two keys the API owns, so the
+# web UI's split control writes it to settings.json. {"HDMI-1": "lr"} cuts that
+# monitor into two screens side by side; "tb" stacks them. Needs
+# browser.mode = "fullscreen"; in kiosk mode the splits are dropped with a
+# warning and the monitors come up whole.
 #
 # [display]
 # idle_off_minutes = 10        # sitting on its home page

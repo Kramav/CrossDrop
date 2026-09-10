@@ -165,6 +165,13 @@
                  background: #ffffff08; font-weight: 600; font-size: .8rem;
                  text-align: center; overflow: hidden; padding: .2rem; }
   #screenmap b small { font-weight: 400; opacity: .6; font-size: .7rem; }
+  #screenmap b.pending { border-style: dashed; opacity: .75; }
+  .grow { flex: 1; }
+  .sheet select { padding: .4rem; font: inherit; border: 1px solid var(--line);
+    border-radius: .35rem; background: transparent; color: inherit; }
+  #splitrow { flex-wrap: wrap; gap: .3rem; }
+  #splitrow button { font-size: .78rem; padding: .3rem .5rem; }
+  #pendingnote { color: #e0b341; }
   .note { font-size: .8rem; opacity: .7; margin: .4rem 0 0; }
   #extlist .row { justify-content: space-between; margin-bottom: .3rem; }
   #extlist .row span { font-size: .85rem; }
@@ -278,13 +285,24 @@
   <p class="note">Kept in this browser only, never sent anywhere but the agent.</p>
 
   <h2>Screens</h2>
+  <div class="row">
+    <label class="grow" for="mode">Browser window</label>
+    <select id="mode">
+      <option value="kiosk">Kiosk — no way out of the page</option>
+      <option value="fullscreen">Fullscreen — F11 and alt-tab work</option>
+    </select>
+  </div>
   <div id="screenmap"></div>
+  <div id="splitrow" class="row"></div>
   <div id="screencfg"></div>
   <div class="row">
     <button type="button" id="savecfg"
             title="Also re-reads the monitor layout from xrandr">Save screens</button>
+    <button type="button" id="confirmcfg" hidden>Confirm choices</button>
+    <button type="button" id="cancelcfg" hidden>Cancel</button>
   </div>
   <p class="note" id="cfgnote"></p>
+  <p class="note" id="pendingnote" hidden></p>
 
   <div id="extbox">
     <h2>Extensions</h2>
@@ -1007,13 +1025,132 @@ function drawMap(screens) {
     });
     const size = document.createElement("small");
     size.textContent = `${r.w}×${r.h}`;
+    // Dashed while it is only a proposal, so the map can show you the layout you
+    // are about to confirm without it looking like the one on the wall.
+    if (screens[i].pending) el.className = "pending";
     el.append(`${i + 1} · ${screens[i].name}`, size);
     return el;
   }));
 }
 
+// What the agent last told us, and what we are proposing to change. Splitting a
+// panel and switching the browser mode both take effect only after the browser
+// is relaunched, which costs the wall 15-30 seconds of black — so neither
+// applies on click. They accumulate here, the map previews the result, and
+// "Confirm choices" is the one thing that touches the display.
+let settingsNow = null;             // the last /v1/settings body
+let pending = null;                 // { splits, mode } once something is staged
+
+function stage(change) {
+  const base = pending || settingsNow;
+  pending = { splits: { ...base.splits }, mode: base.mode, ...change };
+  // Splitting needs a fullscreen window: a --kiosk one is entitled to refuse
+  // half-screen bounds, and two halves that both come up fullscreen sit on top
+  // of each other. So the two settings move together rather than fighting —
+  // asking for kiosk puts the panels back, asking for a split switches the mode.
+  // Not a prompt: the confirm step below is where it gets approved, and the
+  // summary names the mode change explicitly.
+  if ("mode" in change && change.mode !== "fullscreen") pending.splits = {};
+  else if (Object.keys(pending.splits).length) pending.mode = "fullscreen";
+  drawSettings(settingsNow);
+}
+
+// The layout the pending splits would produce, so the map shows what you are
+// about to confirm rather than what is on the wall now. Geometry only — names
+// belong to screens that may not exist yet.
+function previewScreens() {
+  if (!pending) return settingsNow.screens;
+  const whole = new Map();
+  for (const s of settingsNow.screens) {
+    const parent = s.output.replace(/-[LRTB]$/, "");
+    if (!whole.has(parent)) whole.set(parent, { output: parent, ...bounds(s) });
+    else {                          // two halves: put the panel back together
+      const a = whole.get(parent), b = bounds(s);
+      whole.set(parent, { output: parent, x: Math.min(a.x, b.x),
+                          y: Math.min(a.y, b.y),
+                          w: a.x === b.x ? a.w : a.w + b.w,
+                          h: a.y === b.y ? a.h : a.h + b.h });
+    }
+  }
+  const out = [];
+  for (const m of whole.values()) {
+    const how = pending.splits[m.output];
+    const geom = (x, y, w, h) => ({ position: `${x},${y}`, size: `${w}x${h}` });
+    if (how === "lr") {
+      const a = Math.floor(m.w / 2);
+      out.push({ name: `${m.output}-L`, output: `${m.output}-L`, pending: true,
+                 ...geom(m.x, m.y, a, m.h) },
+               { name: `${m.output}-R`, output: `${m.output}-R`, pending: true,
+                 ...geom(m.x + a, m.y, m.w - a, m.h) });
+    } else if (how === "tb") {
+      const a = Math.floor(m.h / 2);
+      out.push({ name: `${m.output}-T`, output: `${m.output}-T`, pending: true,
+                 ...geom(m.x, m.y, m.w, a) },
+               { name: `${m.output}-B`, output: `${m.output}-B`, pending: true,
+                 ...geom(m.x, m.y + a, m.w, m.h - a) });
+    } else {
+      const live = settingsNow.screens.find(s => s.output === m.output);
+      out.push(live || { name: m.output, output: m.output, pending: true,
+                         ...geom(m.x, m.y, m.w, m.h) });
+    }
+  }
+  return out;
+}
+
+function bounds(s) {
+  const [x, y] = (s.position || "").split(",").map(Number);
+  const [w, h] = (s.size || "").split("x").map(Number);
+  return { x, y, w, h };
+}
+
+// One control per *panel*, not per screen: splitting is something you do to a
+// monitor, and once it is split neither half can tell you what the panel was.
+function drawSplits(body) {
+  const splits = (pending || body).splits;
+  const rows = (body.outputs || []).map(out => {
+    const b = document.createElement("button");
+    b.type = "button";
+    const how = splits[out];
+    b.textContent = how ? `${out}: unsplit` : `${out}: split ▸`;
+    b.title = how ? "Put the two halves back together"
+                  : "Cut this monitor into two screens";
+    b.onclick = () => {
+      const next = { ...splits };
+      if (how) delete next[out];
+      // Left/right unless the panel is taller than it is wide, where stacking is
+      // the one that leaves a usable shape.
+      else next[out] = wideEnough(out) ? "lr" : "tb";
+      stage({ splits: next });
+    };
+    return b;
+  });
+  $("#splitrow").replaceChildren(...rows);
+}
+
+function wideEnough(output) {
+  const s = settingsNow.screens.find(x => x.output.startsWith(output));
+  const { w, h } = bounds(s || {});
+  return !isFinite(w) || !isFinite(h) || w >= h;
+}
+
 function drawSettings(cfg) {
-  drawMap(cfg.screens);
+  settingsNow = cfg;
+  const shown = previewScreens();
+  drawMap(shown);
+  drawSplits(cfg);
+  $("#mode").value = (pending || cfg).mode || "kiosk";
+  $("#confirmcfg").hidden = $("#cancelcfg").hidden = !pending;
+  $("#pendingnote").hidden = !pending;
+  if (pending) {
+    const bits = [];
+    const n = Object.entries(pending.splits)
+      .map(([o, how]) => `${o} ${how === "lr" ? "left/right" : "top/bottom"}`);
+    bits.push(n.length ? `split: ${n.join(", ")}` : "no monitors split");
+    if (pending.mode !== cfg.mode) bits.push(`window mode → ${pending.mode}`);
+    $("#pendingnote").textContent =
+      `Will ${bits.join("; ")}. The wall goes dark for 15–30s while the browser
+       restarts; pages come back by themselves.`;
+  }
   $("#screencfg").replaceChildren(...cfg.screens.map((s, i) => {
     const g = document.createElement("div");
     g.className = "grid";
@@ -1134,6 +1271,32 @@ $("#tok").onkeydown = e => { if (e.key === "Enter") $("#savetok").click(); };
 // Also the re-sync: the agent re-reads xrandr on every save, so a monitor
 // swapped since it started is picked up here without a restart.
 $("#savecfg").onclick = () => saveSettings(readSettings());
+$("#mode").onchange = () => stage({ mode: $("#mode").value });
+$("#cancelcfg").onclick = () => { pending = null; drawSettings(settingsNow); };
+$("#confirmcfg").onclick = () => confirmChanges();
+
+// The one thing here that touches the wall. Saving is not enough: `mode` is a
+// command-line flag and a split changes how many windows there are, so both
+// need the browser relaunched — which is why none of this applied on click.
+async function confirmChanges() {
+  const change = pending;
+  $("#cfgnote").textContent = "saving…";
+  try {
+    const body = await req("/v1/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...auth() },
+      body: JSON.stringify({ screens: readSettings(), splits: change.splits,
+                             mode: change.mode }),
+    });
+    pending = null;                 // saved, so it is no longer a proposal
+    $("#cfgnote").textContent = "restarting the browser…";
+    await req("/v1/relaunch", { method: "POST", headers: auth() });
+    drawSettings(body);
+    $("#cfgnote").textContent =
+      "browser restarting — the wall comes back on its own in a few seconds";
+    refresh();
+  } catch (e) { $("#cfgnote").textContent = "✗ " + e.message; }
+}
 $("#closesetup").onclick = () => $("#setup").close();
 
 // The scroll step is a per-controller preference, not something the agent owns.

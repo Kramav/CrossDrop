@@ -193,6 +193,16 @@ class Client:
     def home(self, screen: str | None = None) -> dict:
         return self._call("POST", "/v1/home", json={"screen": screen})
 
+    def relaunch(self) -> dict:
+        """Restart the kiosk browser. Per display, not per screen.
+
+        For the settings the browser was *launched* with -- `browser.mode`
+        above all, which is a command-line flag. It takes the wall dark for
+        15-30s while Chromium comes back; each screen returns to what it was
+        showing by itself.
+        """
+        return self._call("POST", "/v1/relaunch", json={})
+
     def window(self, state: str, screen: str | None = None) -> dict:
         """normal / minimized / fullscreen. Minimized frees the Pi's desktop
         without stopping the agent; fullscreen puts the kiosk back."""

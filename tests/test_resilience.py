@@ -753,3 +753,92 @@ def test_a_malformed_edit_does_not_take_the_agent_down(tmp_path, monkeypatch):
         cfg_path.write_text(good.replace("first", "third"), encoding="utf-8")
         assert until(lambda: c.get("/v1/screens", headers={
             "Authorization": "Bearer third"}).status_code == 200)
+
+
+# --- relaunching the browser ------------------------------------------------
+# The only way to apply a setting the browser was *launched* with. It costs the
+# wall 15-30s of black, so the risk that matters is a relaunch that never comes
+# back on a box nobody can walk up to.
+
+def test_a_relaunch_that_fails_still_leaves_the_agent_answering(tmp_path,
+                                                                monkeypatch,
+                                                                no_browser):
+    """The property that makes this safe to expose at all. _launch already
+    retries and records why; the route must not bypass that and take uvicorn
+    down, or the one thing that could name the cause dies with it."""
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
+    monkeypatch.setattr(appmod, "LAUNCH_RETRY_SECS", 0.01)
+
+    def no_binary(cfg):
+        raise RuntimeError("no chromium binary found; set browser.path in config")
+
+    monkeypatch.setattr(appmod.browser, "launch", no_binary)
+    with TestClient(app) as c:
+        assert c.post("/v1/relaunch", headers=H).status_code == 200
+        assert until(lambda: appmod.app.state.launch_error)
+        s = c.get("/v1/status", headers=H).json()
+        assert s["up"] is True and s["browser"] == "down"
+        assert "no chromium binary" in s["error"]
+
+
+def test_a_screen_that_gains_a_window_gets_one(tmp_path, monkeypatch):
+    """launch() opens one window per screen and is the only thing that ever did,
+    so a screen list that *grows* while the agent runs left the new screen with
+    no window -- and _identify then handed its name whichever window sorted into
+    that slot. That is the bug where both monitors showed the same page.
+    """
+    from agent import browser
+
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
+    opened = []
+    with TestClient(app) as c:
+        cfg = appmod.app.state.cfg
+        # Stubbed inside the block: /v1/status resolves windows through _pages
+        # too, and a fake page list would break the startup it has to survive.
+        # One window per screen *as things stand*, so the only thing missing is
+        # the new one. Counted now, not in the lambda: swap_config mutates this
+        # very dict in place, so a closure over it would grow to match and the
+        # test would prove nothing.
+        have = len(cfg["screens"])
+        monkeypatch.setattr(browser, "_pages", lambda port: ["a window"] * have)
+        monkeypatch.setattr(browser, "open_window",
+                            lambda cfg, s: opened.append(s["name"]))
+        appmod.app.state.proc = "a browser, as far as this test is concerned"
+        fresh = dict(cfg)
+        fresh["screens"] = list(cfg["screens"]) + [
+            {"name": "grown", "output": "HDMI-9", "position": "9000,0",
+             "size": "800x600", "home_url": "about:blank", "fullscreen": False}]
+        appmod.swap_config(cfg, fresh)
+        # Before the lifespan exit tries to stop a browser that is a string.
+        appmod.app.state.proc = None
+
+    assert opened == ["grown"], opened
+
+
+def test_a_second_relaunch_while_one_is_running_is_refused(tmp_path, monkeypatch,
+                                                           no_browser):
+    """Two browsers on one debug port is the destructive one. _launch can sit in
+    wait_ready for 30s, and a second relaunch in that window would see proc as
+    None, skip the stop, and start another Chromium -- whose wait_ready would
+    then answer from the *first* and report success, orphaning a kiosk that
+    holds 9222 forever."""
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_launch(cfg):
+        started.set()
+        release.wait(5)             # stand in for wait_ready's long wait
+        return "a browser"
+
+    monkeypatch.setattr(appmod.browser, "launch", slow_launch)
+    monkeypatch.setattr(appmod, "_home_when_ready", lambda cfg: None)
+    monkeypatch.setattr(appmod.browser, "stop", lambda cfg, proc: None)
+    with TestClient(app) as c:
+        assert c.post("/v1/relaunch", headers=H).status_code == 200
+        assert started.wait(5), "the first relaunch never got as far as launching"
+        assert c.post("/v1/relaunch", headers=H).status_code == 409
+        release.set()
+        # And once it finishes, the next one is allowed again.
+        assert until(lambda: c.post("/v1/relaunch", headers=H).status_code == 200)
+        release.set()
