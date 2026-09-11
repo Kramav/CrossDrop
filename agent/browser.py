@@ -822,16 +822,40 @@ def media(cfg: dict, screen: str | None = None, action: str = "state",
                          f"media {action}")
 
 
-def _viewport(call) -> tuple[int, int]:
-    """The window's CSS-pixel viewport. The 800x600 fallback is a guess that
-    keeps a scroll off the PDF sidebar and gives a screenshot a clip rather than
-    an exception."""
+def _viewport_rect(call) -> tuple[int, int, int, int]:
+    """Where the window is looking, in *document* coordinates: (x, y, w, h).
+
+    The x and y are the scroll offset, and leaving them out is a bug worth
+    spelling out, because it hid behind a page that happened to be at the top.
+
+    Page.captureScreenshot's clip is relative to the **document** origin, not to
+    what is on screen. So a clip of (0, 0, w, h) photographs the top of the
+    document however far down the page has been scrolled -- and with
+    captureBeyondViewport off, Chromium only composites what is actually
+    painted, so most of that rect comes back blank. After an autoscroll the
+    capture was a white sheet with a strip of real page where the rect happened
+    to overlap the viewport.
+
+    The same omission put clicks in the wrong place, which is the half that
+    matters more. Input.dispatchMouseEvent takes *viewport* coordinates, so the
+    picture and the click space only agreed while the scroll offset was zero.
+    Anchoring the clip here makes image pixel (px, py) mean viewport (px, py)
+    again, which is what web/index.html's imagePoint has always assumed.
+
+    The 800x600 fallback is a guess that keeps a scroll off the PDF sidebar and
+    gives a screenshot a clip rather than an exception.
+    """
     with contextlib.suppress(Exception):        # older builds, odd targets
         v = call("Page.getLayoutMetrics").get("cssLayoutViewport") or {}
         w, h = v.get("clientWidth"), v.get("clientHeight")
         if w and h:
-            return w, h
-    return 800, 600
+            return int(v.get("pageX") or 0), int(v.get("pageY") or 0), w, h
+    return 0, 0, 800, 600
+
+
+def _viewport(call) -> tuple[int, int]:
+    """The window's CSS-pixel viewport size, for callers that need no offset."""
+    return _viewport_rect(call)[2:]
 
 
 def _viewport_centre(call) -> tuple[int, int]:
@@ -871,10 +895,15 @@ def screenshot(cfg: dict, screen: str | None = None, region: dict | None = None,
 
     page = _cdp_page(cfg, screen)
     with _rpc(page["webSocketDebuggerUrl"]) as call:
-        vw, vh = _viewport(call)
+        vx, vy, vw, vh = _viewport_rect(call)
         x, y, w, h = _clip(region, vw, vh)
+        # `region` stays relative to what is on screen -- that is what a caller
+        # means by it, and it is the space the returned width/height are in.
+        # The scroll offset is added only on the way out to CDP, whose clip is
+        # in document coordinates. See _viewport_rect.
         params = {"format": format, "captureBeyondViewport": False,
-                  "clip": {"x": x, "y": y, "width": w, "height": h, "scale": 1}}
+                  "clip": {"x": vx + x, "y": vy + y,
+                           "width": w, "height": h, "scale": 1}}
         if format != "png":                     # png ignores it and some builds complain
             params["quality"] = quality
         data = call("Page.captureScreenshot", params).get("data") or ""

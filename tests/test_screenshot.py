@@ -264,3 +264,46 @@ def test_the_cli_writes_the_file_and_keeps_stdout_pipeable(client, monkeypatch,
 def test_the_cli_rejects_a_malformed_region(capsys):
     assert cli.main(["shot", "--region", "0,0,800"]) == 1
     assert "x,y,width,height" in capsys.readouterr().err
+
+
+# --- the clip follows the scroll --------------------------------------------
+
+def test_a_scrolled_page_is_photographed_where_it_is_looking(cdp):
+    """The bug this exists for: after an autoscroll the capture came back a
+    white sheet with a band of real page at the bottom.
+
+    Page.captureScreenshot's clip is in *document* coordinates, so (0, 0) is the
+    top of the document however far down the window has scrolled -- and with
+    captureBeyondViewport off, the unpainted part of that rect composites as
+    blank. The band was where the rect happened to overlap the viewport.
+    """
+    cdp.viewport = {"clientWidth": 1920, "clientHeight": 1080,
+                    "pageX": 0, "pageY": 4000}
+    r = browser.screenshot(make_cfg(), "left")
+    clip = shot_params(cdp)["clip"]
+    assert clip == {"x": 0, "y": 4000, "width": 1920, "height": 1080, "scale": 1}
+    # And the caller is told the size it got, not where it came from.
+    assert (r["width"], r["height"]) == (1920, 1080)
+
+
+def test_a_region_stays_relative_to_what_is_on_screen(cdp):
+    """A caller asking for the top-left 200x100 means of the *view*, not of the
+    document -- it is picking a spot out of the picture it is looking at. The
+    scroll offset is added on the way out to CDP and nowhere else."""
+    cdp.viewport = {"clientWidth": 1920, "clientHeight": 1080,
+                    "pageX": 30, "pageY": 4000}
+    r = browser.screenshot(make_cfg(), "left",
+                           region={"x": 10, "y": 20, "width": 200, "height": 100})
+    assert shot_params(cdp)["clip"] == {
+        "x": 40, "y": 4020, "width": 200, "height": 100, "scale": 1}
+    assert (r["width"], r["height"]) == (200, 100)
+
+
+def test_an_unscrolled_page_is_unchanged(cdp):
+    """The case that always worked, pinned: metrics without pageX/pageY at all
+    (an older build, or a target that reports neither) must still clip at the
+    origin rather than raise or drift."""
+    cdp.viewport = {"clientWidth": 1366, "clientHeight": 768}
+    browser.screenshot(make_cfg(), "left")
+    assert shot_params(cdp)["clip"] == {
+        "x": 0, "y": 0, "width": 1366, "height": 768, "scale": 1}
