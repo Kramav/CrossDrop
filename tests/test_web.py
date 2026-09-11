@@ -130,3 +130,28 @@ def test_a_click_on_the_picture_maps_onto_the_page(name, rect, shot, click, expe
     assert r.returncode == 0, r.stderr
     got = json.loads(r.stdout)
     assert (got["x"], got["y"]) == expect
+
+
+@pytest.mark.parametrize("page", PAGES, ids=lambda p: p.name)
+def test_the_script_parses(page, tmp_path):
+    """The whole page is one <script>, so a syntax error anywhere in it is not a
+    broken feature -- it is every feature, at once.
+
+    Nothing runs, no handler is ever attached, and the symptom is a page that
+    renders perfectly and ignores every button. That is what a duplicate
+    declaration did: `const stage = $("#stage")` had been there for ages, a
+    `function stage(change)` was added beside it, and `const` plus `function` of
+    the same name is a SyntaxError at parse time -- before line one executes.
+
+    Counting braces cannot see that. Only a parser can, so borrow node's.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("no node to parse with")
+    html = page.read_text(encoding="utf-8")
+    parts = html.split("<script>")
+    assert len(parts) == 2, f"{page.name}: expected exactly one <script> block"
+    js = tmp_path / (page.stem + ".js")
+    js.write_text(parts[1].split("</script>")[0], encoding="utf-8")
+    r = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
+    assert r.returncode == 0, f"{page.name} does not parse:\n{r.stderr}"

@@ -1152,7 +1152,11 @@ function drawMap(screens) {
 let settingsNow = null;             // the last /v1/settings body
 let pending = null;                 // { splits, mode } once something is staged
 
-function stage(change) {
+// Named `propose`, not `stage`: `stage` is already the capture area element
+// (`const stage = $("#stage")`), and a function declaration on top of a const
+// of the same name is a SyntaxError -- which kills the whole script at parse
+// time, so the page renders and not one button works.
+function propose(change) {
   const base = pending || settingsNow;
   pending = { splits: { ...base.splits }, mode: base.mode, ...change };
   // Splitting needs a fullscreen window: a --kiosk one is entitled to refuse
@@ -1231,7 +1235,7 @@ function drawSplits(body) {
       // Left/right unless the panel is taller than it is wide, where stacking is
       // the one that leaves a usable shape.
       else next[out] = wideEnough(out) ? "lr" : "tb";
-      stage({ splits: next });
+      propose({ splits: next });
     };
     return b;
   });
@@ -1382,7 +1386,7 @@ $("#tok").onkeydown = e => { if (e.key === "Enter") $("#savetok").click(); };
 // Also the re-sync: the agent re-reads xrandr on every save, so a monitor
 // swapped since it started is picked up here without a restart.
 $("#savecfg").onclick = () => saveSettings(readSettings());
-$("#mode").onchange = () => stage({ mode: $("#mode").value });
+$("#mode").onchange = () => propose({ mode: $("#mode").value });
 $("#cancelcfg").onclick = () => { pending = null; drawSettings(settingsNow); };
 $("#confirmcfg").onclick = () => confirmChanges();
 

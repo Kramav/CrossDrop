@@ -66,15 +66,15 @@ jobs:
       # `python -m`, not bare `pytest`: the agent package is imported from the
       # repo root and only -m puts the working directory on sys.path.
       - run: python -m pytest -q
-      # One version number. This is the only one a pip install sees; the
-      # deployed one comes from the tag, and 0.1.0 sat under v1.3.0 for a while
-      # with nothing to notice. Drift is now untaggable.
-      - name: pyproject version matches the tag
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          v=$(python -c 'import tomllib,pathlib;print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])')
-          test "$v" = "${GITHUB_REF_NAME#v}" \
-            || { echo "pyproject says $v, tag says ${GITHUB_REF_NAME#v}"; exit 1; }
+      # There was a step here demanding pyproject's version equal the tag. It is
+      # gone on purpose: what v1, v2 and v3 mean is a judgement about the
+      # project, and CI has no business refusing a tag over it.
+      #
+      # Nothing is lost operationally. The version a running box reports comes
+      # from the tag either way -- update.sh writes CROSSDROP_VERSION into the
+      # release and /v1/status reports it -- so "which code is this Pi running"
+      # still has exactly one answer, and it is the tag. pyproject's number is
+      # only what `pip show roomctl` says; no code reads it.
 
   # browser.py is the riskiest file in the repo and every test that speaks real
   # CDP was skipped in CI, so the protocol code was only ever exercised by hand.
