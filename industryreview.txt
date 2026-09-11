@@ -1,0 +1,311 @@
+Yes. After looking more closely at the current repo, I’d build a “send-to-screen” product layer on top of CrossDrop rather than adding more remote-control features. CrossDrop already has a surprisingly complete control plane: a frozen HTTP API, Python client/CLI, Windows tray, web UI, multi-screen targeting, screenshots, browser input, media control, and kiosk management.
+
+My top recommendation: CrossDrop Share
+
+Think AirDrop for browser tabs + physical screens.
+
+The user experience should be:
+
+    Install a small CrossDrop agent on the receiving computer.
+    Install a Chrome/Edge extension on the sender.
+    The extension discovers available CrossDrop displays.
+    Right-click a page → Send to → Living Room TV.
+    The remote computer immediately opens the page.
+    Optionally, the sender gets a tiny preview/status:
+        🟢 displayed
+        🔴 offline
+        🔄 loading
+    The sender can optionally take control after sending.
+
+That takes CrossDrop's existing navigate API and turns it into an extremely simple consumer workflow. The existing Windows tray already has a primitive version of this—copy a link/file, invoke the tray, and put it on the wall—but the browser-extension experience would remove almost all friction.
+
+The killer feature I'd add
+
+“Send and follow.”
+
+Instead of merely sending:
+
+    Send this tab → TV
+
+you could have:
+
+    Mirror this tab → TV
+
+Now when the user navigates somewhere else, the remote display follows.
+
+For example:
+
+Laptop
+  Chrome tab
+      │
+      │ WebSocket/WebRTC
+      ▼
+CrossDrop
+      │
+      ▼
+TV / Pi
+  Chromium kiosk
+
+And then:
+
+    Navigate locally → remote follows.
+    Scroll locally → remote follows.
+    Play video locally → remote plays it.
+    Stop following → remote becomes independent.
+
+This turns CrossDrop from remote display control into a lightweight second-screen system.
+Second product: “Rooms”
+
+I think this could be even more compelling commercially.
+
+Instead of exposing machines as technical targets like:
+
+100.x.x.x
+
+give them human names:
+
+    Living Room
+    Kitchen
+    Office
+    Conference Room
+    Reception
+    TV
+    Projector
+
+Then your browser extension has:
+
+    Send to…
+
+        Living Room
+        Office
+        Kitchen
+        All Screens
+
+CrossDrop already has the underlying concept of targets and multiple screens.
+
+You'd essentially build a presentation/display network on top of it.
+Third: “Share a session”
+
+This is where I think CrossDrop's existing capabilities become much more interesting.
+
+Imagine you're working on your laptop and send a webpage to the TV.
+
+Then you see:
+
+    Take control
+
+Click it, and you get:
+
+    screenshot
+    click
+    scroll
+    keyboard
+    form input
+    media controls
+
+CrossDrop already implements these primitives through its browser automation layer.
+
+That gives you a really nice progression:
+
+Send → View → Control
+
+rather than immediately presenting the user with a complicated remote-control interface.
+Fourth: make it work without Tailscale
+
+This is probably the biggest architectural opportunity.
+
+The current project is explicitly built around a tailnet, with the controller communicating with the agent over authenticated HTTP.
+
+For a developer/home-lab product that's great.
+
+For:
+
+    “I just installed this on two computers; why can't they see each other?”
+
+it's a barrier.
+
+I'd add a discovery/pairing layer:
+
+                 Internet
+                    │
+              optional relay
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+     Laptop                  Display
+     Browser                 CrossDrop
+        │                       │
+        └─────── LAN ───────────┘
+
+Use mDNS/Bonjour on the LAN for discovery and a short pairing code/QR code for authorization.
+
+Then keep the existing CrossDrop API underneath.
+
+That is important: I wouldn't replace its architecture. I'd put a friendlier discovery/authentication layer in front of it.
+Fifth: make the browser extension genuinely excellent
+
+This would probably be my first thing to build.
+
+Chrome/Edge extension:
+Toolbar
+
+[ CrossDrop ▾ ]
+
+Click:
+
+Send this tab to
+
+🟢 Living Room
+🟢 Office
+⚫ Kitchen
+
+────────────────
+
+📺 Mirror this tab
+📸 Send screenshot
+🔗 Send link
+📄 Send PDF
+
+Right-click menu
+
+CrossDrop
+  → Send page to
+      → Living Room
+      → Office
+  → Send link to
+  → Mirror tab
+
+Keyboard shortcut
+
+Something like:
+
+Ctrl + Shift + D
+
+→ immediately sends the current tab to your default display.
+
+That would make it dramatically more useful than CrossDrop's current CLI/tray-oriented interface.
+And then I'd add “casting intelligence”
+
+This is where you could differentiate from generic casting protocols.
+
+When you send:
+
+YouTube
+
+don't merely send the URL.
+
+Tell CrossDrop:
+
+    Open this video and start playing.
+
+For:
+
+PDF
+
+→ open it in a full-screen PDF viewer.
+
+For:
+
+image
+
+→ image viewer.
+
+For:
+
+Google Slides
+
+→ presentation mode.
+
+For:
+
+Spotify
+
+→ appropriate playback page.
+
+CrossDrop already understands browser media elements and has play/pause/seek/volume controls.
+
+So you can make the destination behave like a smart display, rather than merely another browser.
+What I would not build first
+
+I wouldn't spend the first version adding:
+
+    more browser automation commands
+    more screenshot functionality
+    a sophisticated remote desktop
+    another file-transfer protocol
+    an elaborate dashboard
+    AI control
+    mobile apps
+
+Those are tempting because CrossDrop already exposes the underlying primitives.
+
+But they're not the missing product.
+The missing product is the UX.
+
+CrossDrop currently feels like:
+
+    powerful infrastructure that happens to have a UI.
+
+I'd turn it into:
+
+    “Send anything on your screen to any screen you own.”
+
+That's a much clearer product.
+My proposed roadmap
+V0 — 1–2 weeks
+
+Build a Chrome/Edge extension:
+
+    discover configured CrossDrop targets
+    current-tab URL
+    right-click "Send to..."
+    one-click send
+    target naming
+    default target
+    success/failure notification
+
+This can call the existing API almost directly. CrossDrop already has POST /v1/navigate and a client library.
+
+V1
+
+Add:
+
+    LAN discovery
+    pairing
+    no manual IP/token configuration
+    QR-code pairing
+    online/offline status
+    target groups
+    multiple displays
+
+V2
+
+Add:
+
+    Mirror tab
+    follow navigation
+    follow scroll
+    media synchronization
+    sender preview
+    remote control
+
+V3
+
+Turn it into a platform:
+
+CrossDrop
+│
+├── Browser extension
+├── Windows/macOS/Linux sender
+├── Pi/Debian receiver
+├── Android receiver
+├── TV receiver
+└── API / SDK
+
+At that point, CrossDrop isn't just a Pi project anymore. It becomes a local-first second-screen protocol.
+
+And that is where I think the interesting opportunity is.
+
+The existing architecture actually lends itself well to this because the repository deliberately keeps the /v1 API frozen and makes the tray, web UI, CLI, and other clients consume that same API.
+
+If I were building this, my first commit would be the browser extension—not a modification to the CrossDrop agent. That lets you validate the core proposition very cheaply: “Can I right-click any webpage and have it appear on my other screen in under two seconds?” If that feels magical, then build discovery/pairing around it.
