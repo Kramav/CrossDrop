@@ -429,6 +429,56 @@ function send(file) {
 // armed target: you click what you are looking at.
 let shown = [];
 
+// The last picture of each screen, so switching back to one is instant.
+//
+// The decoded <figure>, not the base64: decoding a 2560x1440 png is the
+// expensive part, and a DOM node can be re-parented — so painting a cached
+// screen is a replaceChildren with no work at all.
+//
+// `fresh` is the whole safety story. It means "captured, and nothing has
+// happened to this screen since". A frame that is not fresh may still be shown
+// (dimmed, with its age) but may never be clicked: see shotFigure.
+//
+//   name -> { fig, shot, at, fresh }
+const frames = new Map();
+
+function remember(shot, fig) {
+  frames.set(shot.screen, { fig, shot, at: Date.now(), fresh: true });
+}
+
+// Which screens an action could have changed: what you are looking at (input
+// aims there) and what is armed (navigate, upload and the rail aim there).
+// Over-counting costs a refresh; under-counting shows you a lie.
+function touched() {
+  const armed = target === "all" ? screens.map(s => s.name) : [target];
+  return [...new Set([...shown, ...armed])].filter(Boolean);
+}
+
+// Paint the remembered picture of each screen, if there is one for all of them.
+// Instant, and honest: it goes up dimmed with the time it was taken, because it
+// is the frame from when you last looked rather than what is on the wall now.
+function paintCached(names) {
+  const have = names.map(n => frames.get(n));
+  if (have.some(f => !f)) return false;
+  const stale = have.some(f => !f.fresh);
+  $("#shots").replaceChildren(...have.map(f => f.fig));
+  $("#shots").classList.toggle("stale", stale);
+  $("#shots").classList.toggle("live", can("input") && !stale);
+  $("#empty").hidden = true;
+  shown = names;
+  drawBadge(have.map(f => f.shot), Math.min(...have.map(f => f.at)),
+            stale ? "  ·  refreshing…" : "");
+  return true;
+}
+
+// A refresh nobody asked for, so it makes no noise: no "…" in the status line
+// and no stale mark on the picture already up. If it fails, the cached frame
+// stays with its age showing — the honest outcome, and not an error anyone
+// could act on.
+function refreshQuietly(names) {
+  return lookAt(names).catch(() => {});
+}
+
 function shotScreens() {
   if (shown.length) return shown;
   // "all" is a client-side fan-out: the route is one request, one picture, so
@@ -472,6 +522,21 @@ async function shotFigure(s) {
   // not fatal — put it in anyway and let the browser show what it can.
   await img.decode().catch(() => {});
   if (can("input")) img.onclick = e => {
+    // Refuse on a frame that is not current, rather than aim by it.
+    //
+    // imagePoint maps where you clicked on the *picture* to where that is on
+    // the page, which is only true while the two match. Click a remembered
+    // frame and the coordinates land wherever that spot happens to be now --
+    // a different button, a different form field. This is the same answer the
+    // agent gives a window it cannot identify: refuse and say so, because a
+    // click that goes somewhere nobody aimed is worse than one that does not
+    // happen. Read at click time, never captured: `s` is the shot this figure
+    // was built from, but freshness changes under it.
+    const f = frames.get(s.screen);
+    if (!f || !f.fresh) {
+      $("#status").textContent = "✗ that picture is out of date — capture again";
+      return;
+    }
     const p = imagePoint(e.currentTarget.getBoundingClientRect(), s,
                          e.clientX, e.clientY);
     clickAt(s.screen, p.x, p.y);
@@ -510,6 +575,10 @@ async function lookAt(names) {
   shown = names;
   $("#shots").classList.toggle("live", can("input"));
   $("#empty").hidden = true;
+  // Kept for the next time you switch back to these screens. Stored after the
+  // swap, so a superseded capture never leaves a frame behind claiming to be
+  // current -- the returns above are the only other way out of this function.
+  shots.forEach((s, i) => remember(s, figures[i]));
   drawBadge(shots);
 }
 
@@ -517,19 +586,31 @@ async function lookAt(names) {
 // invisible until you happen to hover the right thing, absent on a touch screen,
 // and indistinguishable from "input is switched off" — which is the actual
 // question someone is asking when clicking seems to do nothing.
-function drawBadge(shots) {
-  const when = new Date().toLocaleTimeString();
+function drawBadge(shots, at = Date.now(), note = "") {
+  // When the picture was *taken*, which for a remembered frame is not now. That
+  // distinction is the whole reason a cached frame is safe to show.
+  const when = new Date(at).toLocaleTimeString();
   const size = shots.length === 1 ? `${shots[0].width}×${shots[0].height}` : "";
   $("#badge").hidden = false;
   $("#badgetext").textContent =
     [shots.map(s => s.screen.toUpperCase()).join(" + "), size, when]
       .filter(Boolean).join("  ·  ")
-    + (can("input") ? "  ·  click the picture to click the page" : "");
+    + (note || (can("input") ? "  ·  click the picture to click the page" : ""));
 }
 
 function markStale() {
+  // The remembered frames too, not just the pixels on screen. A cached picture
+  // of a screen this action could have changed must never come back later
+  // looking current -- that is the failure the cache would otherwise introduce.
+  for (const n of touched()) {
+    const f = frames.get(n);
+    if (f) f.fresh = false;
+  }
   if (!$("#shots").children.length) return;
   $("#shots").classList.add("stale");
+  // Drop the crosshair with it: the cursor is the only hint most people read,
+  // and it should stop offering a click the handler is about to refuse.
+  $("#shots").classList.remove("live");
   $("#badgetext").textContent = "before your last action — capture again";
 }
 
@@ -681,7 +762,14 @@ function drawScreens() {
       drawScreens();
       // Only when one was up: an empty stage is not misleading, and a capture
       // nobody asked for is a round trip and a PNG encode on a busy Pi.
-      if (wasShowing && can("screenshot")) look();
+      if (!wasShowing || !can("screenshot")) return;
+      // The remembered frame goes up first so the switch is instant, then a
+      // refresh lands behind it. Cache alone would be the wrong answer: the
+      // reason you switch is usually to see what that screen is doing *now*,
+      // and the picture from when you last looked is the stalest data there is.
+      const names = shotScreens();
+      if (paintCached(names)) refreshQuietly(names);
+      else look();
     };
     return b;
   }));
@@ -693,6 +781,11 @@ async function refresh() {
     supports = s.supports ? new Set(s.supports) : null;
     drawCapabilities(s.kind || "this browser");
     screens = s.screens || [];
+    // A renamed or unsplit screen leaves a frame nothing can ever show again,
+    // and its name could later be reused by a different panel.
+    for (const n of frames.keys()) {
+      if (!screens.some(x => x.name === n)) frames.delete(n);
+    }
     // Pin the selection to a real screen: first run, or a screen that has since
     // been renamed out of the config. A browser that can't address screens gets
     // pinned to the first one too: a "right" left in localStorage would aim
