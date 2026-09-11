@@ -309,3 +309,158 @@ And that is where I think the interesting opportunity is.
 The existing architecture actually lends itself well to this because the repository deliberately keeps the /v1 API frozen and makes the tray, web UI, CLI, and other clients consume that same API.
 
 If I were building this, my first commit would be the browser extension—not a modification to the CrossDrop agent. That lets you validate the core proposition very cheaply: “Can I right-click any webpage and have it appear on my other screen in under two seconds?” If that feels magical, then build discovery/pairing around it.
+
+
+You're right to challenge that. I was too confident in my previous answer. There are quite a few adjacent deployments, and once I broaden the search beyond “send a URL,” CrossDrop is clearly part of a larger family.
+
+The important distinction is that very few appear to combine CrossDrop's particular combination of “remote browser as a controllable display endpoint” + LAN/private deployment + programmatic control. But there are definitely other systems attacking parts of the same problem.
+The closest things I found
+1. Deskreen — much bigger deployment
+
+is probably the most important project I missed.
+
+It has 21k+ GitHub stars, ~1.2k forks, and over 2 million downloads, and its current Community Edition was released in May 2026. It turns a Mac/Windows/Linux machine into a source and lets another device use a browser as the display, using WebRTC.
+
+But its model is:
+
+computer screen → browser display
+
+rather than:
+
+webpage/URL → remote browser → controllable webpage
+
+That's an important distinction.
+2. Universal Screen Extender / UNI·SIM
+
+This one is very close conceptually.
+
+It supports:
+
+    Windows/Mac host
+    phone/tablet/browser as receiver
+    local-network operation
+    QR/PIN pairing
+    Extend
+    Mirror
+    View
+    remote Control
+    presentation Clicker
+    browser-only receiver
+    and, importantly, a browser receiver can become a screen you drive remotely. 
+
+It even has a “Cast to a browser screen” mode.
+
+So if your proposed product is:
+
+    “Send/control a webpage on another browser-based screen”
+
+UNI·SIM is absolutely something you need to study.
+3. Spreen
+
+Spreen is another open-source LAN system that turns a browser-capable device into a second screen. It specifically advertises no Internet, no cables, same-LAN operation, and can share an entire screen or individual window.
+
+Again, though, it's primarily screen streaming, not remote webpage orchestration.
+4. Xenon
+
+is newer and interesting.
+
+It turns another screen, tablet, or phone into a local PC control center. Its current implementation can expose the dashboard to a phone browser over the same Wi-Fi, with QR pairing and no cloud/account.
+
+This is closer to the “second screen becomes a programmable remote endpoint” idea, although its target is PC control/dashboarding rather than arbitrary webpage deployment.
+5. Chrome's Presentation API direction
+
+There's also a standards-level approach that's easy to overlook.
+
+The W3C Second Screen work defines APIs intended for a web page to present content on another screen. The old Chromium demo literally demonstrated a video being moved to a secondary screen while continuing playback.
+
+That's not a ready-to-use CrossDrop competitor, but it demonstrates that “webpage controls another browser/display” is an established architectural concept, rather than something CrossDrop uniquely invented.
+But here's the interesting part
+
+After looking at these, I actually think CrossDrop's niche is more interesting than I suggested—but narrower.
+
+There are roughly four categories:
+System	Source	Destination	What moves?	Remote control
+PairDrop	Browser	Browser	Files/URLs/text	❌
+Deskreen	PC	Browser	Screen pixels	Limited
+Spreen	PC	Browser	Screen/window	Limited
+UNI·SIM	PC	Browser/device	Screen/control	Yes
+Xenon	PC	Browser/device	Dashboard/control	Yes
+CrossDrop	Controller/API	Kiosk browser	Web content	Yes
+
+That last distinction is important.
+
+CrossDrop isn't fundamentally doing:
+
+    “Here are the pixels from my computer.”
+
+It's doing:
+
+    “Go to this URL, render it in your browser, and let me manipulate that browser.”
+
+That is a much more interesting primitive for certain deployments.
+And there are commercial systems too
+
+If we broaden the definition further, there are obviously established technologies around:
+
+    Google Cast
+    AirPlay
+    Miracast
+    Chromecast
+    digital signage platforms
+    kiosk management platforms
+    remote-browser platforms
+    presentation systems
+    VNC/RDP
+    browser-based digital signage
+
+So I definitely wouldn't claim CrossDrop is the leader in the general technology.
+
+The better claim would be:
+
+    CrossDrop is an unusually capable open-source implementation of a remote, programmable kiosk-browser endpoint.
+
+That's much more defensible.
+More importantly: I would change my product recommendation
+
+After seeing these alternatives, I would not build merely “CrossDrop + Chrome extension.”
+
+That's too easy for adjacent products to subsume.
+
+I'd investigate a more specific product:
+“Web-native digital signage / second-screen orchestration”
+
+Imagine you have:
+
+                 ┌── TV
+                 ├── Lobby display
+Browser/API ─────┼── Conference projector
+                 ├── Kitchen tablet
+                 └── Wall display
+
+And the API says:
+
+display.open("living-room", "https://...")
+display.open("lobby", "https://...")
+display.screenshot("lobby")
+display.click("lobby", selector)
+display.scroll("lobby", 500)
+display.play("living-room")
+
+Now you're not competing with PairDrop.
+
+You're not really competing with Deskreen.
+
+You're not even primarily competing with screen-sharing software.
+
+You're building a programmable network of browser-based displays.
+
+And that is where CrossDrop's architecture starts looking genuinely differentiated.
+The thing I'd research next
+
+Before writing any code, I'd do a much deeper competitive analysis specifically around:
+
+“LAN/browser-based digital signage + remote browser control + URL deployment + kiosk mode + multi-display.”
+
+That's the comparison that will tell us whether CrossDrop is genuinely differentiated—or whether there is already a mature product doing almost exactly this.
+
+If you're considering actually building something on CrossDrop, that's the research I'd do next rather than another generic “send webpage” comparison.
