@@ -791,7 +791,9 @@ def test_a_screen_that_gains_a_window_gets_one(tmp_path, monkeypatch):
 
     monkeypatch.setenv("CROSSDROP_CONFIG", str(write_config(tmp_path)))
     opened = []
-    with TestClient(app) as c:
+    # No `as c`: this drives swap_config directly rather than through a route,
+    # and the client is only here to run the lifespan that builds app.state.cfg.
+    with TestClient(app):
         cfg = appmod.app.state.cfg
         # Stubbed inside the block: /v1/status resolves windows through _pages
         # too, and a fake page list would break the startup it has to survive.
