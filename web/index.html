@@ -737,6 +737,14 @@ function drawScreens() {
   // Reported by the agent, not remembered here: the nightly restart drops a
   // running autoscroll, and a button left latched on would go on claiming it.
   $("#auto").setAttribute("aria-pressed", String(autoscrolling()));
+  // Per screen, never across all of them -- see ACT.auto. Disabled rather than
+  // hidden, so the control does not move under the cursor when you switch.
+  const fanned = target === "all";
+  $("#auto").disabled = fanned;
+  $("#auto").title = fanned
+    ? "Pick a single screen: auto-scroll runs per screen, and started on all of "
+      + "them there is nothing here that can stop it again"
+    : "Scroll slowly and continuously";
   // One monitor: the picker is noise. So is a picker on a browser that can only
   // ever drive the first screen.
   $("#screens").hidden = screens.length < 2 || !can("screens");
@@ -869,10 +877,20 @@ const ACT = {
   up: () => scroll({ dy: -page() }),
   down: () => scroll({ dy: page() }),
   bottom: () => scroll({ to: "bottom" }),
-  auto: () => act(() => api("/v1/autoscroll", {
+  // No recapture, and this one is not just wasted work. settle() polls
+  // /v1/inspect and lookAt() asks for a png, both over the same CDP connection
+  // the scroll loop is driving the page with, on a Pi already busy rendering it
+  // -- the contention is what turns a smooth scroll into a stutter. And a still
+  // of a continuously scrolling page is out of date the moment it is taken.
+  //
+  // Refused outright on "all": autoscrolling() matches the armed target against
+  // a screen name, and no screen is called "all", so the button would read
+  // "start" forever. Two loops would be running with nothing in the UI able to
+  // stop them -- the haunted display, by a door nobody had tried.
+  auto: () => target !== "all" && act(() => api("/v1/autoscroll", {
     action: autoscrolling() ? "stop" : "start",
     speed: Number($("#speed").value),
-  })),
+  }), false),
   // Two commands, not a toggle: the page never learns that someone minimized the
   // window from the Pi's own keyboard, so a toggle would lie half the time.
   // No recapture on either: a minimized window renders offscreen, so the
@@ -930,7 +948,7 @@ function commands() {
     { label: "Scroll to bottom", keys: "End", when: () => can("scroll"),
       run: ACT.bottom },
     { label: autoscrolling() ? "Stop auto-scrolling" : "Start auto-scrolling",
-      when: () => can("autoscroll"), run: ACT.auto },
+      when: () => can("autoscroll") && target !== "all", run: ACT.auto },
 
     { sep: "Window", when: () => can("window") },
     { label: "Set the kiosk aside", when: () => can("window"), run: ACT.aside },
