@@ -24,7 +24,8 @@ browser and the monitors; everything else in this repo is a client of its frozen
 surface never touches the server.
 
 ```
-tray app  ─┐
+extension ─┐
+tray app  ─┤
 web UI    ─┼─ HTTP /v1 (bearer token, over tailnet) ─→  agent/app.py
 roomctl   ─┘                                              │
 eve (imports roomctl as a library) ──────────────────┘    │
@@ -61,6 +62,7 @@ that you only have to open one.
 | [agent/config.example.toml](agent/config.example.toml) | Install-time config: browser kind, ports, paths. No secret — the token is its own file, `/etc/crossdrop/token`. Real one is git-ignored. |
 | [roomctl/__init__.py](roomctl/__init__.py) | The client library — one function per route. `eve` imports this. |
 | [roomctl/cli.py](roomctl/cli.py) | argparse shell over the above; prints the agent's JSON verbatim. |
+| [extension/](extension/) | Chrome/Edge MV3 extension: right-click → send to the wall. Also the opt-in bridge that tells Freethrow which URL each browser window shows. Its README holds that contract. |
 | [web/index.html](web/index.html) | The controller UI the agent serves at `/`. Single file, no build step, no framework. |
 | [web/home.html](web/home.html) | The idle screen the kiosk sits on. Also single-file. |
 | [deploy/pi/](deploy/pi/) | Provisioning (`setup.sh` — Pi *and* plain Debian), systemd units, tmpfs profile snapshots, and `update.sh` — the release-gated auto-updater with rollback. |
@@ -75,7 +77,14 @@ that you only have to open one.
 
 ## Controlling a display
 
-Three ways, same frozen API underneath.
+Four ways, same frozen API underneath.
+
+**Browser extension (Chrome, Edge)**, at [extension/](extension/). Right-click a
+page or a link → *Send page to Living Room*, or press
+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd>. The badge turns ✓ or !, and
+hovering the icon says why. Load it unpacked from `chrome://extensions`, then
+enter the Pi's address and token once in its popup. Setup and limits are in
+[extension/README.md](extension/README.md).
 
 **Tray app (Windows)** — [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1).
 Copy a link or a file, double-click the tray icon, it's on the wall. The icon
@@ -573,6 +582,7 @@ From the repo root, with `agent/requirements.txt` installed:
 ```sh
 pytest                  # no browser needed
 CROSSDROP_SMOKE=1 pytest -s  # drives a real kiosk browser
+CROSSDROP_SMOKE=1 pytest tests/test_extension.py  # the extension, headless, ~15 s
 ```
 
 The smoke tests are where the claims a stub cannot check get checked — that a

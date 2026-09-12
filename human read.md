@@ -4,20 +4,20 @@ My quick reference. Update at sign-off. Last updated **2026-09-12**.
 
 ## Where things stand
 
-- **CrossDrop:** works end to end on the Pi. The server is done and `/v1` is frozen. What's left is clients.
-- **Freethrow:** hand tracking and calibration are done (M0–M1.7). Nothing moves a window yet.
+- **CrossDrop:** works end to end on the Pi. The server is done and `/v1` is frozen. The M1 extension is built and tested headless, but not yet tried in a real browser.
+- **Freethrow:** hand tracking and calibration are done (M0–M1.7). Nothing moves a window yet. This PC has no .NET SDK.
 - **Integration:** decided, not started. Freethrow sends a URL or file to CrossDrop over HTTP. See [Freethrow PLAN.md](../Freethrow/docs/PLAN.md), under Open items.
 
 ## Next, in order
 
-1. **CrossDrop M1:** a Chrome/Edge extension (right-click → Send to wall). First, spend 10 minutes checking the extension can call the Pi without CORS. See [NEXT-STEPS.md](NEXT-STEPS.md) M1.
-2. **Freethrow checks:** produce a real spatial profile, test with two real hands, recalibrate the posture gate. M2 depends on all three.
+1. **Accept CrossDrop M1:** load `extension\` unpacked, save the Pi in the popup, right-click a page, and check the wall shows it. See [extension/README.md](extension/README.md).
+2. **Freethrow checks:** follow [Freethrow docs/hardware-checks.md](../Freethrow/docs/hardware-checks.md): install the SDK, calibrate, test two hands, test the posture gate. M2 depends on it.
 3. **Freethrow M2:** move a window on one monitor.
 4. **Throw to CrossDrop:** portal edge first, browser windows only.
 
 ## Owed
 
-- [ ] Commit the Freethrow `docs/PLAN.md` change (uncommitted as of 2026-09-12)
+- [ ] Commit both repos: CrossDrop (extension, tests, CI, docs, this file) and Freethrow (PLAN, runbook, `install.ps1` fix)
 - [ ] Run the CrossDrop checks that have never run on the Pi: rollback drill, smoke suite. See [NEXT-STEPS.md](NEXT-STEPS.md), "Never verified on hardware"
 - [ ] Answer the four one-word decisions in PLAN §1 (A2, A4, A5, A6)
 

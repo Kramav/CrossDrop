@@ -18,20 +18,23 @@ Last updated **2026-09-12**.
 
 ## Where it stands
 
-Suite green on this machine: **392 passed, 16 skipped**, 180s. The skips are the
-`CROSSDROP_SMOKE=1` browser tests, which CI runs in their own job.
+Suite green on this machine: **394 passed, 21 skipped**, 184s. The skips are the
+`CROSSDROP_SMOKE=1` browser tests (kiosk and extension), which CI runs in their
+own job. The 7 extension tests also pass under `CROSSDROP_SMOKE=1` on Chrome
+152 and Edge 153 here.
 
 What ships today, in one paragraph: one FastAPI agent on a Pi owns a kiosk
 browser and the monitors, and exposes a frozen `/v1` HTTP API. You can send it
 a URL or a file, split a monitor into independent screens, read back what is
 actually on the wall (`/v1/screenshot`, `/v1/inspect`), scroll it, drive its
 video, click and type into the page, power the monitors, install ad blockers,
-and edit screen names and home pages live. Three clients: the web UI it serves,
-a Windows tray app, and `roomctl` (CLI + Python library). It updates itself from
-release tags and rolls itself back if the new one shows an error page.
+and edit screen names and home pages live. Four clients: the web UI it serves,
+a Windows tray app, `roomctl` (CLI + Python library), and a Chrome/Edge
+extension (M1, built, not yet accepted on a real browser). It updates itself
+from release tags and rolls itself back if the new one shows an error page.
 
-What does not exist: **a browser extension, device discovery, pairing, more than
-one device, and tab mirroring.** That is the whole of what is next — see
+What does not exist: **device discovery, pairing, more than one device, and tab
+mirroring.** That is the whole of what is next — see
 [PLAN.md §13](PLAN.md#13-product-direction--the-industry-review) for the
 reasoning and [What's next](#whats-next) for the tasks.
 
@@ -164,29 +167,54 @@ The measure of success is the review's own, and it is a good one:
 > Can a user open a webpage, right-click it, select "Living Room," and have the
 > page appear on the other machine in one or two clicks?
 
-### M1 — Send this tab ← start here
+### M1 — Send this tab ← built, awaiting acceptance
 
-A Chrome/Edge MV3 extension that calls `POST /v1/navigate` and nothing else.
+A Chrome/Edge MV3 extension that calls `POST /v1/navigate` (and `GET
+/v1/status`, to test a saved display) and nothing else. No server change.
+[extension/README.md](extension/README.md) has install and use.
 
-- [ ] `extension/` — `manifest.json` (MV3), service worker, popup. One
-  `host_permissions` entry for the tailnet range.
-- [ ] Context menu on page and on link; toolbar popup; a keyboard shortcut.
-- [ ] Success and failure surfaced where the user is looking — a badge, not a
-  console log. Reuse the typed-error vocabulary `roomctl` already has:
-  unreachable / 501 unsupported / 503 browser down.
-- [ ] Token and URL in `chrome.storage`, entered by hand for now (M3 automates
-  it).
+- [x] `extension/`: `manifest.json` (MV3), service worker, popup.
+  **Corrected:** "one `host_permissions` entry for the tailnet range" cannot be
+  built. A match pattern has no CIDR, so the tailnet is either `http://*/*`,
+  an install warning for every website, or nothing. Shipped instead:
+  `optional_host_permissions`, with a grant for the one origin requested
+  when a display is saved. Nothing is asked at install.
+  `test_manifest_asks_for_nothing_at_install` keeps it that way.
+- [x] Context menu on page and on link; toolbar popup; <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>D</kbd>.
+- [x] Badge ✓ (clears) / ! (stays until the popup opens), with the reason in the
+  icon's hover title. roomctl's vocabulary: unreachable, 401 token, 501, 503
+  browser down. A missing grant is named separately, because otherwise it
+  fails exactly like a box that is off.
+- [x] Token and URL in `chrome.storage.sync`, entered by hand; M3 automates it.
+  Stored as a one-entry `devices` list already, so M2 adds entries rather than
+  migrating the schema (PLAN §13 decision 3).
+- [x] **Freethrow bridge**, beyond the plan and off by default: a popup switch
+  that PUTs each window's active tab to `127.0.0.1:47800`, so Freethrow can
+  turn a window handle into a URL. Contract in the extension README.
+- [x] `tests/test_extension.py`: 2 static tests, plus 5 that load the extension
+  into headless Chrome/Edge via CDP `Extensions.loadUnpacked` and drive the
+  service worker against a real agent. Added to CI's smoke job. Branded Chrome
+  has ignored `--load-extension` since 137. That was checked here first, and it
+  loads nothing, silently.
 
-**Verify first, before writing the popup** — two assumptions the whole
-milestone rests on, each about 10 minutes:
+**Both assumptions verified on 2026-09-12**, from a headless service worker on
+Chrome 152 and Edge 153:
 
-- An MV3 **service worker** fetch to `http://<tailnet-ip>:8080/v1/navigate`
-  carrying an `Authorization` header, with `host_permissions` granted. Expected
-  to bypass CORS, so the agent needs no CORS middleware. If it does not, that is
-  a server change and it changes M1's shape.
-- Plain **`http://`** from the extension, which is a secure context. Expected to
-  be allowed (it is not a page subresource, so mixed-content rules do not
-  apply).
+- Against the real Pi, read-only `GET /v1/status` with the bearer token: **200
+  with the host permission** (`{"kind": "chromium", "browser": "ok", "error": ""}`),
+  `TypeError: Failed to fetch` without it. With the grant the agent sees no
+  preflight and no `Origin` on a GET. Without it Chrome sends `OPTIONS` and the
+  agent 405s. **No CORS middleware.**
+- Plain `http://` to a `100.x` tailnet address is allowed. Local Network Access
+  did not block it.
+- One trap worth knowing: on Windows, a killed Chrome/Edge launcher can leave
+  headless children holding the debug port. The next launch then silently talks
+  to the *old* browser. It briefly made "no permission" look like a 200. The
+  test tears down with `browser.stop`, which kills the tree.
+
+- [ ] **Accept on a real browser.** Load unpacked, save the Pi, right-click a
+  page → the wall shows it. Also check the one step a headless test cannot
+  reach: the per-origin permission prompt on **Save and test**.
 
 *Accept: right-click a page → Send to → the wall shows it. Two clicks, no
 terminal, no `targets.toml`.*

@@ -113,4 +113,4 @@ jobs:
         env:
           CROSSDROP_SMOKE: '1'
           CROSSDROP_BROWSER: chromium
-        run: xvfb-run -a python -m pytest -q -s tests/test_smoke.py
+        run: xvfb-run -a python -m pytest -q -s tests/test_smoke.py tests/test_extension.py
