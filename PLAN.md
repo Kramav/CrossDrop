@@ -153,6 +153,14 @@ Published by FastAPI at `/docs` + `/openapi.json`. **v1 semantics frozen** once 
 
 ## 7. Phased build (each phase ends with an acceptance test)
 
+> **Phases 0–8 are complete**, and so is everything in the version log below
+> them. This section is now the *record* of how the display agent was built and
+> why — the section numbers here are cited from code comments, so it is
+> append-only. **The build order from here is [§13](#13-product-direction--the-industry-review),**
+> which is a product roadmap rather than a continuation of this list: the agent
+> is finished as a room display, and what is left is the layer that makes it
+> usable from a browser and across more than one box.
+
 **Phase 0 — Scaffold.** Repo per §4, requirements, `.example` configs, `.gitignore` (real configs, snapshots, uploads, releases). *Accept:* `pip install -r agent/requirements.txt` on dev machine.
 
 **Phase 1 — Agent core + frozen `/v1` contract (dev machine).** FastAPI; `browser.py` launches kiosk with `--remote-debugging-port=9222 --remote-allow-origins=* --kiosk --user-data-dir=<dedicated>`; `POST /v1/navigate` via raw CDP; `GET /v1/status`; bearer auth; URL-scheme allowlist. *Accept:* `curl` navigates the local tab; `/docs` shows the schema.
@@ -267,9 +275,14 @@ Three bugs found while building it, each worth more than the feature that surfac
 
 `tests/test_web.py` grew with it: the id check now counts a CSS reference as a reference (a layout hook used only by the stylesheet is still used), the timer rule holds `setInterval` to a fixed list *and* checks no recurring callback reaches `/v1/screenshot`, and `imagePoint()` — picture coordinates to page coordinates — runs under node across five geometries, because a wrong scale factor misses every target by a constant and looks exactly like the click never arriving.
 
-**Future (post-v1) — native C# app.** A tray/hotkey client codegen'd from `/openapi.json`. **No server change.**
+**Superseded — "native C# app".** This slot used to hold a tray/hotkey client
+codegen'd from `/openapi.json`. It was answered by
+`deploy/windows/roomtray.ps1`, which is PowerShell + WinForms and needs no
+checkout, no Python and no codegen on the box that runs it. The next control
+surface is a **browser extension** (§13 M1), for the same reason: it is where
+the content already is.
 
-**Future considerations.** Deliberately deferred, each with the trigger that should bring it back. Not a wish list — if the trigger doesn't happen, the item is correct as unbuilt.
+**Future considerations — display-agent scope.** Deliberately deferred, each with the trigger that should bring it back. Not a wish list — if the trigger doesn't happen, the item is correct as unbuilt. Product-level phases are §13; these are the ones internal to the agent.
 
 | Deferred | Add when |
 |---|---|
@@ -374,6 +387,12 @@ per-tick websocket (see Phase 7a).
   boundary ever widens beyond "the tailnet, no hostile device on it" — the
   honest fix then is an allowlist of ids in `config.toml`, which the agent
   cannot write.
+
+  **Since built.** `allow_extensions` in `config.toml` is that allowlist —
+  file-only, so the API cannot add to it for itself. Empty or absent still
+  means any valid Web Store id, which is how this shipped and stays the
+  default: a list nobody set must not stop a working display adding an ad
+  blocker. Set it on a box that matters.
 
 **v1.2.0 — which window is which.** Done. `_cdp_page()` mapped screens to windows by *position in `/json`'s list*. That is the order the windows were opened in — but only while the list holds nothing but those windows, and a browser with extensions loaded does not guarantee it. One stray page target moved every screen one place along, silently, and the wrong mapping was then written into `_targets` so it stayed wrong until a restart. Tolerable when the worst case was a navigate on the wrong monitor; not tolerable now that the same path carries a click and a typed password.
 
@@ -483,5 +502,153 @@ Two leaks surfaced while fixing those, both mine, both from this session's work:
 ## 12. Open items for you
 1. Confirm A2 (SD boot), A4 (64-bit OS), A5 (desktop auto-login), A6 (private repo).
 2. Power-loss frequency on the Pi (Phase 6 snapshot cadence).
-3. Upload size cap (e.g., 25 MB) — sets the tmpfs guard.
+3. ~~Upload size cap~~ — answered: `upload.max_mb = 25`, `keep = 5`.
 4. Before Phase 8: create a read-only **deploy key** for the repo and add it to the Pi.
+
+Live status of these, and everything else still open, is tracked in
+[NEXT-STEPS.md](NEXT-STEPS.md).
+
+---
+
+## 13. Product direction — the industry review
+
+`industryreview.txt` (last revised 2026-09-11) is a product-strategy brief, not
+an engineering review. It was written against the *idea* of CrossDrop rather
+than the code — its Phase 1 asks for a repository audit and an architecture
+document, which §2, §4 and README's architecture table have been since v1.0.
+Read against what exists, most of its Phases 2, 5, 9 and 11 describe things
+that shipped months ago, and its value is concentrated in the four it names
+that do not exist at all.
+
+Its thesis is kept verbatim, because it is the sentence that decides what gets
+built and what gets refused:
+
+> A browser/display is a programmable endpoint.
+
+That is already true of the agent. What is missing is the half that makes it
+reachable: **the content lives in a browser tab, and there is no way to send a
+browser tab.** Today the shortest path from "this page" to "the wall" is copy
+the URL, alt-tab to a tray icon or a terminal, paste. The review's first
+milestone is the right one — right-click → *Send to Living Room* — and it is
+achievable with **no server change**, because `POST /v1/navigate` already does
+the work.
+
+### What it asks for, against what exists
+
+| Review phase | State | The gap |
+|---|---|---|
+| 1 — Audit + architecture doc | **Done** | None. README "Architecture" and §2/§4 predate the review. |
+| 2 — Device / display / capability model | **Half** | `screens` is the display half, `supports` in `/v1/status` is the capability half, and both work. The **device** half does not exist: a "target" is a section in a per-controller `roomctl/targets.toml` holding a raw tailnet IP and a bearer token. That file is unreachable from a browser extension. |
+| 3 — Browser extension | **Missing** | Nothing at all. (`agent/extensions.py` installs extensions *onto the kiosk* — a different thing that happens to share the word.) |
+| 4 — Discovery + pairing | **Missing** | A tailnet IP and a token, copied by hand into every client. |
+| 5 — Send / View / Control | **Done** | Send: url, file, image, PDF, text, video. View: `/v1/screenshot`, `/v1/inspect`, `/v1/screens`. Control: `/v1/input`, `/v1/scroll`, `/v1/media`, `/v1/window`, `/v1/display`. The review's "expose progressively" is what `supports` + the ⌃K palette already do. |
+| 6 — Mirror / follow | **Missing** | Needs a client watching a local tab, plus one additive field on `/v1/scroll` (below). |
+| 7 — Rooms / groups | **Half** | `screen: "all"` fans out within one box, per-screen results and all. Nothing spans boxes, because there has only been one. |
+| 8 — Automation | **Half** | `roomctl.Client` is exactly the clean automation API the review asks for, and `/openapi.json` is published. No scheduler — and none is wanted here, see *Declined*. |
+| 9 — Smart content handling | **Half** | `storage.TYPES` routes by extension and the browser does the rest (PDF viewer, video element, image). No per-type behaviour beyond that, which matches the review's own warning not to build a detection framework first. |
+| 10 — Session handoff | **Missing** | Deferred; see *Declined*. |
+| 11 — Developer / API layer | **Done** | Frozen `/v1`, `/openapi.json` + `/docs`, `roomctl` library and CLI, typed errors. |
+
+### Three decisions this forces
+
+**1. The device list stops being `targets.toml`.** `targets.toml` is a Python
+client's config file: it lives beside an installed package, it is edited by
+hand, and it holds bearer tokens in plaintext. It is fine for `roomctl` and it
+will keep working unchanged. It is *not* the device model — an extension
+cannot read a file on disk, and neither can a phone. The device list becomes
+**client-side state, one copy per control surface**, holding `{name, url,
+token, last_seen}`. In the extension that is `chrome.storage.sync`; in the
+tray it is already `targets.toml`. No server-side registry, and specifically no
+hub: "one server, many clients" is the property that has kept the agent
+simple, and a device that knows about other devices is the first crack in it.
+
+**2. The extension cannot discover anything, and that is not a bug to fix.**
+MV3 has no mDNS API — `chrome.mdns` was Chrome-Apps-only and is gone, and
+nothing replaced it. So review Phase 4's "browser extension discovers it"
+**cannot be built as written**, and any plan that assumes otherwise burns a
+week finding that out. Split it:
+
+- the **agent advertises** `_crossdrop._tcp` for clients that can listen —
+  `roomctl`, the tray app, a future native app;
+- the **extension is handed a pairing blob** by the agent's own web UI, which
+  the user already has open when they install anything. One button, one paste.
+
+That is the whole of pairing for a tailnet. It is also the honest scope: on a
+tailnet the network *is* the trust boundary (§11), so a pairing code buys
+convenience, not security, and should not be built as if it buys security.
+
+**3. Multi-device gets built now, before the second box arrives.** One Pi
+today, more coming. The device model costs a name and a list; retrofitting one
+after the extension has shipped a single-device popup means rewriting the
+popup, the storage schema and every screenshot in the README. This is the one
+place where building ahead of the need is cheaper than not.
+
+### Declined, and why
+
+Recorded so they are not re-raised. Each is a *no* with a trigger, not a
+never.
+
+- **Pixel mirroring / screencast.** The review says not to, and the codebase
+  already enforces it: `/v1/screenshot` is request/response by design, and
+  `Page.startScreencast` plus the desktop-capture APIs are grepped for in
+  `.github/workflows/ci.yml` (§11). Mirror-by-navigation (M4) is the feature;
+  video is not. *Trigger: none. This is the boundary that keeps CrossDrop from
+  being a bad VNC.*
+- **A cloud account, a relay, or a rendezvous server.** Local-first is already
+  the shape and there is nothing to add. *Trigger: sending to a box that is
+  neither on the LAN nor the tailnet.*
+- **A content-detection framework** (review Phase 9). The browser is the
+  content handler. Per-type behaviour gets added one `if` at a time, when a
+  type actually behaves wrong. *Trigger: a third special case.*
+- **Full browser-session migration** (review Phase 10). URL + scroll position
+  is ~90% of "continue this over there", and it falls out of M4 for free.
+  *Trigger: someone actually wants form state or a login carried across.*
+- **A scheduler in the agent.** Phase 8's examples — "open a dashboard every
+  morning", "return the TV to a default page" — are a cron line and a systemd
+  timer against `roomctl`. The agent already has three timers it did not want.
+  Ship the example, not the daemon. *Trigger: never, probably; if scheduling
+  has to survive the controller being off, it belongs on the Pi as a timer
+  unit, still not as agent code.*
+- **`display.open(...)`-style API renaming.** The review sketches
+  `display.open("living-room", url)`; `roomctl.Client(...).navigate(url,
+  screen=...)` is the same thing with the connection made explicit, and `/v1`
+  is frozen. The review says to follow existing conventions and that is this.
+
+### Build order from here
+
+Supersedes §7's phase list, which is complete. Each milestone ends with the
+same kind of acceptance test §7 used. Full task breakdown and current status
+live in [NEXT-STEPS.md](NEXT-STEPS.md).
+
+**M1 — Send this tab.** A Chrome/Edge MV3 extension: toolbar popup, context
+menu on page and on link, keyboard shortcut. Calls `POST /v1/navigate` and
+nothing else. *Accept: right-click a page → Send to → the wall shows it, two
+clicks, no terminal.*
+
+**M2 — Devices have names.** Device list in `chrome.storage.sync`; online dot
+from `GET /v1/status`; screen picker from the same reply's `screens`; default
+and recent destinations. *Accept: two entries in the list, one unplugged, and
+the popup says which is which before you click.*
+
+**M3 — Pairing.** `_crossdrop._tcp` advertised by the agent for native
+clients; a **Pair** panel in the web UI that emits a blob the extension
+accepts. *Accept: add a display to the extension without opening a text
+editor or reading an IP address aloud.*
+
+**M4 — Mirror this tab.** `chrome.tabs.onUpdated` on one tab → `/v1/navigate`
+on URL change; an explicit *stop* that leaves the remote page where it is.
+Needs one additive field: `POST /v1/scroll` takes `{"y": <int>}` for an
+absolute position alongside `dy` and `to` — additive, so `/v1` stays frozen.
+*Accept: navigate three pages locally, watch the wall follow, press stop, and
+navigate a fourth without the wall moving.*
+
+**M5 — Rooms.** A room is a named list of `(device, screen)` pairs, stored
+client-side, fanned out by a loop in the client — the same shape as the web
+UI's client-side `"all"` for screenshots (§11, v1.1.7). No server change, and
+no new failure semantics: each send reports per-target exactly as
+`screens[]` already does per-screen. *Accept: "All Screens" puts one URL on
+every monitor of every paired box, and names the one that was off.*
+
+**Later.** Send-screenshot-of-my-tab, smart content handling case by case,
+session handoff, a phone client. Each is a rung on the same ladder and none
+of them blocks the ones above.

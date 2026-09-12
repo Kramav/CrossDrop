@@ -1,157 +1,262 @@
-# Next steps
+# NEXT-STEPS — living roadmap
 
-Findings from an adversarial review of the whole repo, 2026-09-07, and what was
-done about them. Suite was green at review time (265 passed, 16 skipped) and is
-green now (281 passed, 16 skipped — the skips are still the `CROSSDROP_SMOKE=1`
-browser tests, which CI now runs in their own job).
+**Living document.** Update it when a decision is made, not when a release is
+cut. If you had to think about something for more than five minutes, the
+conclusion belongs here.
 
-One thing below is **not verified**: the new CI smoke job, which is a workflow
-file and is verified by running the workflow. Everything else is covered by the
-suite. The `/files` CSP rests on an unmeasured claim about Chromium's PDF
-viewer, so the boundary it was meant to provide is carried by a test instead —
-see that entry.
+Three files, three jobs, no overlap:
 
-## Do these three first
+| File | Holds | Lifecycle |
+|---|---|---|
+| [PLAN.md](PLAN.md) | **Why** it is built this way. Architecture, the frozen `/v1` contract, the per-version record, §13 product direction. Cited by section number from code comments. | Append-only |
+| [DEBT.md](DEBT.md) | Review findings **deliberately not fixed**, each with what would make it worth doing. | Rewritten per review round |
+| **NEXT-STEPS.md** (this) | **Where it stands, what is open, what is next.** The one file to read on a Monday. | Living |
 
-- [x] **Pin the dependencies.** `agent/requirements.in` is now the six names you
-  edit; `agent/requirements.txt` is a generated `uv pip compile --universal`
-  lock, and every consumer (CI, `setup.sh`, `update.sh`) installs it unchanged.
-  `--universal` because one file has to install on the Pi (aarch64), CI (x86_64,
-  3.11 and 3.13) and a Windows dev box — it emits markers, so `uvloop` is pinned
-  for Linux and `colorama` for Windows in the same file. Suite is green against
-  the pinned set.
+Last updated **2026-09-12**.
 
-- [x] **`_home_when_ready` probes the wrong host.** Both halves fixed. The probe
-  is now a `home_url` whose path is our own `/home` — on the Pi the full tailnet
-  url, which is the address that is actually listening, since the unit passes
-  `--host $(tailscale ip -4)` and never reads `[server]`. And the wait is
-  best-effort: every screen is navigated whether or not the probe ever answered.
-  `tests/test_resilience.py` pins both.
+---
 
-  *Deviation from the finding:* it said probe `cfg["server"]["host"]`. That is
-  `127.0.0.1` on the Pi, where nothing listens — see the unit's `ExecStart`.
+## Where it stands
 
-- [x] **`PUT /v1/settings` truncates `settings.json`.** `settings.merge_screens`
-  overlays the edit onto the saved list by index and keeps any tail the editor
-  could not see, so a save with a monitor unplugged no longer drops the other
-  screen. Covered at the unit level and through the route.
+Suite green on this machine: **392 passed, 16 skipped**, 180s. The skips are the
+`CROSSDROP_SMOKE=1` browser tests, which CI runs in their own job.
 
-## Real bugs, lower blast radius
+What ships today, in one paragraph: one FastAPI agent on a Pi owns a kiosk
+browser and the monitors, and exposes a frozen `/v1` HTTP API. You can send it
+a URL or a file, split a monitor into independent screens, read back what is
+actually on the wall (`/v1/screenshot`, `/v1/inspect`), scroll it, drive its
+video, click and type into the page, power the monitors, install ad blockers,
+and edit screen names and home pages live. Three clients: the web UI it serves,
+a Windows tray app, and `roomctl` (CLI + Python library). It updates itself from
+release tags and rolls itself back if the new one shows an error page.
 
-- [x] **BiDi socket shared across threadpool threads, no lock.** One
-  `threading.Lock` around `_bidi()` and `close()`; `_bidi_connect` runs under
-  it, so `session.new` cannot race either. `test_two_threads_never_share_the_bidi_socket`
-  drives four threads at it and asserts nothing overlapped and nobody got
-  somebody else's reply.
+What does not exist: **a browser extension, device discovery, pairing, more than
+one device, and tab mirroring.** That is the whole of what is next — see
+[PLAN.md §13](PLAN.md#13-product-direction--the-industry-review) for the
+reasoning and [What's next](#whats-next) for the tasks.
 
-- [x] **`sweep()` crashes on concurrent uploads.** Files that vanish between the
-  glob and the stat are skipped. The test races a deletion into the middle of
-  the glob and asserts the upload after it still works.
+---
 
-- [x] **`extensions.install` caps the download but not the extraction.** Sums
-  `z.infolist()` file sizes before `extractall`. The test builds a genuinely
-  compressed 8 MB bomb that slips under the 1 MB download cap.
-  Marked `ponytail:` — `file_size` is the archive's own claim, so this bounds
-  the honest-but-huge case; metering the extract stream is the upgrade if a
-  hostile CRX is ever in scope.
+## Open
 
-## Contract inconsistencies
+Nothing here is a bug. These are things that are true, unverified, or owed.
 
-- [x] **`/v1/autoscroll` returns a screen name in `current_url`.** Documented as
-  frozen, in the route docstring and in README under "Two frozen warts", next to
-  the same note on `up`.
+### Never verified on hardware
 
-- [x] **Three definitions of `home_url`.** One now: `app._home_url()`, called
-  from `load_config`. A path resolves against `[server]`, so `"/home"` really is
-  this agent's idle page and the shipped example is loadable as written;
-  anything that is not http, https or `about:` is refused at load. There is a
-  test that loads `config.example.toml` verbatim, which is what would have
-  caught this.
+Every one of these needs the Pi and cannot be closed from a dev box. The suite
+cannot substitute for any of them — that is why they are still here.
 
-## CI and deploy
+- [ ] **`--remote-allow-origins=*` is gone; no test can prove it was safe to
+  remove.** On the next deploy, confirm `/v1/status` still returns a real
+  `current_url` rather than a browser error. If it does not, the CDP origin
+  check is rejecting us (PLAN §6, §11).
+- [ ] **Autoscroll CPU cost.** `roomctl autoscroll start --speed 40` on a long
+  page, leave it two minutes, watch `%CPU` in `top`. The connection count is
+  proven; the cost of handing interpolation to Chromium is not measured.
+- [ ] **The smoke suite has never run on the Pi**, only against a desktop
+  Chrome. Command and walkthrough: `deploy/pi/smoke-on-the-pi.md`,
+  `deploy/pi/update-over-ssh.md` §8. The agent must be stopped first.
+- [ ] **The rollback has never actually fired** since `update.sh` grew the
+  `/v1/inspect` gate and the failure screenshot. It is the single most important
+  behaviour in `deploy/` and it is proven only on the happy path. Drill: tag a
+  deliberately broken commit, watch it decline and stay on the old release.
+- [ ] **`VERIFY_TAG=1` accept path.** The refusal is tested against a real
+  unsigned tag; signing needs a key on the box.
+  `deploy/pi/smoke-on-the-pi.md` § "What this does not cover" has the drill.
+- [ ] **Screens editor (v1.1.0 accept).** Move a window between monitors from
+  the UI, no restart, and have it survive one.
+- [ ] **Agent outlives its browser (v1.1.7 accept).** Rename the Chromium
+  binary, restart the agent, read the reason out of `roomctl status` from a
+  controller box rather than from a keyboard.
+- [ ] **Input on a real login (v1.1.8 accept).** With `[interact] enabled`, put
+  a login page on the wall, press Look, click the username box in the picture,
+  type, and confirm the next capture shows the caret in the right field.
+- [ ] **`/files` CSP.** Load a PDF and a video through `/files` with a bare
+  `sandbox` (drop `allow-scripts`). If PDFs still render, drop it for good — it
+  buys nothing today, and the claim that it is needed is believed, not measured.
+  The boundary itself rests on `test_nothing_in_types_can_execute`, not on the
+  header.
 
-- [x] **CI never exercises the protocol code.** New `smoke` job on
-  `ubuntu-latest`: symlinks the runner's preinstalled Chrome to `chromium`,
-  relaxes the 24.04 AppArmor userns restriction (Chromium's sandbox needs it —
-  better than `--no-sandbox`, which no Pi runs), and runs `tests/test_smoke.py`
-  under `xvfb-run` with `CROSSDROP_SMOKE=1`. `chromium --version` runs first and
-  fails the job loudly, because the kiosk fixture *skips* when it finds no
-  binary and a silent skip is what let this gap last.
+### The record has drifted
 
-  ⚠️ **Unverified.** GitHub Actions cannot be run from here. If it goes red on
-  the first push, the likely causes in order are: the AppArmor sysctl, `--kiosk`
-  under a bare Xvfb with no window manager, and Chrome's sandbox on the runner.
+Four things ship and are documented only in `agent/config.example.toml`. Fix by
+writing them where a reader would look, not by writing them twice.
 
-- [x] **`VERIFY_TAG` defaults to 0 and the signing path is untested.** Default
-  unchanged — that argument still holds. `test_verify_tag_actually_refuses_an_unsigned_tag`
-  now builds a real git repo with a real unsigned tag and runs the real
-  `update.sh`: it asserts exit 1, the message, the `.failed-<tag>` latch, and
-  that `current` never appeared. Checked by hand that the gate is what stops it
-  — with `VERIFY_TAG=0` the same script runs on to the venv build.
+- [x] **`allow_extensions` was described as unbuilt in the security section.**
+  PLAN §11's extension entry read "*the honest fix then is an allowlist of ids
+  in `config.toml`*" in future tense; it ships. §11 now carries a **Since
+  built** note. Still absent from README — worth a line wherever
+  `/v1/extensions` is described, since it is the only route that puts
+  executable code on the box.
+- [ ] **`restore_within_minutes`** — puts each screen back on what it was
+  showing after the nightly restart. In neither PLAN.md nor README.md. This is
+  the feature that makes the 04:00 restart invisible; it deserves a line.
+- [ ] **`disk_cache_mb`** — undocumented outside the example config, and it is a
+  RAM cap on a box where the profile is tmpfs.
+- [ ] **Screen splits and the separate token file have no PLAN.md entry.** Both
+  are in README; the per-version record in §7 skips them, along with the capture
+  cache. Add short entries so §7 is a complete history rather than a partial one.
 
-  The *accept* half still needs a key, so it is a documented drill rather than a
-  test: `deploy/pi/smoke-on-the-pi.md` §"What this does not cover" now carries
-  the command and what a good run prints.
+### Decisions owed
 
-- [x] **Naive TOML parse for the token.** `| head -1`, with a test that runs the
-  real pipeline against a config holding two `token =` lines.
+- [ ] **Confirm A2 (SD boot), A4 (64-bit Pi OS), A5 (desktop auto-login), A6
+  (private repo)** — PLAN §1. Four one-word answers that several design choices
+  rest on.
+- [ ] **Power-loss frequency on the Pi.** Decides whether the profile snapshot
+  stays stop-only (default, fewest SD writes, may lose the last session) or gains
+  the hourly timer. PLAN §9.
+- [ ] **Read-only deploy key on the Pi**, if the auto-update timer is ever to be
+  enabled. PLAN §8.
+- [ ] **`setup.sh` hardcodes `github.com/Kramav/CrossDrop`.** If that repo is
+  private, both the README's `curl | bash` line and the clone hit a git
+  credential prompt in a pipeline with no tty. Unresolved because A6 is
+  unconfirmed — same question as above.
 
-## Hardening (cheap)
+### Deliberately not doing
 
-- [x] **`Content-Security-Policy: sandbox` on `/files`.** Shipped as
-  `sandbox allow-scripts`. The defence is the **opaque origin**, which is what
-  puts the web UI's `localStorage` out of reach; `allow-scripts` is there
-  because a bare `sandbox` is *believed* to render Chromium's built-in PDF
-  viewer blank, and PDFs are half of what this display is for.
+Live in [DEBT.md](DEBT.md), with the trigger that would change the answer. Not
+repeated here. As of the 2026-09-08 round: three Medium, four Low, five
+accepted-not-debt. The stop rule was never met — round 4 still returned a High
+— so a fifth adversarial round is available if anything in that area is touched.
 
-  Believed, not measured — so the header is not what the boundary rests on.
-  `test_nothing_in_types_can_execute` is: no entry in `storage.TYPES` is a
-  script-bearing document, and adding one fails the suite with a pointer back
-  here. That check needs no browser and holds whether or not my reading of
-  `allow-scripts` is right.
+---
 
-  Still worth doing on the Pi once: load a PDF and a video through `/files` with
-  the header on. If PDFs render fine under a bare `sandbox`, drop
-  `allow-scripts` — it buys nothing today.
+## The record — what was built, and why
 
-## Over-engineering
+The one-line version. PLAN.md carries the full reasoning for each; the section
+column is where to look.
 
-- [x] **Prose outweighs code.** Three passes over the six agent modules, stating
-  each fact once. Comments+docstrings vs. code, before → after:
+| Version | What | The reason it exists | Where |
+|---|---|---|---|
+| v1.0.0 | Agent, frozen `/v1`, `roomctl`, web UI, uploads, Pi provisioning, tmpfs profile, release-gated auto-update | One server, many clients: adding a control surface must never touch the server | PLAN §7 P0–P8 |
+| v1.0.1 | Agent-owned display power (DPMS claimed at startup, idle timers, any `/v1` call wakes it) | **The Pi has no keyboard.** Anything that blanks the screen and wakes only on input is unrecoverable without unplugging the box | PLAN §7 |
+| v1.1.0 | Screens editor in the web UI → `settings.json` | Editing a screen name should not be `ssh` + `nano` + restart. JSON not TOML because `tomllib` only reads | PLAN §7 |
+| v1.1.2 | `/v1/media` — play, pause, ±10s, mute, volume | A display that can show a video could not pause one | PLAN §7 |
+| v1.1.7 | Agent survives a browser that will not start; autoscroll lock; one log line per request | A failed launch used to take the API down with it, so the one thing that could name the cause was never up | PLAN §7 |
+| v1.1.7 | `/v1/screenshot`, pinned to `scale: 1` | Every other route reports the URL it was *given* — a redirect, an expired login and a crashed tab all looked like success. CSS pixels because it is also the coordinate space input needs | PLAN §7 |
+| v1.1.8 | `/v1/inspect`, `/v1/input` (ships off), `update.sh` rolls back on `error_page` | An expired SSO login is a page nobody can get past, and it is the one failure a keyboard-less box cannot otherwise recover from | PLAN §7 |
+| v1.1.12–13 | Web UI became a viewport — the capture *is* the page, rail, ⌃K palette | Once the capture existed, a form with a screenshot bolted underneath was the wrong way round | PLAN §7 |
+| v1.2.0 | Window→screen mapping by coordinates, not list order | One stray page target moved every screen one place along, silently. Tolerable for a navigate; not for a typed password | PLAN §11 |
+| v1.3.0 | `roomctl` by-name module functions deleted (**breaking**) | 86 lines of pure delegation; every new endpoint had to be written in three places | README |
+| v2.0.0 | One name: CrossDrop. `migrate.sh` | There were three names, and the one you type most (`display-agent`) was neither the repo nor the install | PLAN §11 |
+| *unversioned* | Screen splits, capture cache, `restore_within_minutes`, `allow_extensions`, separate token file | See [The record has drifted](#the-record-has-drifted) — these need entries | — |
 
-  | file | before | after |
-  |---|---|---|
-  | `app.py` | 416/584 (0.71) | 373/590 (0.63) |
-  | `browser.py` | 466/612 (0.76) | 417/611 (0.68) |
-  | `storage.py` | 47/49 (0.96) | 43/53 (0.81) |
-  | `display.py` | 81/88 (0.92) | 64/86 (0.74) |
-  | `settings.py` | 50/38 (1.32) | 41/39 (1.05) |
-  | `extensions.py` | 50/77 (0.65) | 46/77 (0.60) |
-  | **total** | **1110/1448 (0.77)** | **984/1456 (0.68)** |
+**The two facts that explain most of the code**, worth restating because every
+future decision runs into them: the Pi has **no keyboard**, and the browser is
+driven **remotely** (CDP for Chromium/Edge, WebDriver BiDi for Firefox — so
+Firefox `501`s on scroll, media, screenshot and screens 2+).
 
-  126 lines of prose gone, and the drift the finding actually named
-  (`_home_when_ready`) is fixed. **Stopped deliberately at 0.68.** Nothing was
-  moved to PLAN.md: relocating the reasoning keeps the maintenance and adds a
-  cross-file sync problem, which is the complaint this file makes elsewhere
-  about `SUPPORTS`. Getting below ~0.5 means deleting *facts* — recorded Pi-only
-  bugs, hardware quirks, protocol constraints — and which of those to lose is a
-  call worth making deliberately rather than in a cleanup pass.
+**Two frozen warts** stay wrong on purpose: `Status.up` is always `true`, and
+`/v1/autoscroll` puts a screen *name* in `current_url`. `/v1` is frozen and a
+client reading either would change behaviour the day they were fixed.
 
-- [x] **Six copies of the Firefox guard.** One `_require(cfg, "scroll")` reading
-  `SUPPORTS`, replacing all six plus `_require_cdp`. The hand-sync note at the
-  top of `browser.py` is gone because the table *is* the enforcement now.
-  `/v1/autoscroll`'s own route-level guard reads the same table (it has to stay:
-  the autoscroll thread suppresses everything `browser.autoscroll` raises).
+---
 
-- [x] **`roomctl/__init__.py:248-333` is 86 lines of pure delegation.** Deleted.
-  The CLI now opens one `Client` per command instead of dialling inside every
-  lambda.
+## What's next
 
-  ⚠️ **Breaking, and worth a version bump.** `roomctl.status(target)`,
-  `roomctl.navigate(url, target, screen)` and the other twelve are gone;
-  `roomctl.Client` and `roomctl.client` are unchanged, and the `roomctl` CLI is
-  unaffected. README carries the migration line.
+From [PLAN.md §13](PLAN.md#13-product-direction--the-industry-review), which
+evaluates `industryreview.txt` against what exists. The short version: the
+review's Phases 1, 5 and 11 already shipped; Phases 3, 4, 6 and the device half
+of Phase 2 are the real gaps, and the first of them needs **no server change**.
 
-- [x] **`Status.up` is always `true`.** Already documented in README; now under
-  the "Two frozen warts" heading with `/v1/autoscroll`, and the model comment
-  points at it instead of restating the argument.
+The measure of success is the review's own, and it is a good one:
+
+> Can a user open a webpage, right-click it, select "Living Room," and have the
+> page appear on the other machine in one or two clicks?
+
+### M1 — Send this tab ← start here
+
+A Chrome/Edge MV3 extension that calls `POST /v1/navigate` and nothing else.
+
+- [ ] `extension/` — `manifest.json` (MV3), service worker, popup. One
+  `host_permissions` entry for the tailnet range.
+- [ ] Context menu on page and on link; toolbar popup; a keyboard shortcut.
+- [ ] Success and failure surfaced where the user is looking — a badge, not a
+  console log. Reuse the typed-error vocabulary `roomctl` already has:
+  unreachable / 501 unsupported / 503 browser down.
+- [ ] Token and URL in `chrome.storage`, entered by hand for now (M3 automates
+  it).
+
+**Verify first, before writing the popup** — two assumptions the whole
+milestone rests on, each about 10 minutes:
+
+- An MV3 **service worker** fetch to `http://<tailnet-ip>:8080/v1/navigate`
+  carrying an `Authorization` header, with `host_permissions` granted. Expected
+  to bypass CORS, so the agent needs no CORS middleware. If it does not, that is
+  a server change and it changes M1's shape.
+- Plain **`http://`** from the extension, which is a secure context. Expected to
+  be allowed (it is not a page subresource, so mixed-content rules do not
+  apply).
+
+*Accept: right-click a page → Send to → the wall shows it. Two clicks, no
+terminal, no `targets.toml`.*
+
+### M2 — Devices have names
+
+- [ ] Device list in `chrome.storage.sync`: `{name, url, token, last_seen}`.
+  **Client-side only** — no server registry and no hub; see §13 decision 1.
+- [ ] Online dot per device from `GET /v1/status`, screen picker from the same
+  reply's `screens`.
+- [ ] Default destination, and recents.
+
+*Accept: two devices listed, one unplugged, and the popup says which is which
+before you click.*
+
+### M3 — Pairing
+
+- [ ] Agent advertises `_crossdrop._tcp` (mDNS) for clients that can listen —
+  `roomctl`, the tray app.
+- [ ] **Pair** panel in the agent's web UI emitting a blob the extension
+  accepts.
+
+> **Known constraint, do not design around it:** MV3 has no mDNS API.
+> `chrome.mdns` was Chrome-Apps-only and is gone. The extension **cannot**
+> discover anything on its own — hence the web-UI handoff. PLAN §13 decision 2.
+
+*Accept: add a display to the extension without opening a text editor or
+reading an IP address aloud.*
+
+### M4 — Mirror this tab
+
+- [ ] `chrome.tabs.onUpdated` on one tab → `/v1/navigate` on URL change.
+- [ ] An explicit **stop** that leaves the remote page where it is.
+- [ ] One additive server change: `POST /v1/scroll` accepts `{"y": <int>}` for
+  an absolute position, alongside the existing `dy` and `to`. Additive, so `/v1`
+  stays frozen.
+
+*Accept: navigate three pages locally and watch the wall follow; press stop, and
+a fourth navigation does not move it.*
+
+### M5 — Rooms
+
+- [ ] A room is a named list of `(device, screen)` pairs, client-side, fanned
+  out by a loop — the same shape as the web UI's client-side `"all"` for
+  screenshots. No server change; per-target results reported the way `screens[]`
+  already reports per-screen.
+
+*Accept: "All Screens" puts one URL on every monitor of every paired box, and
+names the one that was off.*
+
+### Later, and not blocking anything above
+
+Send a screenshot of the local tab; smart content handling one case at a time;
+session handoff beyond URL + scroll; a phone client.
+
+**Refused on purpose** — pixel mirroring, a cloud relay, a content-detection
+framework, full session migration, a scheduler inside the agent. Each has its
+reasoning and its trigger in PLAN §13 *Declined*. Do not re-raise without the
+trigger.
+
+---
+
+## Keeping this current
+
+- A decision made → the row or bullet it changes, same day. A *reversed*
+  decision → say it was reversed and why, do not silently edit.
+- An item verified on hardware → tick it and write what it printed. "Verified"
+  with no output is how the CI smoke gap lasted.
+- A milestone finished → move it into **The record** with its one-line reason,
+  and add the PLAN.md version entry.
+- Something deliberately not fixed → **DEBT.md**, not here, with its trigger.
+- Long-form architecture reasoning → **PLAN.md**, and link to it. Two copies of
+  a rationale is the sync problem this repo has already complained about once.

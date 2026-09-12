@@ -13,6 +13,8 @@ any Debian box with monitors on it — a Proxmox host, say.
 - **Debian / Proxmox host setup** — [deploy/linux.md](deploy/linux.md). Same
   script, other branch.
 - **Build plan and phases** — [PLAN.md](PLAN.md).
+- **What's open and what's next** — [NEXT-STEPS.md](NEXT-STEPS.md), the living
+  roadmap.
 
 ## Architecture
 
@@ -67,7 +69,9 @@ that you only have to open one.
 | [deploy/linux.md](deploy/linux.md) | Running the display on a Debian box instead of a Pi, and why it goes on the Proxmox host rather than in a guest. |
 | [deploy/windows/roomtray.ps1](deploy/windows/roomtray.ps1) | The tray client. Pure PowerShell + WinForms so it runs on a box with no checkout and no Python. |
 | [tests/](tests/) | pytest, one file per surface. No browser needed unless `CROSSDROP_SMOKE=1`. |
-| [PLAN.md](PLAN.md) | Why it's built this way, phase by phase. Section numbers referenced from code comments. §11 holds the adversarial review's standing decisions and what is still unverified on hardware. |
+| [PLAN.md](PLAN.md) | Why it's built this way, phase by phase. Section numbers referenced from code comments. §11 holds the adversarial review's standing decisions and what is still unverified on hardware; §13 is the product roadmap from here. |
+| [NEXT-STEPS.md](NEXT-STEPS.md) | **Living.** Where the project stands, what is open, what is next. The one file to read first. |
+| [DEBT.md](DEBT.md) | Review findings deliberately *not* fixed, each with the trigger that would change the answer. |
 
 ## Controlling a display
 
