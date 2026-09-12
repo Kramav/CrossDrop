@@ -237,7 +237,12 @@ def test_smoke_jpeg_decodes_and_is_the_same_size_on_screen(kiosk, page_server):
 def test_smoke_inspect_reads_a_real_page(kiosk, page_server):
     kiosk.post("/v1/navigate", json={"url": page_server})
     s = kiosk.get("/v1/inspect").json()
-    assert s["title"] == "ready" and s["ready_state"] == "complete"
+    # "interactive" or "complete", not "complete" alone. Page.navigate returns on
+    # commit, so on a slow CI runner inspect can land between DOM-parsed and the
+    # load event -- this failed on 2026-09-11 and 09-12 with 'interactive'. Both
+    # mean the document is parsed, which is all the title and fields below need.
+    # "loading" or "unknown" would mean inspect read the page too early; still a failure.
+    assert s["title"] == "ready" and s["ready_state"] in ("interactive", "complete"), s
     assert s["error_page"] is False
     # The fields a login would need, found by name and id, with no values.
     got = {f["selector"]: f for f in s["fields"]}
