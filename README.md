@@ -300,6 +300,72 @@ Everything acts on the media element itself, which means:
 - A film longer than `display.content_off_minutes` (default 2 h) still blanks
   the screen mid-playback; raise it in `config.toml` for a cinema room.
 
+## Streaming
+
+Show a window or tab from your PC on one screen of the wall. It's for things
+you can't send as a link: a service you're signed in to on the PC, a desktop
+app, a local video. Press **📺** in the web UI's side rail (or
+<kbd>Ctrl</kbd><kbd>K</kbd> → *Stream a window from this PC*), and follow the
+three steps the panel shows. Nothing to install on the PC: the browser does the
+capturing, and the video goes straight from the PC to the Pi over the tailnet.
+
+### One-time setup
+
+Browsers only allow screen capture on an **https** page, so the display needs an
+https address. It gets one from Tailscale, with a real certificate.
+
+1. In the [Tailscale admin console](https://login.tailscale.com/admin/dns), turn
+   on **HTTPS certificates** (and MagicDNS, if it is off). Once per tailnet.
+2. Run `setup.sh` on the Pi again. It's safe to re-run, and it now runs
+   `tailscale serve` and restarts the agent. On the Pi, over SSH:
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Kramav/CrossDrop/main/deploy/pi/setup.sh | bash
+   ```
+
+   It ends by printing the address, something like
+   `https://crossdrop.tail1234.ts.net`. If step 1 wasn't done, tailscale prints
+   a link to do it and waits.
+3. Open that https address on the PC instead of `http://100.x…:8080`. Paste the
+   token once more: the browser keeps it per address. The old address keeps
+   working for everything else, and its Stream panel links to the new one.
+
+### Using it
+
+- **Firefox:** open what you want to watch in its own window, press **Start**,
+  and pick that window. Firefox can't share sound with a window, so the page also
+  asks for a microphone: choose **Stereo Mix**, which is your PC's own output,
+  and tick *Remember this decision*. Then make the video fullscreen.
+- **Chrome / Edge:** press **Start**, choose the *Tab* section, pick the tab
+  that's playing, and leave *Also share tab audio* on.
+- **To stop**, press **Stop streaming**, close the CrossDrop window, use the
+  browser's own *Stop sharing* bar, or run `roomctl stream stop`. The screen goes
+  back to what it showed before.
+
+### No sound?
+
+Windows ships **Stereo Mix** turned off. Turn it on in Control Panel → Sound →
+*Recording* tab → right-click → *Show Disabled Devices* → right-click
+**Stereo Mix** → *Enable*. Some sound drivers have no Stereo Mix at all; then
+install the free [VB-Cable](https://vb-audio.com/Cable/) and pick *CABLE Output*
+in the panel's *Sound comes from* list. The panel never uses a real microphone
+unless you pick one there.
+
+### Limits
+
+- **One screen, one stream.** *Both* is refused; a second stream replaces the
+  first.
+- **Chromium or Edge kiosk only**, like scroll and media. A Firefox kiosk
+  returns `501`.
+- **Copy-protected video may come out black.** That depends on the browser and
+  graphics path on the PC, not on CrossDrop. Edge's hardware DRM always
+  captures black; Firefox and Chrome usually don't.
+- **The Pi decodes in software.** 1080p at 30 fps is the target. If it
+  stutters, lower `QUALITY` near the top of the streaming section in
+  `web/index.html`.
+- **The display stays awake** while a stream plays, whatever
+  `content_off_minutes` says. The kiosk page checks in every minute.
+
 ## Seeing what is on the wall
 
 Every other route in this API reports the url it was *given*. `POST /v1/navigate`
@@ -491,6 +557,8 @@ before it keeps working unchanged.
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
 | `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
 | `POST /v1/window` | `{"screen"?, "state"}` | `"normal"`\|`"minimized"`\|`"fullscreen"` — the way out of `--kiosk` without stopping the agent |
+| `POST /v1/stream` | `{"sdp", "screen"?}` | The PC's complete WebRTC offer in, the kiosk's complete answer out: `{"sdp", "screen"}`. Blocks up to 15 s; `504` if the kiosk never answers, `422` for `"all"`, `501` on firefox |
+| `DELETE /v1/stream` | — | `{"ok", "stopped"}`. Puts back what the screen showed before, unless something else has been shown since |
 | `POST /v1/screenshot` | `{"screen"?, "region"?, "format"?, "quality"?}` | `{"image"` (base64)`, "width", "height", "url", "title", …}`. No `"all"` — one request, one picture |
 | `GET /v1/inspect` | `?screen=` | `{"url", "title", "ready_state", "error_page", "scroll_y", "fields": [...]}`. No field *values* |
 | `POST /v1/input` | `{"screen"?, "actions": [...], "deadline_ms"?}` | `{"ok", "results": [...]}`. **501 unless `[interact] enabled = true`** |
@@ -501,7 +569,7 @@ before it keeps working unchanged.
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
 | `PUT /v1/settings` | `{"screens": [{"name", "home_url"}], "splits"?, "mode"?}` | saves, re-reads the layout from `xrandr`, then moves the windows live |
 | `POST /v1/relaunch` | — | restarts the kiosk browser; the only way to apply `mode` or a split |
-| `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"`, `"error"` |
+| `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"`, `"error"`, `"https_url"` (`""` without `tailscale serve`) |
 
 Three things to know if the caller is a program rather than a person:
 

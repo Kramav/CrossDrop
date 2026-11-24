@@ -176,6 +176,13 @@
   #extlist .row { justify-content: space-between; margin-bottom: .3rem; }
   #extlist .row span { font-size: .85rem; }
   #cap { font-size: .8rem; }
+  #steps { margin: .4rem 0 .8rem; padding-left: 1.4rem; }
+  #steps li { margin: .4rem 0; }
+  #streamgo, #streamstop { font-weight: 600; padding: .55rem 1.3rem; color: #fff; }
+  #streamgo { background: var(--accent); border-color: var(--accent); }
+  #streamstop { background: #c0392b; border-color: #c0392b; }
+  #streamnote { font-size: .9rem; opacity: 1; min-height: 1.4em; }
+  #streamnote a { color: var(--accent); }
 </style>
 
 <header id="bar">
@@ -247,6 +254,12 @@
   <p class="cap">Display</p>
   <button type="button" id="power" title="Turn the monitors off"
           aria-label="Display power">◐</button>
+  <div id="streamgrp">
+    <hr>
+    <p class="cap">Stream</p>
+    <button type="button" id="stream" aria-pressed="false"
+            title="Show a window from this PC on the screen" aria-label="Stream">📺</button>
+  </div>
 </aside>
 </div>
 
@@ -316,6 +329,21 @@
 
   <p class="note"><span id="ver"></span> · <span id="host"></span></p>
   <div class="row"><button type="button" id="closesetup">Done</button></div>
+</div></dialog>
+
+<dialog id="streamdlg"><div class="sheet">
+  <h2 id="streamtitle">Stream from this PC</h2>
+  <ol id="steps"></ol>
+  <div id="audiorow" class="row" hidden>
+    <label class="grow" for="audiosrc">Sound comes from</label>
+    <select id="audiosrc"></select>
+  </div>
+  <p class="note" id="streamnote" role="status" aria-live="polite"></p>
+  <div class="row">
+    <button type="button" id="streamgo">Start</button>
+    <button type="button" id="streamstop" hidden>Stop streaming</button>
+    <button type="button" id="streamclose">Close</button>
+  </div>
 </div></dialog>
 
 <script>
@@ -724,6 +752,7 @@ function drawCapabilities(kind) {
   for (const id of ["#top", "#up", "#down", "#bottom"]) $(id).hidden = !can("scroll");
   $("#auto").hidden = !can("autoscroll");
   $("#wingrp").hidden = !can("window");
+  $("#streamgrp").hidden = !can("stream");
 
   const missing = ["scroll", "autoscroll", "media", "screens", "window",
                    "extensions", "screenshot"].filter(f => !can(f));
@@ -818,6 +847,7 @@ async function refresh() {
       $("#status").textContent = "browser down" + (s.error ? ": " + s.error : "");
     }
     probeMedia();                    // not awaited: the rest of the page is ready
+    httpsUrl = s.https_url || "";
     $("#ver").textContent = s.version;
     $("#host").textContent = location.host;
     drawScreens();
@@ -949,6 +979,9 @@ function commands() {
       run: ACT.bottom },
     { label: autoscrolling() ? "Stop auto-scrolling" : "Start auto-scrolling",
       when: () => can("autoscroll") && target !== "all", run: ACT.auto },
+
+    { label: streaming ? "Stop streaming" : "Stream a window from this PC…",
+      when: () => can("stream"), run: streaming ? () => stopStream() : openStream },
 
     { sep: "Window", when: () => can("window") },
     { label: "Set the kiosk aside", when: () => can("window"), run: ACT.aside },
@@ -1088,6 +1121,238 @@ document.onpaste = e => {
   const url = e.clipboardData.getData("text").trim();
   if (url) show(url);
 };
+
+// --- streaming from this PC -------------------------------------------------
+// The browser captures a window or tab and sends it to the kiosk over WebRTC.
+// The agent only passes one offer and one answer between the two (/v1/stream);
+// the video goes PC -> Pi directly. Nothing to install on either end.
+
+// ponytail: one knob. Lower it if the Pi stutters: WebRTC decodes in software
+// there, and a Pi 5 has no H.264 decoder at all.
+const QUALITY = { fps: 30, maxBitrate: 8_000_000 };
+const FIREFOX = navigator.userAgent.includes("Firefox");
+// A PC's own sound as an input. Names vary by sound driver; VB-Cable is the
+// fallback for drivers with no Stereo Mix at all.
+const LOOPBACK = /stereo mix|what u hear|wave out|loopback|cable output/i;
+// Voice processing mangles music, and there is no echo to cancel here.
+const RAW = { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
+const SOUND_HELP = "No sound: turn on Stereo Mix in Windows — Control Panel → Sound"
+  + " → Recording → right-click → Show Disabled Devices → right-click Stereo Mix"
+  + " → Enable. Then stop and start again.";
+let streaming = null;              // { pc, media, screen } while live
+let httpsUrl = "";                 // from /v1/status, when `tailscale serve` is set up
+
+const canCapture = () => window.isSecureContext && navigator.mediaDevices
+  && "getDisplayMedia" in navigator.mediaDevices;
+
+function streamNote(text, link) {
+  const n = $("#streamnote");
+  n.replaceChildren(text);
+  if (link) {
+    const a = document.createElement("a");
+    a.href = a.textContent = link;
+    n.append(" ", a);
+  }
+}
+
+function drawSteps(lines) {
+  $("#steps").replaceChildren(...lines.map(t => {
+    const li = document.createElement("li");
+    li.textContent = t;
+    return li;
+  }));
+}
+
+function drawStream() {
+  const live = !!streaming;
+  $("#stream").setAttribute("aria-pressed", String(live));
+  $("#streamgo").hidden = live || !canCapture();
+  $("#streamstop").hidden = !live;
+  $("#steps").hidden = live;
+  if (!canCapture()) {
+    // Browsers only allow screen capture on a secure (https) page.
+    drawSteps([]);
+    if (httpsUrl) streamNote("Streaming works from this display's secure address."
+      + " Open it, paste the token once more, and press Stream there:", httpsUrl);
+    else streamNote("Streaming needs a one-time setup on the display: turn on HTTPS"
+      + " certificates in Tailscale, then run setup.sh on the Pi again."
+      + " See the README, under Streaming.");
+    return;
+  }
+  const where = target && target !== "all" ? target : "the display";
+  $("#streamtitle").textContent = `Stream from this PC to ${where}`;
+  if (FIREFOX) drawSteps([
+    "Open what you want to watch in its own Firefox window — drag its tab out of this one.",
+    "Press Start, choose that window in the box Firefox shows, and press Allow.",
+    "If Firefox asks about a microphone, choose “Stereo Mix” and tick “Remember this"
+      + " decision”. That is how your PC's sound reaches the display.",
+    "Go back to the video and make it fullscreen. Keep this window open; close it or"
+      + " press Stop to end.",
+  ]);
+  else drawSteps([
+    "Press Start.",
+    `In the box that opens, choose the “${navigator.userAgent.includes("Edg/")
+      ? "Microsoft Edge tab" : "Chrome Tab"}” tab and pick the tab that's playing.`,
+    "Leave “Also share tab audio” on and press Share. Keep this window open; close it"
+      + " or press Stop to end.",
+  ]);
+}
+
+function openStream() {
+  if (!$("#streamdlg").open) $("#streamdlg").showModal();
+  if (!streaming) streamNote(target === "all"
+    ? "Pick one screen at the top first: a stream plays on one monitor." : "");
+  drawStream();
+}
+
+// Wait for every address to be gathered so the offer carries them all; capped,
+// so an interface that never finishes cannot hold the stream up.
+function gathered(pc, ms = 3000) {
+  return new Promise(done => {
+    if (pc.iceGatheringState === "complete") return done();
+    const t = setTimeout(done, ms);
+    pc.addEventListener("icegatheringstatechange", () => {
+      if (pc.iceGatheringState === "complete") { clearTimeout(t); done(); }
+    });
+  });
+}
+
+async function openInput(deviceId) {
+  const s = await navigator.mediaDevices.getUserMedia({
+    audio: deviceId ? { ...RAW, deviceId: { exact: deviceId } } : RAW });
+  return s.getAudioTracks()[0];
+}
+
+// The PC's own sound, for when sharing brought none: Firefox never shares
+// sound, and Chrome only does for a tab. Never a real microphone -- that would
+// put the room on the wall -- unless someone picked one in the dropdown.
+async function loopbackAudio() {
+  const saved = localStorage.audioDevice;
+  if (saved === "none") return null;
+  let track;
+  try { track = await openInput(saved); }
+  catch {
+    if (!saved) return null;                  // declined, or no inputs at all
+    delete localStorage.audioDevice;          // that device has gone
+    try { track = await openInput(); } catch { return null; }
+  }
+  const inputs = (await navigator.mediaDevices.enumerateDevices())
+    .filter(d => d.kind === "audioinput");
+  if (!localStorage.audioDevice && !LOOPBACK.test(track.label)) {
+    track.stop();
+    track = null;
+    const mix = inputs.find(d => LOOPBACK.test(d.label));
+    if (mix) { try { track = await openInput(mix.deviceId); } catch { /* none */ } }
+  }
+  if (track) localStorage.audioDevice = track.getSettings().deviceId;
+  drawAudioChoices(inputs, track);
+  return track;
+}
+
+function drawAudioChoices(inputs, track) {
+  const opt = (value, label) => Object.assign(document.createElement("option"),
+                                              { value, textContent: label });
+  $("#audiosrc").replaceChildren(opt("none", "No sound"),
+    ...inputs.map(d => opt(d.deviceId, d.label || "Input")));
+  $("#audiosrc").value = track ? track.getSettings().deviceId : "none";
+  $("#audiorow").hidden = false;
+}
+
+$("#audiosrc").onchange = () => {
+  localStorage.audioDevice = $("#audiosrc").value;
+  streamNote(streaming ? "The new sound source is used next time you press Start." : "");
+};
+
+async function startStream() {
+  if (target === "all") {
+    streamNote("Pick one screen at the top first: a stream plays on one monitor.");
+    return;
+  }
+  streamNote("Choose what to share…");
+  let media;
+  try {
+    media = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: QUALITY.fps }, audio: true,
+      selfBrowserSurface: "exclude", systemAudio: "include" });
+  } catch (e) {
+    streamNote(e.name === "NotAllowedError" ? "Cancelled: nothing was shared."
+                                            : "✗ " + e.message);
+    return;
+  }
+  let hint = "";
+  if (!media.getAudioTracks().length) {
+    const a = await loopbackAudio();
+    if (a) media.addTrack(a);
+    else if (localStorage.audioDevice !== "none") hint = " " + SOUND_HELP;
+  }
+  await streamTo(media, target, hint);
+}
+
+// Takes any MediaStream, so the smoke test can hand it a canvas instead of a
+// screen nobody is there to pick.
+async function streamTo(media, screen, hint = "") {
+  stopStream(false);                  // the agent replaces the old one itself
+  const pc = new RTCPeerConnection();
+  streaming = { pc, media, screen };
+  drawStream();
+  try {
+    for (const t of media.getTracks()) {
+      if (t.kind === "video") t.contentHint = "motion";   // smooth over sharp
+      pc.addTrack(t, media);
+      t.onended = () => stopStream();   // the browser's own "Stop sharing" bar
+    }
+    await pc.setLocalDescription(await pc.createOffer());
+    await gathered(pc);
+    streamNote(`Connecting to ${screen}…`);
+    const answer = await req("/v1/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth() },
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, screen }),
+    });
+    await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+    for (const s of pc.getSenders()) {
+      if (!s.track || s.track.kind !== "video") continue;
+      const p = s.getParameters();
+      if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+      p.encodings[0].maxBitrate = QUALITY.maxBitrate;
+      p.degradationPreference = "maintain-framerate";
+      await s.setParameters(p).catch(() => {});   // a hint, not a requirement
+    }
+    pc.onconnectionstatechange = () => {
+      if (streaming?.pc !== pc) return;
+      if (pc.connectionState === "connected") {
+        streamNote(`● Live on ${answer.screen}. Keep this window open.${hint}`);
+      } else if (pc.connectionState === "failed") {
+        stopStream(false);
+        streamNote("✗ Lost the connection to the display.");
+      }
+    };
+  } catch (e) {
+    stopStream(false);
+    streamNote("✗ " + e.message);
+  }
+}
+
+function stopStream(tellAgent = true) {
+  if (!streaming) return;
+  const { pc, media } = streaming;
+  streaming = null;
+  media.getTracks().forEach(t => t.stop());
+  pc.close();
+  // keepalive, so this still goes out when the window is closing.
+  if (tellAgent) {
+    fetch("/v1/stream", { method: "DELETE", headers: auth(), keepalive: true })
+      .catch(() => {});
+    streamNote("Stopped.");
+  }
+  drawStream();
+}
+
+$("#stream").onclick = openStream;
+$("#streamgo").onclick = startStream;
+$("#streamstop").onclick = () => stopStream();
+$("#streamclose").onclick = () => $("#streamdlg").close();
+window.addEventListener("pagehide", () => stopStream());
 
 // --- settings ---------------------------------------------------------------
 // Everything here is a *runtime* setting the agent owns. The token, the browser

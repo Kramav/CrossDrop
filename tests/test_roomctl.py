@@ -135,3 +135,13 @@ def test_the_targets_file_is_not_kept_inside_the_installed_package(monkeypatch):
     assert pkg not in roomctl.config_path().parents, roomctl.config_path()
     assert roomctl.config_path().name == "targets.toml"
     assert "roomctl" in roomctl.config_path().parent.name
+
+
+def test_stream_stop_calls_the_delete_route(monkeypatch, cli_target, capsys):
+    calls = []
+    monkeypatch.setattr(roomctl.Client, "_call",
+                        lambda self, method, path, **kw: calls.append((method, path))
+                        or {"ok": True, "stopped": True})
+    assert cli.main(["stream", "stop"]) == 0
+    assert calls == [("DELETE", "/v1/stream")]
+    assert '"stopped": true' in capsys.readouterr().out

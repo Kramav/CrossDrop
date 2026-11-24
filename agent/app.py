@@ -2,9 +2,11 @@
 
 import contextlib
 import itertools
+import json
 import logging
 import os
 import secrets
+import subprocess
 import threading
 import time
 import tomllib
@@ -115,6 +117,10 @@ def load_config(path: str | os.PathLike | None = None) -> dict:
     cfg["browser"] = DEFAULTS | cfg.get("browser", {})
     cfg["upload"] = UPLOAD_DEFAULTS | cfg.get("upload", {})
     cfg["server"] = SERVER_DEFAULTS | cfg.get("server", {})
+    # The Pi's unit sets this to `tailscale ip -4` at start: a re-auth changes
+    # the address, and asking tailscaled beats rewriting a root-owned file.
+    if os.getenv("CROSSDROP_HOST"):
+        cfg["server"]["host"] = os.environ["CROSSDROP_HOST"]
     cfg["display"] = display.DEFAULTS | cfg.get("display", {})
     cfg["interact"] = INTERACT_DEFAULTS | cfg.get("interact", {})
     if not cfg["browser"]["profile_dir"]:
@@ -599,7 +605,10 @@ def _restorable(cfg: dict) -> dict[str, str]:
 def _still_there(cfg: dict, url: str) -> bool:
     """Uploads are tmpfs, so a reboot empties the store while last.json goes on
     pointing into it. Restoring a dead /files url puts a 404 on the wall, which
-    is worse than the home page it replaced."""
+    is worse than the home page it replaced. A stream never survives a restart
+    either: its offer lived in this process."""
+    if _streaming(url):
+        return False
     _, sep, file_id = url.partition("/files/")
     if not sep:
         return True                         # not ours; the site can answer for itself
@@ -902,6 +911,9 @@ class Status(BaseModel):
     # it -- a kiosk window will not hold half-screen bounds, so splitting is only
     # offered in fullscreen mode and the page has to know which it is looking at.
     mode: str = ""
+    # This box's https address via `tailscale serve`, "" when it has none.
+    # Streaming needs it: browsers only allow screen capture on secure pages.
+    https_url: str = ""
 
 
 # --- autoscroll -------------------------------------------------------------
@@ -1509,8 +1521,185 @@ def status() -> Status:
                   version=os.getenv("CROSSDROP_VERSION", "dev"), awake=display.awake(),
                   screens=[_screen_out(s) for s in cfg["screens"]],
                   kind=cfg["browser"]["kind"], supports=browser.supports(cfg),
-                  mode=cfg["browser"]["mode"],
+                  mode=cfg["browser"]["mode"], https_url=https_url(),
                   started_at=getattr(app.state, "started_at", 0.0), error=error)
+
+
+_https = {"url": "", "checked": 0.0}
+HTTPS_RECHECK = 60.0                # seconds between asks while there is none
+
+
+def https_url() -> str:
+    """https://<this box>.ts.net/ when `tailscale serve` is proxying to us.
+
+    Read from serve's own config, whose `Web` keys are "host:443" -- so the
+    answer only exists once serve is really set up, never just because the
+    tailnet has a name. Found once, kept: a node's name does not change under a
+    running agent. Not found is re-asked at most once a minute, because the UI
+    polls status every 15s and this is a subprocess on a Pi.
+    """
+    if _https["url"] or time.monotonic() - _https["checked"] < HTTPS_RECHECK:
+        return _https["url"]
+    _https["checked"] = time.monotonic()
+    with contextlib.suppress(OSError, ValueError, subprocess.SubprocessError):
+        out = subprocess.run(["tailscale", "serve", "status", "--json"],
+                             capture_output=True, text=True, timeout=3).stdout
+        host = next(iter(json.loads(out or "{}").get("Web") or {}), "")
+        if host:
+            _https["url"] = f"https://{host.removesuffix(':443')}/"
+    return _https["url"]
+
+
+# --- streaming from a PC ------------------------------------------------------
+# The PC's browser captures a window or tab and sends it straight to the kiosk
+# over WebRTC. The media never touches the agent; it only passes one offer and
+# one answer between the two pages. Gathering finishes before either is sent,
+# so no ICE trickle, no STUN, no TURN: on a LAN or tailnet the hosts' own
+# addresses are enough.
+#
+# The boundary this keeps (PLAN.md v3): the Pi never captures itself. It plays
+# what a PC chose to send it, and the CI grep for Pi-side capture still holds.
+#
+# ponytail: one stream at a time, one dict. A second POST replaces the first.
+_stream: dict = {}
+_stream_lock = threading.Lock()
+STREAM_WAIT = 15.0                  # seconds for the kiosk page to answer
+STREAM_VIEW = "/stream-view"
+
+
+class StreamIn(BaseModel):
+    sdp: str = Field(min_length=1, max_length=64_000)
+    screen: str | None = None
+
+
+class StreamOut(BaseModel):
+    sdp: str
+    screen: str
+
+
+class AnswerIn(BaseModel):
+    id: str = Field(max_length=64)
+    sdp: str = Field(min_length=1, max_length=64_000)
+
+
+def _streaming(url: str | None) -> bool:
+    return bool(url) and urlparse(url).path == STREAM_VIEW
+
+
+def _current(sid: str) -> dict:
+    """The live stream if `sid` names it, else 404. The caller holds the lock.
+
+    The kiosk routes are unauthenticated -- the kiosk cannot send a bearer
+    header, the same constraint /files/{id} lives with -- so the random id in the
+    kiosk's url is the capability. Never listed, never returned to the PC.
+    """
+    if not _stream or not secrets.compare_digest(sid.encode(), _stream["id"].encode()):
+        raise HTTPException(404, "no such stream")
+    return _stream
+
+
+@app.post("/v1/stream", response_model=StreamOut, dependencies=[Depends(auth)])
+def stream_start(body: StreamIn, request: Request) -> StreamOut:
+    """Show the PC's stream on one screen. Takes the sender's complete SDP offer
+    and returns the kiosk's complete answer, or 504 if the kiosk never replies.
+    Blocks up to STREAM_WAIT -- a sync route, so that is a threadpool slot."""
+    cfg = app.state.cfg
+    if body.screen == "all":
+        raise HTTPException(422, "pick one screen: a stream plays on one monitor")
+    try:
+        browser._require(cfg, "stream")
+    except NotImplementedError as e:
+        raise _http(e)
+    s = screen_of(cfg, body.screen)
+    try:
+        now = browser.current_url(cfg, s["name"])
+    except _BROWSER_ERRORS:
+        now = s["home_url"]
+    sid, answered = secrets.token_urlsafe(16), threading.Event()
+    with _stream_lock:
+        # Replacing a live stream on the same screen: go back to what was there
+        # before *that* one, not to the dead stream page.
+        back = now
+        if _streaming(now):
+            back = (_stream.get("back") if _stream.get("screen") == s["name"]
+                    else None) or s["home_url"]
+        _stream.clear()
+        _stream.update(id=sid, screen=s["name"], offer=body.sdp, fetched=False,
+                       answer=None, answered=answered, back=back)
+    # The address the PC used, like /v1/upload: the Pi binds the tailnet
+    # interface, and via `tailscale serve` this is the https name, which the
+    # kiosk resolves through MagicDNS.
+    url = f"{request.url_for('stream_view')}?id={sid}"
+    try:
+        _navigate_one(s, url)
+    except _BROWSER_ERRORS as e:
+        raise _http(e)
+    if not answered.wait(STREAM_WAIT):
+        raise HTTPException(504, "the display did not answer in time")
+    with _stream_lock:
+        if _stream.get("id") != sid:
+            raise HTTPException(409, "another stream took the display over")
+        return StreamOut(sdp=_stream["answer"], screen=s["name"])
+
+
+@app.delete("/v1/stream", dependencies=[Depends(auth)])
+def stream_stop() -> dict:
+    """End the stream and put back what the screen showed before it. A screen
+    that has since moved on to something else is left alone: stopping a stream
+    must never undo a navigate somebody made after it."""
+    with _stream_lock:
+        st = dict(_stream)
+        _stream.clear()
+    if not st:
+        return {"ok": True, "stopped": False}
+    s = screen_of(app.state.cfg, st["screen"])
+    try:
+        if f"id={st['id']}" in (browser.current_url(app.state.cfg, s["name"]) or ""):
+            _navigate_one(s, st["back"])
+    except _BROWSER_ERRORS as e:
+        raise _http(e)
+    return {"ok": True, "stopped": True}
+
+
+# The kiosk side. No token on any of these: see _current().
+@app.get(STREAM_VIEW, include_in_schema=False)
+def stream_view() -> FileResponse:
+    return FileResponse(Path(__file__).parent.parent / "web" / "stream.html")
+
+
+@app.get("/stream-offer", include_in_schema=False)
+def stream_offer(id: str) -> dict:
+    """The sender's offer, once. A second fetch is a 404, so a url copied out of
+    /v1/status cannot be replayed to pick up somebody's stream."""
+    with _stream_lock:
+        st = _current(id)
+        if st["fetched"]:
+            raise HTTPException(404, "no such stream")
+        st["fetched"] = True
+        return {"sdp": st["offer"], "back": st["back"]}
+
+
+@app.post("/stream-answer", include_in_schema=False)
+def stream_answer(body: AnswerIn) -> dict:
+    with _stream_lock:
+        st = _current(body.id)
+        if st["answer"] is not None:
+            raise HTTPException(409, "already answered")
+        st["answer"] = body.sdp
+        st["answered"].set()
+    return {"ok": True}
+
+
+# A GET, so the access log files it at DEBUG: a two-hour film is 120 of these.
+@app.get("/stream-alive", include_in_schema=False)
+def stream_alive(id: str) -> dict:
+    """The kiosk page's heartbeat while video is playing. Without it the display
+    sleeps mid-film: nothing has navigated for content_off_minutes. A page that
+    dies stops calling, and the display goes back to its normal timers."""
+    with _stream_lock:
+        name = _current(id)["screen"]
+    display.touch(screen_of(app.state.cfg, name))
+    return {"ok": True}
 
 
 # Unauthenticated on purpose: you need the page before you can type the token.

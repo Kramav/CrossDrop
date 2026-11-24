@@ -270,7 +270,8 @@ names the one that was off.*
 Send a screenshot of the local tab; smart content handling one case at a time;
 session handoff beyond URL + scroll; a phone client.
 
-**Refused on purpose** — pixel mirroring, a cloud relay, a content-detection
+**Refused on purpose** — Pi-side capture (a PC streaming *to* the Pi was
+allowed in v3, 2026-11-24, see README "Streaming"), a cloud relay, a content-detection
 framework, full session migration, a scheduler inside the agent. Each has its
 reasoning and its trigger in PLAN §13 *Declined*. Do not re-raise without the
 trigger.

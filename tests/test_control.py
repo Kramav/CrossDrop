@@ -102,11 +102,12 @@ def test_every_cdp_only_capability_has_a_guard():
     withheld = set(browser.supports({"browser": {"kind": "chromium"}})) - \
         set(browser.supports(cfg))
     assert withheld == {"scroll", "autoscroll", "media", "screens", "window",
-                        "extensions", "screenshot", "inspect"}
-    # `extensions` is the one guarded at the route rather than in browser.py:
-    # installing is a filesystem operation, not a browser one, and it is only
-    # withheld because --load-extension has no Firefox equivalent. That its
-    # routes 501 is proved in test_extensions.py.
+                        "extensions", "screenshot", "inspect", "stream"}
+    # `extensions` and `stream` are guarded at the route rather than in
+    # browser.py. Installing is a filesystem operation, withheld because
+    # --load-extension has no Firefox equivalent (proved in test_extensions.py).
+    # A stream only navigates, withheld because a Firefox kiosk hides its address
+    # from WebRTC (proved in test_stream.py).
     for call in (lambda: browser.scroll(cfg, "left", dy=1),
                  lambda: browser.media(cfg, "left"),
                  lambda: browser.screenshot(cfg, "left"),

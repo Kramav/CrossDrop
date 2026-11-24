@@ -406,6 +406,24 @@ cp deploy/pi/crossdrop-update.service deploy/pi/crossdrop-update.timer "$UNITS/"
 cp deploy/pi/crossdrop-restart.service deploy/pi/crossdrop-restart.timer "$UNITS/"
 systemctl --user daemon-reload
 systemctl --user enable --now crossdrop-agent crossdrop-restart.timer
+# A re-run on a box that is already up: --now leaves a running agent on the old
+# unit, and the old unit does not bind the loopback socket https needs below.
+systemctl --user restart crossdrop-agent
+
+# Streaming from a PC needs the UI on https: browsers only allow screen capture
+# on a secure page. `tailscale serve` gives this box a real certificate at its
+# tailnet name and proxies to the agent's loopback socket. The tailnet needs
+# HTTPS switched on once, in its admin console -- if it is not, tailscale prints
+# a link to do that and waits, which is the one step a script cannot take.
+# Capped and non-fatal: everything except streaming works without it.
+echo "== https (for streaming)"
+if timeout 300 sudo tailscale serve --bg "http://127.0.0.1:$PORT"; then
+  echo "   $(tailscale serve status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)"
+else
+  echo "   NOTE: no https address - the web UI will not offer streaming."
+  echo "         Turn on HTTPS certificates at https://login.tailscale.com/admin/dns"
+  echo "         and run this script again. Everything else works without it."
+fi
 
 # An existing config is never rewritten, so a Pi provisioned before Phase 6 still
 # points its profile at the SD card and silently keeps grinding it.

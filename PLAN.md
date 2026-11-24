@@ -588,12 +588,16 @@ place where building ahead of the need is cheaper than not.
 Recorded so they are not re-raised. Each is a *no* with a trigger, not a
 never.
 
-- **Pixel mirroring / screencast.** The review says not to, and the codebase
-  already enforces it: `/v1/screenshot` is request/response by design, and
-  `Page.startScreencast` plus the desktop-capture APIs are grepped for in
-  `.github/workflows/ci.yml` (§11). Mirror-by-navigation (M4) is the feature;
-  video is not. *Trigger: none. This is the boundary that keeps CrossDrop from
-  being a bad VNC.*
+- ~~**Pixel mirroring / screencast.**~~ **Reversed by the owner, 2026-11-24
+  (v3), and narrowed rather than dropped.** The need: watching services you're
+  signed in to on the PC (Max) without signing in on the wall. What is now
+  allowed: *a PC may send the Pi a stream* (`/v1/stream`, WebRTC from the PC's
+  own browser, captured there with `getDisplayMedia`). What still holds: *the
+  Pi never captures itself.* `/v1/screenshot` stays request/response, and the
+  CI grep for Pi-side capture (`Page.startScreencast`, desktop-capture tools)
+  is unchanged, because the new feature trips none of it. Mirror-by-navigation
+  is still the default; a stream is for what has no URL worth sending.
+  See README "Streaming".
 - **A cloud account, a relay, or a rendezvous server.** Local-first is already
   the shape and there is nothing to add. *Trigger: sending to a box that is
   neither on the LAN nor the tailnet.*

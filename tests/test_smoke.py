@@ -19,6 +19,7 @@ The three claims these exist to check, none of which survives being stubbed:
     DOM stays put.
 """
 
+import contextlib
 import http.server
 import os
 import struct
@@ -406,3 +407,149 @@ def test_smoke_look_click_type_verify(kiosk, page_server):
     # The wall genuinely changed, and the picture is of the page after it.
     assert after["title"] == "typed:kramav"
     assert after["image"] != before["image"]
+
+
+# The sender is the web UI's real streamTo(), in a second, headless chromium:
+# the kiosk is busy being the receiver, and a second tab in it would leave the
+# agent guessing which page is the screen. A canvas stands in for the window
+# nobody is there to pick -- streamTo takes any MediaStream for exactly this.
+SENDER_JS = """(() => {
+  localStorage.token = %(token)r;
+  const c = document.createElement("canvas");
+  c.width = 320; c.height = 240;
+  const g = c.getContext("2d");
+  let n = 0;
+  setInterval(() => { g.fillStyle = `hsl(${n++ * 10 %% 360},80%%,50%%)`;
+                      g.fillRect(0, 0, 320, 240); }, 33);
+  streamTo(c.captureStream(30), %(screen)r);
+  return true;
+})()"""
+
+RECEIVER_JS = """(() => {
+  const v = document.querySelector("#video");
+  return v ? [v.videoWidth, v.currentTime] : null;
+})()"""
+
+
+def evaluate(ws_url: str, expr: str):
+    from agent import browser
+    with browser._rpc(ws_url) as call:
+        return browser._evaluate(call, expr, "smoke")
+
+
+@contextlib.contextmanager
+def sender_page(kind: str, url: str, profile):
+    """A second, headless browser open at `url`; yields run(js) -> value.
+
+    Chromium over CDP, Firefox over WebDriver BiDi -- the same two protocols the
+    agent drives kiosks with. Firefox matters most: it is what actually sends,
+    and it hides its own addresses from WebRTC differently from Chromium."""
+    import subprocess
+
+    from agent import browser
+
+    exe = browser._exe(kind)
+    if kind == "firefox":
+        port = 9334
+        profile.mkdir()
+        argv = [exe, "--headless", "--remote-debugging-port", str(port),
+                "--profile", str(profile), "--no-remote", url]
+    else:
+        port = 9333
+        argv = [exe, "--headless=new", f"--remote-debugging-port={port}",
+                f"--user-data-dir={profile}", "--no-first-run",
+                "--no-default-browser-check", url]
+    proc = subprocess.Popen(argv)
+    try:
+        browser.wait_ready(kind, port)
+        if kind == "firefox":
+            ctx = browser._top_context(port)["context"]
+
+            def run(expr):
+                r = browser._bidi(port, "script.evaluate", {
+                    "expression": expr, "target": {"context": ctx},
+                    "awaitPromise": False})
+                if r.get("type") == "exception":
+                    raise RuntimeError(r["exceptionDetails"].get("text", "script error"))
+                return r["result"].get("value")
+        else:
+            deadline = time.monotonic() + 20
+            while not (pages := [p for p in browser._get(port, "/json", latch=False)
+                                 if p["type"] == "page" and "127.0.0.1" in p["url"]]):
+                assert time.monotonic() < deadline, "sender page never loaded"
+                time.sleep(0.3)
+            ws = pages[0]["webSocketDebuggerUrl"]
+
+            def run(expr):
+                return evaluate(ws, expr)
+        yield run
+    finally:
+        conn = browser._bidi_conns.pop(port, None)
+        if conn:
+            with contextlib.suppress(Exception):
+                conn[0].close()
+        proc.terminate()
+        proc.wait(10)
+
+
+@pytest.mark.parametrize("sender", ["firefox", "chromium"])
+def test_smoke_a_stream_reaches_the_wall_and_stop_puts_it_back(kiosk, page_server,
+                                                              tmp_path, sender):
+    """Signalling, the kiosk page and the real sender code, end to end: frames
+    have to arrive and keep arriving, and stopping has to put the page back."""
+    from agent import browser
+    from agent.app import app
+
+    try:
+        browser._exe(sender)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    cfg = app.state.cfg
+    screen = cfg["screens"][0]["name"]
+    kiosk.post("/v1/navigate", json={"url": page_server})
+
+    base = str(kiosk.base_url).rstrip("/")
+    with sender_page(sender, base + "/home", tmp_path / "sender") as run:
+        # A saved token, then the UI -- the way a real user arrives. Set from
+        # /home, same origin, because the UI's own first run sends Settings a
+        # tokenless request whose 401 handler would delete a token set under it.
+        deadline = time.monotonic() + 20
+        while not run("location.pathname === '/home' && document.readyState === 'complete'"):
+            assert time.monotonic() < deadline, "sender never opened /home"
+            time.sleep(0.3)
+        run(f"localStorage.token = {TOKEN!r}; setTimeout(() => location.href = '/')")
+        time.sleep(1)
+        # The script defines streamTo; wait for it rather than racing the load.
+        while True:
+            assert time.monotonic() < deadline, "sender script never ran"
+            with contextlib.suppress(RuntimeError):     # mid-navigation
+                if run("typeof streamTo === 'function' && !!localStorage.token"):
+                    break
+            time.sleep(0.3)
+        run(SENDER_JS % {"token": TOKEN, "screen": screen})
+
+        deadline, first = time.monotonic() + 40, None
+        while True:
+            assert time.monotonic() < deadline, (
+                "no frames on the wall; sender says: "
+                + str(run('document.querySelector("#streamnote").textContent')))
+            try:
+                got = evaluate(browser._cdp_page(cfg, screen)["webSocketDebuggerUrl"],
+                               RECEIVER_JS)
+            except RuntimeError:
+                got = None              # mid-navigation
+            if got and got[0] > 0:
+                if first is None:
+                    first = got[1]
+                elif got[1] > first + 0.5:
+                    break               # playing, not one frozen frame
+            time.sleep(0.3)
+        assert got[0] == 320, got
+        note = run('document.querySelector("#streamnote").textContent')
+        assert note.startswith("● Live"), note
+
+        assert kiosk.delete("/v1/stream").json()["stopped"] is True
+        deadline = time.monotonic() + 10
+        while kiosk.get("/v1/status").json()["current_url"] != page_server:
+            assert time.monotonic() < deadline, "stop did not put the page back"
+            time.sleep(0.3)

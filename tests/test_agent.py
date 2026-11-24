@@ -274,7 +274,8 @@ def test_chromium_loads_configured_extensions(tmp_path, monkeypatch):
                                 "disk_cache_mb": 100, "extensions_dir": str(ext),
                                 "profile_dir": str(tmp_path / "profile")}})
     assert f"--load-extension={a},{b}" in seen[0], seen[0]
-    assert "--disable-features=DisableLoadExtensionCommandLineSwitch" in seen[0], seen[0]
+    off = [x for x in seen[0] if x.startswith("--disable-features=")]
+    assert len(off) == 1 and "DisableLoadExtensionCommandLineSwitch" in off[0], seen[0]
 
 
 # The scan itself (torn unpacks, missing directory) is tested in

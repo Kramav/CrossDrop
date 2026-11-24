@@ -66,9 +66,10 @@ home_url = "/home"           # page the kiosk opens on launch. http, https,
 # position = "1366,0"
 # size = "2560x1440"
 
-# Where `python -m agent serve` binds. Optional -- these are the defaults. The
-# Pi does not use this: its systemd unit passes --host "$(tailscale ip -4)"
-# because a re-auth changes the address. Never 0.0.0.0 (PLAN.md §10).
+# Where `python -m agent serve` binds. Optional -- these are the defaults. On
+# the Pi, `host` is overridden: the unit sets CROSSDROP_HOST="$(tailscale ip -4)"
+# because a re-auth changes the address. A non-loopback host also gets
+# 127.0.0.1, for `tailscale serve` (streaming's https). Never 0.0.0.0 (PLAN.md §10).
 #
 # [server]
 # host = "127.0.0.1"

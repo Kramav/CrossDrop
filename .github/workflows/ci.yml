@@ -39,6 +39,10 @@ jobs:
       # These are the ways out of it: a desktop capture API, or CDP's own
       # screencast, which is the one path to video that never leaves CDP.
       # PLAN.md v1.2.0. Delete this only with a decision behind it.
+      #
+      # v3 streaming (/v1/stream) does not loosen this. The boundary is "the Pi
+      # never captures itself": a PC's browser captures its own window and
+      # sends it, and the Pi only plays it. PLAN.md, Declined, 2026-11-24.
       - name: no desktop capture, no streaming
         run: |
           ! grep -rnE 'startScreencast|Page\.screencast|scrot|grim|\bmss\b|pyautogui|uinput|CopyFromScreen|import -window' \
