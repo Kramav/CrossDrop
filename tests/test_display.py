@@ -172,3 +172,33 @@ def test_a_nonsense_split_leaves_the_monitor_whole(capsys):
     got = display.split([M1], {"HDMI-1": "diagonally"})
     assert got == [M1]
     assert "not a way to split" in capsys.readouterr().out
+
+
+def test_three_columns_tile_the_panel_exactly():
+    got = display.split([M1, M2], {"HDMI-1": "lcr"})
+    assert [s["output"] for s in got] == ["HDMI-1-L", "HDMI-1-C", "HDMI-1-R", "HDMI-2"]
+    assert [s["position"] for s in got[:3]] == ["0,0", "853,0", "1706,0"]
+    assert [s["size"] for s in got[:3]] == ["853x1440", "853x1440", "854x1440"]
+
+
+def test_a_grid_comes_out_in_reading_order():
+    """TL TR BL BR: row by row, so the index fallback in settings.apply and the
+    numbered rows in the UI both read the way the panel looks."""
+    got = display.split([M1], {"HDMI-1": "grid"})
+    assert [s["output"] for s in got] == ["HDMI-1-TL", "HDMI-1-TR",
+                                          "HDMI-1-BL", "HDMI-1-BR"]
+    assert [s["position"] for s in got] == ["0,0", "1280,0", "0,720", "1280,720"]
+    assert {s["size"] for s in got} == {"1280x720"}
+
+
+@pytest.mark.parametrize("how", list(display.SPLITS))
+def test_every_layout_covers_every_pixel_once(how):
+    """The property behind all of the above, for any layout in the table: the
+    cells' areas add up to the panel's, and no two share an origin."""
+    odd = {"output": "X", "position": "7,3", "size": "1367x771"}
+    got = display.split([odd], {"X": how})
+    cols, rows, labels = display.SPLITS[how]
+    assert len(got) == cols * rows == len(labels)
+    area = sum(int(w) * int(h) for w, h in (s["size"].split("x") for s in got))
+    assert area == 1367 * 771
+    assert len({s["position"] for s in got}) == len(got)

@@ -1,10 +1,12 @@
 """Room display agent — frozen /v1 contract (PLAN.md §5)."""
 
 import contextlib
+import ipaddress
 import itertools
 import json
 import logging
 import os
+import re
 import secrets
 import subprocess
 import threading
@@ -315,9 +317,13 @@ def swap_config(cfg: dict, fresh: dict) -> None:
     # /v1/input types into it. Dropping the cache costs one CDP round trip per
     # screen on the next call and makes the next lookup re-derive the mapping.
     browser.forget_targets()
+    before = list(cfg.get("screens") or [])
     cfg.update(fresh)
     for stale in set(cfg) - set(fresh):
         cfg.pop(stale, None)
+    # Streams are keyed by screen name too: follow a rename by output, and end
+    # the ones whose screen is gone. See _rekey_streams.
+    _rekey_streams(before, cfg["screens"])
     # Again, after the swap. The sweep above cannot catch a start that was
     # already in flight -- the route resolved a name that was valid when it
     # checked, and installs it a moment later under a config that no longer has
@@ -482,6 +488,9 @@ def _launch(cfg: dict, stopping: threading.Event) -> None:
             delay = min(delay * 2, 300.0)   # backs off to 5 min, then stays there
             continue
         app.state.launch_error = ""
+        # A fresh browser has no stream pages left in it, and restore never
+        # brings one back (_still_there): every stream is over.
+        _end_all_streams("the display's browser restarted")
         # Shutdown may have run while launch() sat in its 30s wait_ready(),
         # seen proc as None and left the browser alone. Both sides stopping it
         # is harmless; neither is an orphaned fullscreen kiosk, forever.
@@ -839,6 +848,9 @@ class ScreenOut(BaseModel):
     position: str
     current_url: str | None
     autoscroll: bool
+    # The handle of the stream playing here, "" for none. Lets a sender find its
+    # own stream again after the screen is renamed under it.
+    stream: str = ""
 
 
 class ScreenSettingIn(BaseModel):
@@ -848,7 +860,7 @@ class ScreenSettingIn(BaseModel):
 
 class SettingsIn(BaseModel):
     screens: list[ScreenSettingIn]
-    # Which outputs are cut in half, by connector: {"HDMI-1": "lr"|"tb"}. Keyed
+    # How outputs are cut, by connector: {"HDMI-1": a display.SPLITS key}. Keyed
     # by output and not by index because a split changes how many screens there
     # *are*, so an index would name a different screen the moment it applied.
     # None = leave the splits alone; {} = unsplit everything.
@@ -881,6 +893,13 @@ class SettingsOut(BaseModel):
     # here rather than inferred from `screens`, because a screen that is already
     # half a panel cannot tell you what the panel was called.
     outputs: list[str] = []
+    # Every way a monitor can be cut: name -> [columns, rows, [part labels]].
+    # display.SPLITS, verbatim, so the UI's picker and preview cannot drift
+    # from what the agent will actually build.
+    layouts: dict[str, list] = {}
+    # False when config.toml writes the screens by hand: splits would be
+    # ignored, so the UI says so instead of offering them.
+    splittable: bool = True
 
 
 class Status(BaseModel):
@@ -1331,7 +1350,9 @@ def _settings_out(note: str = "") -> SettingsOut:
         mode=app.state.cfg["browser"]["mode"],
         # Whole panels, straight from xrandr: what there is to split. A screen
         # that is already a half cannot name the panel it came from.
-        outputs=[d["output"] for d in display.detect()])
+        outputs=[d["output"] for d in display.detect()],
+        layouts={k: [c, r, list(labels)] for k, (c, r, labels) in display.SPLITS.items()},
+        splittable=not app.state.cfg.get("screen"))
 
 
 @app.get("/v1/settings", response_model=SettingsOut, dependencies=[Depends(auth)])
@@ -1369,6 +1390,13 @@ def put_settings(body: SettingsIn) -> SettingsOut:
         # _by_bounds has to refuse, which costs /v1/input. load_config drops the
         # splits in that case; refusing the save is where it can still be said.
         mode = body.mode if body.mode is not None else cfg["browser"]["mode"]
+        # Hand-written [[screen]] blocks win over detection in load_config, so a
+        # split saved here would change nothing -- accepted, saved, and silently
+        # ignored on a box you cannot look at.
+        if body.splits and cfg.get("screen"):
+            raise HTTPException(422, "this display's screens are written by hand "
+                                     "in config.toml, so splits don't apply; "
+                                     "set the layout there")
         if body.splits and mode != "fullscreen":
             raise HTTPException(422, "splitting a monitor needs mode "
                                      "\"fullscreen\": a kiosk window will not "
@@ -1396,7 +1424,8 @@ def put_settings(body: SettingsIn) -> SettingsOut:
     # Merged, not replaced: the editor only ever sees the monitors detected right
     # now, and a save with one unplugged must not delete the other screen's saved
     # name and home_url. See settings.merge_screens.
-    merged = settings.merge_screens(rows)
+    merged = settings.merge_screens(
+        rows, {label for _, _, labels in display.SPLITS.values() for label in labels})
     # Validate what will be *written*, not what was submitted. The rows above are
     # unique; the merged list can still collide with a saved row the editor could
     # not see, and that collision only surfaces on the boot after the missing
@@ -1455,8 +1484,10 @@ def _screen_out(s: dict) -> ScreenOut:
         url = browser.current_url(app.state.cfg, s["name"])
     except _BROWSER_ERRORS:     # NotImplementedError: firefox, screens 2 and up
         url = None
+    st = _streams.get(s["name"])
     return ScreenOut(name=s["name"], position=s["position"], current_url=url,
-                     autoscroll=s["name"] in _autoscroll)
+                     autoscroll=s["name"] in _autoscroll,
+                     stream=st["handle"] if st else "")
 
 
 @app.post("/v1/upload", response_model=UploadOut, dependencies=[Depends(auth)])
@@ -1474,10 +1505,11 @@ def upload(request: Request, file: UploadFile,
     except storage.TooBig as e:
         raise HTTPException(413, str(e))
 
-    # The same address the uploader used, not loopback: the Pi binds the tailnet
-    # interface only (PLAN.md §10), so 127.0.0.1 would 404 on the display.
+    # The socket this upload arrived on, which the kiosk -- on this same box --
+    # can always reach. Not the Host header: from the https UI that is the
+    # .ts.net name, which a Pi with Tailscale DNS off cannot resolve.
     if navigate:
-        _go(str(request.url_for("serve_file", file_id=file_id)), screen)
+        _go(_own_url(request, f"/files/{file_id}"), screen)
     return UploadOut(id=file_id, url=f"/files/{file_id}")
 
 
@@ -1560,8 +1592,15 @@ def https_url() -> str:
 # The boundary this keeps (PLAN.md v3): the Pi never captures itself. It plays
 # what a PC chose to send it, and the CI grep for Pi-side capture still holds.
 #
-# ponytail: one stream at a time, one dict. A second POST replaces the first.
-_stream: dict = {}
+# One stream per *screen*, so a split panel can mix them: a stream in one part,
+# pages in the others, or a stream in each. A second POST to the same screen
+# replaces that screen's stream and leaves the rest alone.
+#
+# Two secrets per stream, for two audiences. `id` is in the kiosk's url and is
+# the capability for the unauthenticated kiosk routes; it never goes to the PC.
+# `handle` goes to the PC that started it, so its Stop ends *its* stream and
+# not one another PC has since put on that screen.
+_streams: dict[str, dict] = {}      # screen name -> its stream
 _stream_lock = threading.Lock()
 STREAM_WAIT = 15.0                  # seconds for the kiosk page to answer
 STREAM_VIEW = "/stream-view"
@@ -1575,6 +1614,7 @@ class StreamIn(BaseModel):
 class StreamOut(BaseModel):
     sdp: str
     screen: str
+    handle: str                     # pass to DELETE /v1/stream to stop this one
 
 
 class AnswerIn(BaseModel):
@@ -1586,16 +1626,110 @@ def _streaming(url: str | None) -> bool:
     return bool(url) and urlparse(url).path == STREAM_VIEW
 
 
-def _current(sid: str) -> dict:
-    """The live stream if `sid` names it, else 404. The caller holds the lock.
+def _own_url(request: Request, path: str) -> str:
+    """A url for this agent that the kiosk -- on this same box -- can always
+    load: the socket the request arrived on. Through `tailscale serve` that is
+    127.0.0.1, otherwise the tailnet address. Never the Host header, which from
+    the https UI is a .ts.net name only MagicDNS can resolve."""
+    srv = request.scope.get("server") or (app.state.cfg["server"]["host"],
+                                          app.state.cfg["server"]["port"])
+    host = f"[{srv[0]}]" if ":" in str(srv[0]) else srv[0]
+    return f"http://{host}:{srv[1]}{path}"
 
-    The kiosk routes are unauthenticated -- the kiosk cannot send a bearer
-    header, the same constraint /files/{id} lives with -- so the random id in the
-    kiosk's url is the capability. Never listed, never returned to the PC.
+
+# A host candidate whose address is a hidden mDNS name. Groups: prefix,
+# foundation, component/transport/priority, the .local name, port and the rest.
+_CANDIDATE = re.compile(
+    r"^(a=candidate:)(\S+)( \d+ \S+ \d+ )(\S+\.local)( \d+ typ host[^\r\n]*)(\r?)$", re.M)
+
+
+def _with_addresses(sdp: str, addrs: list[str]) -> str:
+    """Give each hidden host candidate in the kiosk's answer a twin with a real
+    address of this box.
+
+    Chromium hides its own addresses from WebRTC behind random `.local` names.
+    On a LAN those can resolve over multicast DNS -- unless the network blocks
+    multicast, as many Wi-Fi access points do. Switching the hiding off would
+    fix that by handing *every* site the kiosk renders this box's address.
+    Instead the hiding stays on and only the answer to our own sender gets it.
+
+    The port stays: the `.local` name stands for one socket, and the twin keeps
+    its port. See _box_addresses for which address that socket listens on.
     """
-    if not _stream or not secrets.compare_digest(sid.encode(), _stream["id"].encode()):
-        raise HTTPException(404, "no such stream")
-    return _stream
+    if not addrs:
+        return sdp
+
+    def twins(m: re.Match) -> str:
+        pre, found, mid, _, rest, cr = m.groups()
+        return m.group(0) + "".join(
+            f"\n{pre}{found}{i}{mid}{a}{rest}{cr}" for i, a in enumerate(addrs, 1))
+
+    return _CANDIDATE.sub(twins, sdp)
+
+
+def _box_addresses() -> list[str]:
+    """The address kiosk Chromium's WebRTC socket actually listens on.
+
+    Measured, not assumed: a page without camera or microphone permission gets
+    candidates on the *default-route interface only* -- one socket, whatever
+    else the box has, and whether or not the address is hidden. On a Pi that is
+    the LAN, not tailscale0. So the twin carries the default route's source
+    address, found the way Chromium finds it: a UDP "connect" towards a public
+    address, which sends nothing and only asks the kernel which source it would
+    use. A tailnet address here would point at a socket that does not exist.
+    """
+    with contextlib.suppress(OSError):
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 53))
+            ip = ipaddress.ip_address(s.getsockname()[0])
+            if not (ip.is_loopback or ip.is_unspecified):
+                return [str(ip)]
+    return []
+
+
+def _end(st: dict, why: str) -> None:
+    """Mark a stream over and wake a POST still waiting on its answer, so it
+    reports `why` at once instead of sitting out the timeout. The caller holds
+    the lock and has already taken it out of _streams."""
+    st["ended"] = why
+    st["answered"].set()
+
+
+def _end_all_streams(why: str) -> None:
+    with _stream_lock:
+        for st in _streams.values():
+            _end(st, why)
+        _streams.clear()
+
+
+def _rekey_streams(old: list[dict], new: list[dict]) -> None:
+    """Follow a rename or a re-split. Streams are keyed by screen *name*, which
+    the settings editor can change under them -- the same trap swap_config
+    guards autoscroll and the target cache against. Matched on `output`, the
+    identity a rename cannot touch; a stream whose screen is gone ends."""
+    # Hand-written [[screen]] blocks have no output; their position in the list
+    # is the identity they have, as in settings.apply.
+    out_of = {s["name"]: s.get("output") or f"#{i}" for i, s in enumerate(old)}
+    name_of = {s.get("output") or f"#{i}": s["name"] for i, s in enumerate(new)}
+    with _stream_lock:
+        moved = {}
+        for name, st in _streams.items():
+            to = name_of.get(out_of.get(name))
+            if to:
+                st["screen"] = to
+                moved[to] = st
+            else:
+                _end(st, "its screen is gone")
+        _streams.clear()
+        _streams.update(moved)
+
+
+def _back_out(st: dict) -> None:
+    """Put back what the screen showed before `st`, if it still shows `st`."""
+    s = screen_of(app.state.cfg, st["screen"])
+    if f"id={st['id']}" in (browser.current_url(app.state.cfg, s["name"]) or ""):
+        _navigate_one(s, st["back"])
 
 
 @app.post("/v1/stream", response_model=StreamOut, dependencies=[Depends(auth)])
@@ -1615,53 +1749,85 @@ def stream_start(body: StreamIn, request: Request) -> StreamOut:
         now = browser.current_url(cfg, s["name"])
     except _BROWSER_ERRORS:
         now = s["home_url"]
-    sid, answered = secrets.token_urlsafe(16), threading.Event()
+    st = dict(id=secrets.token_urlsafe(16), handle=secrets.token_urlsafe(12),
+              screen=s["name"], offer=body.sdp, fetched=False, answer=None,
+              answered=threading.Event(), ended="")
     with _stream_lock:
-        # Replacing a live stream on the same screen: go back to what was there
-        # before *that* one, not to the dead stream page.
-        back = now
-        if _streaming(now):
-            back = (_stream.get("back") if _stream.get("screen") == s["name"]
-                    else None) or s["home_url"]
-        _stream.clear()
-        _stream.update(id=sid, screen=s["name"], offer=body.sdp, fetched=False,
-                       answer=None, answered=answered, back=back)
-    # The address the PC used, like /v1/upload: the Pi binds the tailnet
-    # interface, and via `tailscale serve` this is the https name, which the
-    # kiosk resolves through MagicDNS.
-    url = f"{request.url_for('stream_view')}?id={sid}"
+        # Replacing this screen's live stream: go back to what was there before
+        # *that* one, not to the dead stream page.
+        old = _streams.get(s["name"])
+        st["back"] = ((old or {}).get("back") or s["home_url"]) if _streaming(now) else now
+        _streams[s["name"]] = st
+        if old:
+            _end(old, "another stream took that screen over")
     try:
-        _navigate_one(s, url)
+        _navigate_one(s, _own_url(request, f"{STREAM_VIEW}?id={st['id']}"))
     except _BROWSER_ERRORS as e:
+        with _stream_lock:
+            if _streams.get(st["screen"]) is st:
+                _streams.pop(st["screen"])
         raise _http(e)
-    if not answered.wait(STREAM_WAIT):
-        raise HTTPException(504, "the display did not answer in time")
+    answered = st["answered"].wait(STREAM_WAIT)
     with _stream_lock:
-        if _stream.get("id") != sid:
-            raise HTTPException(409, "another stream took the display over")
-        return StreamOut(sdp=_stream["answer"], screen=s["name"])
+        if not answered and _streams.get(st["screen"]) is st:
+            _streams.pop(st["screen"])
+    if st["ended"]:
+        raise HTTPException(409, st["ended"])
+    if not answered:
+        # Don't leave the screen on a page waiting for a PC that gave up.
+        with contextlib.suppress(HTTPException, *_BROWSER_ERRORS):
+            _back_out(st)
+        raise HTTPException(504, "the display did not answer in time")
+    return StreamOut(sdp=_with_addresses(st["answer"], _box_addresses()),
+                     screen=st["screen"], handle=st["handle"])
 
 
 @app.delete("/v1/stream", dependencies=[Depends(auth)])
-def stream_stop() -> dict:
-    """End the stream and put back what the screen showed before it. A screen
-    that has since moved on to something else is left alone: stopping a stream
-    must never undo a navigate somebody made after it."""
+def stream_stop(screen: str | None = None, handle: str | None = None) -> dict:
+    """End streams and put back what each screen showed before.
+
+    `handle` stops only the stream it was issued for -- what the web UI sends,
+    so a PC whose stream was taken over cannot stop the one that replaced it.
+    Without it: the stream on `screen`, or every stream (roomctl). A screen
+    that has since moved on to something else is left alone either way:
+    stopping must never undo a navigate somebody made after it.
+    """
+    cfg = app.state.cfg
+    if screen not in (None, "all"):
+        screen_of(cfg, screen)                  # an unknown name is a 404
     with _stream_lock:
-        st = dict(_stream)
-        _stream.clear()
-    if not st:
-        return {"ok": True, "stopped": False}
-    s = screen_of(app.state.cfg, st["screen"])
-    try:
-        if f"id={st['id']}" in (browser.current_url(app.state.cfg, s["name"]) or ""):
-            _navigate_one(s, st["back"])
-    except _BROWSER_ERRORS as e:
-        raise _http(e)
-    return {"ok": True, "stopped": True}
+        picked = [st for st in _streams.values()
+                  if screen in (None, "all", st["screen"])
+                  and (handle is None
+                       or secrets.compare_digest(handle.encode(), st["handle"].encode()))]
+        for st in picked:
+            _streams.pop(st["screen"])
+            _end(st, "the stream was stopped")
+    errors = []
+    for st in picked:
+        try:
+            _back_out(st)
+        except (HTTPException, *_BROWSER_ERRORS) as e:
+            errors.append(f"{st['screen']}: {getattr(e, 'detail', e)}")
+    if errors and len(picked) == 1 and screen not in (None, "all"):
+        raise _http(RuntimeError(errors[0]))
+    return {"ok": not errors, "stopped": [st["screen"] for st in picked],
+            **({"errors": errors} if errors else {})}
 
 
-# The kiosk side. No token on any of these: see _current().
+# The kiosk side. No token on any of these: see _by_id().
+def _by_id(sid: str) -> dict:
+    """The live stream `sid` names, else 404. The caller holds the lock.
+
+    The kiosk cannot send a bearer header -- the same constraint /files/{id}
+    lives with -- so the random id in the kiosk's url is the capability.
+    """
+    for st in _streams.values():
+        if secrets.compare_digest(sid.encode(), st["id"].encode()):
+            return st
+    raise HTTPException(404, "no such stream")
+
+
 @app.get(STREAM_VIEW, include_in_schema=False)
 def stream_view() -> FileResponse:
     return FileResponse(Path(__file__).parent.parent / "web" / "stream.html")
@@ -1669,12 +1835,16 @@ def stream_view() -> FileResponse:
 
 @app.get("/stream-offer", include_in_schema=False)
 def stream_offer(id: str) -> dict:
-    """The sender's offer, once. A second fetch is a 404, so a url copied out of
-    /v1/status cannot be replayed to pick up somebody's stream."""
+    """The sender's offer, once. A second fetch means the kiosk page reloaded
+    (a Reload, a renderer crash): a WebRTC answer cannot be renegotiated without
+    the PC, so that stream is over. 410 with `back`, so the page returns to
+    what the screen showed before rather than guessing."""
     with _stream_lock:
-        st = _current(id)
+        st = _by_id(id)
         if st["fetched"]:
-            raise HTTPException(404, "no such stream")
+            _streams.pop(st["screen"], None)
+            _end(st, "the display reloaded the stream page")
+            raise HTTPException(410, {"back": st["back"]})
         st["fetched"] = True
         return {"sdp": st["offer"], "back": st["back"]}
 
@@ -1682,7 +1852,7 @@ def stream_offer(id: str) -> dict:
 @app.post("/stream-answer", include_in_schema=False)
 def stream_answer(body: AnswerIn) -> dict:
     with _stream_lock:
-        st = _current(body.id)
+        st = _by_id(body.id)
         if st["answer"] is not None:
             raise HTTPException(409, "already answered")
         st["answer"] = body.sdp
@@ -1693,12 +1863,14 @@ def stream_answer(body: AnswerIn) -> dict:
 # A GET, so the access log files it at DEBUG: a two-hour film is 120 of these.
 @app.get("/stream-alive", include_in_schema=False)
 def stream_alive(id: str) -> dict:
-    """The kiosk page's heartbeat while video is playing. Without it the display
-    sleeps mid-film: nothing has navigated for content_off_minutes. A page that
-    dies stops calling, and the display goes back to its normal timers."""
+    """The kiosk page's heartbeat while video is playing. Holds the idle timer
+    off so the display does not sleep mid-film -- and only that: it never turns
+    monitors back on that someone switched off. A page that dies stops calling,
+    and the display goes back to its normal timers."""
     with _stream_lock:
-        name = _current(id)["screen"]
-    display.touch(screen_of(app.state.cfg, name))
+        name = _by_id(id)["screen"]
+    with contextlib.suppress(HTTPException):        # renamed this very moment
+        display.touch(screen_of(app.state.cfg, name), wake=False)
     return {"ok": True}
 
 

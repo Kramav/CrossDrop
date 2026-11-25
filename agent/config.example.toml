@@ -52,8 +52,8 @@ home_url = "/home"           # page the kiosk opens on launch. http, https,
 # as broken.
 #
 # You rarely want to write this by hand -- the web UI's split control derives the
-# halves from xrandr, which is how they stay correct when a monitor changes. Do
-# it here only for a geometry halves cannot express (thirds, 70/30).
+# parts from xrandr, which is how they stay correct when a monitor changes. Do
+# it here only for a geometry its equal-cell layouts cannot express (70/30).
 #
 # [[screen]]
 # name = "left"
@@ -130,7 +130,8 @@ extensions_dir = ""          # chromium/edge only. Every child directory of this
 #
 # `splits` is not written here: it is one of the two keys the API owns, so the
 # web UI's split control writes it to settings.json. {"HDMI-1": "lr"} cuts that
-# monitor into two screens side by side; "tb" stacks them. Needs
+# monitor into two screens side by side; "tb" stacks them, "lcr" makes three
+# columns and "grid" four quarters (agent/display.py SPLITS). Needs
 # browser.mode = "fullscreen"; in kiosk mode the splits are dropped with a
 # warning and the monitors come up whole.
 #

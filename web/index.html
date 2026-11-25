@@ -170,7 +170,7 @@
   .sheet select { padding: .4rem; font: inherit; border: 1px solid var(--line);
     border-radius: .35rem; background: transparent; color: inherit; }
   #splitrow { flex-wrap: wrap; gap: .3rem; }
-  #splitrow button { font-size: .78rem; padding: .3rem .5rem; }
+  #splitrow label { display: flex; gap: .4rem; align-items: center; }
   #pendingnote { color: #e0b341; }
   .note { font-size: .8rem; opacity: .7; margin: .4rem 0 0; }
   #extlist .row { justify-content: space-between; margin-bottom: .3rem; }
@@ -788,7 +788,8 @@ function drawScreens() {
     b.title = name === "all" ? "Every screen" : (row && row.current_url) || name;
     // Label only. "all" is the wire value the agent matches on — see targets().
     b.textContent = (name === "all" ? label : name)
-      + (row && row.autoscroll ? " ⏬" : "");
+      + (row && row.autoscroll ? " ⏬" : "")
+      + (streams.has(name) ? " 📺" : "");    // streaming there from this page
     b.onclick = () => {
       // Was there a picture up? Switching screens left the *other* monitor's
       // capture on the stage, so you were looking at one screen while every
@@ -810,6 +811,7 @@ function drawScreens() {
     };
     return b;
   }));
+  drawStream();                     // the rail's 📺 follows the selected screen
 }
 
 async function refresh() {
@@ -818,6 +820,12 @@ async function refresh() {
     supports = s.supports ? new Set(s.supports) : null;
     drawCapabilities(s.kind || "this browser");
     screens = s.screens || [];
+    // A screen renamed while this page streams to it: find the stream again by
+    // the handle the agent issued, or Stop would aim at a name that is gone.
+    for (const [name, live] of [...streams]) {
+      const now = live.handle && screens.find(x => x.stream === live.handle);
+      if (now && now.name !== name) { streams.delete(name); streams.set(now.name, live); }
+    }
     // A renamed or unsplit screen leaves a frame nothing can ever show again,
     // and its name could later be reused by a different panel.
     for (const n of frames.keys()) {
@@ -980,8 +988,10 @@ function commands() {
     { label: autoscrolling() ? "Stop auto-scrolling" : "Start auto-scrolling",
       when: () => can("autoscroll") && target !== "all", run: ACT.auto },
 
-    { label: streaming ? "Stop streaming" : "Stream a window from this PC…",
-      when: () => can("stream"), run: streaming ? () => stopStream() : openStream },
+    { label: streams.has(target) ? "Stop streaming to this screen"
+                                 : "Stream a window from this PC…",
+      when: () => can("stream"),
+      run: streams.has(target) ? () => stopStream(target) : openStream },
 
     { sep: "Window", when: () => can("window") },
     { label: "Set the kiosk aside", when: () => can("window"), run: ACT.aside },
@@ -1139,7 +1149,9 @@ const RAW = { echoCancellation: false, noiseSuppression: false, autoGainControl:
 const SOUND_HELP = "No sound: turn on Stereo Mix in Windows — Control Panel → Sound"
   + " → Recording → right-click → Show Disabled Devices → right-click Stereo Mix"
   + " → Enable. Then stop and start again.";
-let streaming = null;              // { pc, media, screen } while live
+// screen name -> { pc, media }, one per screen this page is streaming to. A
+// split panel can mix them: a stream in one part, pages in the others.
+const streams = new Map();
 let httpsUrl = "";                 // from /v1/status, when `tailscale serve` is set up
 
 const canCapture = () => window.isSecureContext && navigator.mediaDevices
@@ -1164,7 +1176,7 @@ function drawSteps(lines) {
 }
 
 function drawStream() {
-  const live = !!streaming;
+  const live = streams.has(target);
   $("#stream").setAttribute("aria-pressed", String(live));
   $("#streamgo").hidden = live || !canCapture();
   $("#streamstop").hidden = !live;
@@ -1200,8 +1212,9 @@ function drawStream() {
 
 function openStream() {
   if (!$("#streamdlg").open) $("#streamdlg").showModal();
-  if (!streaming) streamNote(target === "all"
-    ? "Pick one screen at the top first: a stream plays on one monitor." : "");
+  if (!streams.has(target)) streamNote(target === "all"
+    ? "Pick one screen at the top first: a stream plays on one monitor."
+    : streams.size ? `Also streaming to ${[...streams.keys()].join(", ")}.` : "");
   drawStream();
 }
 
@@ -1217,6 +1230,11 @@ function gathered(pc, ms = 3000) {
   });
 }
 
+// "default" and "communications" are not devices but pointers to whichever
+// device Windows calls default today -- which can become a webcam's microphone
+// tomorrow. Never picked automatically, never remembered, never offered.
+const PSEUDO = new Set(["default", "communications"]);
+
 async function openInput(deviceId) {
   const s = await navigator.mediaDevices.getUserMedia({
     audio: deviceId ? { ...RAW, deviceId: { exact: deviceId } } : RAW });
@@ -1226,41 +1244,52 @@ async function openInput(deviceId) {
 // The PC's own sound, for when sharing brought none: Firefox never shares
 // sound, and Chrome only does for a tab. Never a real microphone -- that would
 // put the room on the wall -- unless someone picked one in the dropdown.
+//
+// Only the dropdown ever writes localStorage.audioDevice. The automatic choice
+// is made fresh on every start, by name, from real devices: remembering it is
+// how "default" got saved and later turned into a headset microphone.
 async function loopbackAudio() {
-  const saved = localStorage.audioDevice;
-  if (saved === "none") return null;
-  let track;
-  try { track = await openInput(saved); }
+  if (PSEUDO.has(localStorage.audioDevice)) delete localStorage.audioDevice;
+  const picked = localStorage.audioDevice;
+  if (picked === "none") return null;
+  let probe;
+  try { probe = await openInput(picked); }        // also what makes labels readable
   catch {
-    if (!saved) return null;                  // declined, or no inputs at all
-    delete localStorage.audioDevice;          // that device has gone
-    try { track = await openInput(); } catch { return null; }
+    if (!picked) return null;                     // declined, or no inputs at all
+    delete localStorage.audioDevice;              // that device has gone
+    return loopbackAudio();
   }
   const inputs = (await navigator.mediaDevices.enumerateDevices())
-    .filter(d => d.kind === "audioinput");
-  if (!localStorage.audioDevice && !LOOPBACK.test(track.label)) {
-    track.stop();
-    track = null;
-    const mix = inputs.find(d => LOOPBACK.test(d.label));
+    .filter(d => d.kind === "audioinput" && !PSEUDO.has(d.deviceId));
+  if (picked) {
+    drawAudioChoices(inputs, picked);
+    return probe;
+  }
+  const mix = inputs.find(d => LOOPBACK.test(d.label));
+  let track = null;
+  if (mix && probe.getSettings().deviceId === mix.deviceId) track = probe;
+  else {
+    probe.stop();                                 // whatever opened first: not it
     if (mix) { try { track = await openInput(mix.deviceId); } catch { /* none */ } }
   }
-  if (track) localStorage.audioDevice = track.getSettings().deviceId;
-  drawAudioChoices(inputs, track);
+  drawAudioChoices(inputs, "");
   return track;
 }
 
-function drawAudioChoices(inputs, track) {
+function drawAudioChoices(inputs, picked) {
   const opt = (value, label) => Object.assign(document.createElement("option"),
                                               { value, textContent: label });
-  $("#audiosrc").replaceChildren(opt("none", "No sound"),
-    ...inputs.map(d => opt(d.deviceId, d.label || "Input")));
-  $("#audiosrc").value = track ? track.getSettings().deviceId : "none";
+  $("#audiosrc").replaceChildren(opt("", "Automatic: Stereo Mix if there is one"),
+    opt("none", "No sound"), ...inputs.map(d => opt(d.deviceId, d.label || "Input")));
+  $("#audiosrc").value = picked || "";
   $("#audiorow").hidden = false;
 }
 
 $("#audiosrc").onchange = () => {
-  localStorage.audioDevice = $("#audiosrc").value;
-  streamNote(streaming ? "The new sound source is used next time you press Start." : "");
+  const v = $("#audiosrc").value;
+  if (v) localStorage.audioDevice = v;
+  else delete localStorage.audioDevice;
+  streamNote(streams.size ? "The new sound source is used next time you press Start." : "");
 };
 
 async function startStream() {
@@ -1280,10 +1309,17 @@ async function startStream() {
     return;
   }
   let hint = "";
-  if (!media.getAudioTracks().length) {
-    const a = await loopbackAudio();
-    if (a) media.addTrack(a);
-    else if (localStorage.audioDevice !== "none") hint = " " + SOUND_HELP;
+  if (!media.getAudioTracks().length && localStorage.audioDevice !== "none") {
+    // Said before the browser asks, so its microphone prompt is not a surprise.
+    streamNote("That brought no sound. If you're asked about a microphone, choose"
+      + " Stereo Mix: it is your PC's own sound, not a microphone.");
+    try {
+      const a = await loopbackAudio();
+      if (a) media.addTrack(a);
+      else hint = " " + SOUND_HELP;
+    } catch {
+      hint = " " + SOUND_HELP;        // carry on without sound, never stall here
+    }
   }
   await streamTo(media, target, hint);
 }
@@ -1291,15 +1327,15 @@ async function startStream() {
 // Takes any MediaStream, so the smoke test can hand it a canvas instead of a
 // screen nobody is there to pick.
 async function streamTo(media, screen, hint = "") {
-  stopStream(false);                  // the agent replaces the old one itself
+  stopStream(screen, false);          // the agent replaces that screen's itself
   const pc = new RTCPeerConnection();
-  streaming = { pc, media, screen };
-  drawStream();
+  streams.set(screen, { pc, media });
+  drawScreens();                    // and with it drawStream()
   try {
     for (const t of media.getTracks()) {
       if (t.kind === "video") t.contentHint = "motion";   // smooth over sharp
       pc.addTrack(t, media);
-      t.onended = () => stopStream();   // the browser's own "Stop sharing" bar
+      t.onended = () => stopStream(screen);   // the browser's "Stop sharing" bar
     }
     await pc.setLocalDescription(await pc.createOffer());
     await gathered(pc);
@@ -1310,6 +1346,8 @@ async function streamTo(media, screen, hint = "") {
       body: JSON.stringify({ sdp: pc.localDescription.sdp, screen }),
     });
     await pc.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+    const mine = streams.get(screen);
+    if (mine?.pc === pc) mine.handle = answer.handle;
     for (const s of pc.getSenders()) {
       if (!s.track || s.track.kind !== "video") continue;
       const p = s.getParameters();
@@ -1319,40 +1357,44 @@ async function streamTo(media, screen, hint = "") {
       await s.setParameters(p).catch(() => {});   // a hint, not a requirement
     }
     pc.onconnectionstatechange = () => {
-      if (streaming?.pc !== pc) return;
+      if (streams.get(screen)?.pc !== pc) return;
       if (pc.connectionState === "connected") {
         streamNote(`● Live on ${answer.screen}. Keep this window open.${hint}`);
       } else if (pc.connectionState === "failed") {
-        stopStream(false);
+        stopStream(screen, false);
         streamNote("✗ Lost the connection to the display.");
       }
     };
   } catch (e) {
-    stopStream(false);
+    stopStream(screen, false);
     streamNote("✗ " + e.message);
   }
 }
 
-function stopStream(tellAgent = true) {
-  if (!streaming) return;
-  const { pc, media } = streaming;
-  streaming = null;
-  media.getTracks().forEach(t => t.stop());
-  pc.close();
-  // keepalive, so this still goes out when the window is closing.
+function stopStream(screen, tellAgent = true) {
+  const live = streams.get(screen);
+  if (!live) return;
+  streams.delete(screen);
+  live.media.getTracks().forEach(t => t.stop());
+  live.pc.close();
+  // keepalive, so this still goes out when the window is closing. With the
+  // handle: if another PC has since taken this screen over, this ends nothing.
+  // (No handle yet means our start is still pending, and still the current one.)
   if (tellAgent) {
-    fetch("/v1/stream", { method: "DELETE", headers: auth(), keepalive: true })
+    const q = new URLSearchParams({ screen });
+    if (live.handle) q.set("handle", live.handle);
+    fetch("/v1/stream?" + q, { method: "DELETE", headers: auth(), keepalive: true })
       .catch(() => {});
-    streamNote("Stopped.");
+    if (screen === target) streamNote("Stopped.");
   }
-  drawStream();
+  drawScreens();
 }
 
 $("#stream").onclick = openStream;
 $("#streamgo").onclick = startStream;
-$("#streamstop").onclick = () => stopStream();
+$("#streamstop").onclick = () => stopStream(target);
 $("#streamclose").onclick = () => $("#streamdlg").close();
-window.addEventListener("pagehide", () => stopStream());
+window.addEventListener("pagehide", () => [...streams.keys()].forEach(n => stopStream(n)));
 
 // --- settings ---------------------------------------------------------------
 // Everything here is a *runtime* setting the agent owns. The token, the browser
@@ -1435,44 +1477,52 @@ function propose(change) {
   drawSettings(settingsNow);
 }
 
+// What each layout is called in the picker. The layouts themselves come from
+// the agent (/v1/settings `layouts`); a name missing here shows as its key.
+const LAYOUT_NAMES = { lr: "Left | Right", tb: "Top / Bottom", lcr: "Three columns",
+                       grid: "2 × 2 grid" };
+// An agent from before `layouts` was reported knew halves and nothing else.
+const layouts = () => settingsNow.layouts
+  || { lr: [2, 1, ["L", "R"]], tb: [1, 2, ["T", "B"]] };
+
 // The layout the pending splits would produce, so the map shows what you are
 // about to confirm rather than what is on the wall now. Geometry only — names
 // belong to screens that may not exist yet.
 function previewScreens() {
   if (!pending) return settingsNow.screens;
+  const outs = settingsNow.outputs || [];
+  // The panel a screen belongs to: itself, or the longest output it is a part
+  // of ("HDMI-1-TL" -> "HDMI-1").
+  const parentOf = o => outs.filter(p => o === p || o.startsWith(p + "-"))
+    .sort((a, b) => b.length - a.length)[0] || o;
+  // A panel is the box around all of its parts, however it is cut today.
   const whole = new Map();
   for (const s of settingsNow.screens) {
-    const parent = s.output.replace(/-[LRTB]$/, "");
-    if (!whole.has(parent)) whole.set(parent, { output: parent, ...bounds(s) });
-    else {                          // two halves: put the panel back together
-      const a = whole.get(parent), b = bounds(s);
-      whole.set(parent, { output: parent, x: Math.min(a.x, b.x),
-                          y: Math.min(a.y, b.y),
-                          w: a.x === b.x ? a.w : a.w + b.w,
-                          h: a.y === b.y ? a.h : a.h + b.h });
-    }
+    const p = parentOf(s.output), b = bounds(s), a = whole.get(p);
+    whole.set(p, a ? { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y),
+                       r: Math.max(a.r, b.x + b.w), btm: Math.max(a.btm, b.y + b.h) }
+                   : { x: b.x, y: b.y, r: b.x + b.w, btm: b.y + b.h });
   }
   const out = [];
-  for (const m of whole.values()) {
-    const how = pending.splits[m.output];
-    const geom = (x, y, w, h) => ({ position: `${x},${y}`, size: `${w}x${h}` });
-    if (how === "lr") {
-      const a = Math.floor(m.w / 2);
-      out.push({ name: `${m.output}-L`, output: `${m.output}-L`, pending: true,
-                 ...geom(m.x, m.y, a, m.h) },
-               { name: `${m.output}-R`, output: `${m.output}-R`, pending: true,
-                 ...geom(m.x + a, m.y, m.w - a, m.h) });
-    } else if (how === "tb") {
-      const a = Math.floor(m.h / 2);
-      out.push({ name: `${m.output}-T`, output: `${m.output}-T`, pending: true,
-                 ...geom(m.x, m.y, m.w, a) },
-               { name: `${m.output}-B`, output: `${m.output}-B`, pending: true,
-                 ...geom(m.x, m.y + a, m.w, m.h - a) });
-    } else {
-      const live = settingsNow.screens.find(s => s.output === m.output);
-      out.push(live || { name: m.output, output: m.output, pending: true,
-                         ...geom(m.x, m.y, m.w, m.h) });
+  for (const [p, m] of whole) {
+    const w = m.r - m.x, h = m.btm - m.y;
+    const lay = layouts()[pending.splits[p]];
+    if (!lay) {
+      const live = settingsNow.screens.find(s => s.output === p);
+      out.push(live || { name: p, output: p, pending: true,
+                         position: `${m.x},${m.y}`, size: `${w}x${h}` });
+      continue;
     }
+    // The same cell edges as display.split: the odd pixel goes to a later cell.
+    const [cols, rows, labels] = lay;
+    const xs = [...Array(cols + 1)].map((_, i) => m.x + Math.floor(w * i / cols));
+    const ys = [...Array(rows + 1)].map((_, j) => m.y + Math.floor(h * j / rows));
+    labels.forEach((label, k) => {
+      const i = k % cols, j = Math.floor(k / cols);
+      out.push({ name: `${p}-${label}`, output: `${p}-${label}`, pending: true,
+                 position: `${xs[i]},${ys[j]}`,
+                 size: `${xs[i + 1] - xs[i]}x${ys[j + 1] - ys[j]}` });
+    });
   }
   return out;
 }
@@ -1484,33 +1534,33 @@ function bounds(s) {
 }
 
 // One control per *panel*, not per screen: splitting is something you do to a
-// monitor, and once it is split neither half can tell you what the panel was.
+// monitor, and once it is split no part can tell you what the panel was.
 function drawSplits(body) {
+  // Screens written by hand in config.toml win over detection, so a split
+  // chosen here would be saved and ignored. Say so instead of offering it.
+  if (body.splittable === false) {
+    $("#splitrow").replaceChildren("This display's screens are set by hand in"
+      + " config.toml on the Pi, so the layout is changed there.");
+    return;
+  }
   const splits = (pending || body).splits;
   const rows = (body.outputs || []).map(out => {
-    const b = document.createElement("button");
-    b.type = "button";
-    const how = splits[out];
-    b.textContent = how ? `${out}: unsplit` : `${out}: split ▸`;
-    b.title = how ? "Put the two halves back together"
-                  : "Cut this monitor into two screens";
-    b.onclick = () => {
+    const label = document.createElement("label");
+    label.textContent = out;
+    const sel = document.createElement("select");
+    sel.append(new Option("Whole", ""), ...Object.keys(layouts())
+      .map(k => new Option(LAYOUT_NAMES[k] || k, k)));
+    sel.value = splits[out] || "";
+    sel.onchange = () => {
       const next = { ...splits };
-      if (how) delete next[out];
-      // Left/right unless the panel is taller than it is wide, where stacking is
-      // the one that leaves a usable shape.
-      else next[out] = wideEnough(out) ? "lr" : "tb";
+      if (sel.value) next[out] = sel.value;
+      else delete next[out];
       propose({ splits: next });
     };
-    return b;
+    label.append(sel);
+    return label;
   });
   $("#splitrow").replaceChildren(...rows);
-}
-
-function wideEnough(output) {
-  const s = settingsNow.screens.find(x => x.output.startsWith(output));
-  const { w, h } = bounds(s || {});
-  return !isFinite(w) || !isFinite(h) || w >= h;
 }
 
 function drawSettings(cfg) {
@@ -1524,7 +1574,7 @@ function drawSettings(cfg) {
   if (pending) {
     const bits = [];
     const n = Object.entries(pending.splits)
-      .map(([o, how]) => `${o} ${how === "lr" ? "left/right" : "top/bottom"}`);
+      .map(([o, how]) => `${o} ${LAYOUT_NAMES[how] || how}`);
     bits.push(n.length ? `split: ${n.join(", ")}` : "no monitors split");
     if (pending.mode !== cfg.mode) bits.push(`window mode → ${pending.mode}`);
     $("#pendingnote").textContent =

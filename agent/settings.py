@@ -101,21 +101,42 @@ def save(data: dict, p: Path | None = None) -> None:
     tmp.replace(p)        # atomic: a half-written file must not survive a crash
 
 
-def merge_screens(rows: list[dict]) -> dict:
-    """`rows` overlaid onto the saved screen list by index, ready for save().
+def merge_screens(rows: list[dict], part_labels=()) -> dict:
+    """`rows` plus the saved rows worth keeping, ready for save().
 
     save() rewrites the file whole and the editor only ever sees the screens
-    `display.detect()` found *now* — so a save with a monitor unplugged used to
+    the agent had when it opened — so a save with a monitor unplugged used to
     drop the other screen's name and home_url for good, and plugging it back in
-    did not bring them back. Longer saved lists keep their tail instead.
+    did not bring them back. Saved rows for a monitor the editor did not show
+    are kept.
+
+    Matched by *panel*, never by index. By index, cutting a panel into four and
+    back left four stale rows behind; the next save merged the editor's two rows
+    over the first two and kept the tail, so a monitor's name appeared twice --
+    every later save failed with "name already taken", and a rename was undone
+    by the stale copy that apply() reads last. A row's panel is its output less
+    a split suffix ("HDMI-1-TL" -> "HDMI-1"; `part_labels` are the suffixes):
+    when the editor sent any row for a panel, it sent that panel's whole
+    current layout, so every other saved row for it is a layout that is gone.
+
+    Rows with no `output` -- hand-written [[screen]] blocks -- keep the old
+    by-index merge, since position is the only identity they have.
     """
-    # Same shape guard as apply(): this indexes `saved`, so a `screens` that is
-    # not a list raised out of PUT /v1/settings, and one holding non-objects
-    # would write them straight back for the next boot to choke on.
+    # Same shape guard as apply(): a `screens` that is not a list raised out of
+    # PUT /v1/settings, and one holding non-objects would write them straight
+    # back for the next boot to choke on.
     saved = load().get("screens")
     saved = [r for r in saved if isinstance(r, dict)] if isinstance(saved, list) else []
-    return {"screens": [rows[i] if i < len(rows) else saved[i]
-                        for i in range(max(len(rows), len(saved)))]}
+    if not all(r.get("output") for r in rows):
+        return {"screens": [rows[i] if i < len(rows) else saved[i]
+                            for i in range(max(len(rows), len(saved)))]}
+    def panel(out: str) -> str:
+        head, _, tail = out.rpartition("-")
+        return head if head and tail in part_labels else out
+
+    shown = {panel(r["output"]) for r in rows}
+    keep = [r for r in saved if r.get("output") and panel(r["output"]) not in shown]
+    return {"screens": rows + keep}
 
 
 def apply(cfg: dict, data: dict | None = None) -> dict:

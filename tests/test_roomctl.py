@@ -140,8 +140,10 @@ def test_the_targets_file_is_not_kept_inside_the_installed_package(monkeypatch):
 def test_stream_stop_calls_the_delete_route(monkeypatch, cli_target, capsys):
     calls = []
     monkeypatch.setattr(roomctl.Client, "_call",
-                        lambda self, method, path, **kw: calls.append((method, path))
-                        or {"ok": True, "stopped": True})
+                        lambda self, method, path, **kw: calls.append((method, path, kw))
+                        or {"ok": True, "stopped": ["left"]})
+    assert cli.main(["stream", "stop", "-s", "left"]) == 0
     assert cli.main(["stream", "stop"]) == 0
-    assert calls == [("DELETE", "/v1/stream")]
-    assert '"stopped": true' in capsys.readouterr().out
+    assert calls == [("DELETE", "/v1/stream", {"params": {"screen": "left"}}),
+                     ("DELETE", "/v1/stream", {"params": None})]
+    assert '"left"' in capsys.readouterr().out

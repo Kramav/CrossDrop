@@ -150,15 +150,22 @@ against one set of monitors used to win over the set actually attached, and put
 both kiosk windows on one screen. Rearranging monitors is the session's job
 (`xrandr`, or the desktop's own display settings).
 
-What **is** editable is how many screens a panel is cut into. **Split** a
-monitor left/right or top/bottom and each half becomes an ordinary screen with
-its own name, home page, captures and input — two monitors split gives four. The
-halves are derived from `xrandr` too, so they follow a monitor that changes.
+What **is** editable is how many screens a panel is cut into. Pick a layout
+for each monitor (**Whole**, **Left | Right**, **Top / Bottom**, **Three
+columns**, or a **2 × 2 grid**) and each part becomes an ordinary screen with its
+own name, home page, captures, input and stream. Two monitors cut into grids
+give eight. The parts are named after the connector and their place
+(`HDMI-1-L`, `HDMI-1-C`, `HDMI-1-TL`, …) and derived from `xrandr`, so they
+follow a monitor that changes.
+
+Parts mix freely: one can play a [stream](#streaming) while its neighbours show
+a page, a PDF, or another stream.
 
 Splitting needs the **fullscreen** window mode, which the same panel toggles: a
-`--kiosk` window is entitled to refuse half-screen bounds, and two halves that
-both came up fullscreen would sit on top of each other. Choosing a split
-switches the mode with it.
+`--kiosk` window is entitled to refuse part-screen bounds, and parts that all
+came up fullscreen would sit on top of each other. Choosing a split switches the
+mode with it. Cells are equal; an uneven split (70/30) is still a hand-written
+`[[screen]]` block in `config.toml`.
 
 Neither applies on click. Both change how the browser was *launched*, so they
 stage as a proposal — the map previews the result in dashed outline — and
@@ -316,6 +323,10 @@ https address. It gets one from Tailscale, with a real certificate.
 
 1. In the [Tailscale admin console](https://login.tailscale.com/admin/dns), turn
    on **HTTPS certificates** (and MagicDNS, if it is off). Once per tailnet.
+   Worth knowing: certificates are public record. The display's name and your
+   tailnet's name (`crossdrop.tail1234.ts.net`) appear in public Certificate
+   Transparency logs. Nothing else does, and the address only works inside your
+   tailnet.
 2. Run `setup.sh` on the Pi again. It's safe to re-run, and it now runs
    `tailscale serve` and restarts the agent. On the Pi, over SSH:
 
@@ -339,8 +350,9 @@ https address. It gets one from Tailscale, with a real certificate.
 - **Chrome / Edge:** press **Start**, choose the *Tab* section, pick the tab
   that's playing, and leave *Also share tab audio* on.
 - **To stop**, press **Stop streaming**, close the CrossDrop window, use the
-  browser's own *Stop sharing* bar, or run `roomctl stream stop`. The screen goes
-  back to what it showed before.
+  browser's own *Stop sharing* bar, or run `roomctl stream stop -s <screen>`
+  (without `-s`, every stream stops). The screen goes back to what it showed
+  before.
 
 ### No sound?
 
@@ -353,8 +365,19 @@ unless you pick one there.
 
 ### Limits
 
-- **One screen, one stream.** *Both* is refused; a second stream replaces the
-  first.
+- **The PC and the display have to be on the same network** (the same home
+  Wi-Fi or LAN). The video travels between them directly, and the kiosk browser
+  only listens on its main network connection, never on Tailscale. That's a
+  browser rule, measured, not a setting. From somewhere else on your tailnet,
+  links and files still work; a stream won't connect.
+- **Your display's addresses stay private.** The kiosk browser keeps hiding its
+  network addresses from the sites it shows. Only the PC you stream from is told
+  the display's address, by the agent, as part of starting the stream.
+- **One stream per screen.** Each screen, or each part of a split monitor, can
+  have its own, and a new stream replaces only the one on its own screen. *Both*
+  is refused. The top bar marks screens this window is streaming to with 📺.
+  Every stream costs the Pi a decode, so two at 1080p is about its limit; see
+  below.
 - **Chromium or Edge kiosk only**, like scroll and media. A Firefox kiosk
   returns `501`.
 - **Copy-protected video may come out black.** That depends on the browser and
@@ -364,7 +387,13 @@ unless you pick one there.
   stutters, lower `QUALITY` near the top of the streaming section in
   `web/index.html`.
 - **The display stays awake** while a stream plays, whatever
-  `content_off_minutes` says. The kiosk page checks in every minute.
+  `content_off_minutes` says: the kiosk page checks in every minute. It never
+  switches monitors back on that you turned off.
+- **Reload ends a stream.** A stream can't be picked up again without the PC,
+  so reloading a streaming screen puts back the page from before it. Start
+  again from the PC.
+- **Renaming or re-splitting** a screen carries its stream along when the
+  screen still exists, and ends it when it doesn't.
 
 ## Seeing what is on the wall
 
@@ -557,8 +586,8 @@ before it keeps working unchanged.
 | `POST /v1/autoscroll` | `{"screen"?, "action", "speed"?}` | `action` is `"start"`\|`"stop"` |
 | `POST /v1/media` | `{"screen"?, "action", "value"?}` | `{"ok", "playing", "muted", "volume", "position", "duration"}`; 404 when nothing is playing |
 | `POST /v1/window` | `{"screen"?, "state"}` | `"normal"`\|`"minimized"`\|`"fullscreen"` — the way out of `--kiosk` without stopping the agent |
-| `POST /v1/stream` | `{"sdp", "screen"?}` | The PC's complete WebRTC offer in, the kiosk's complete answer out: `{"sdp", "screen"}`. Blocks up to 15 s; `504` if the kiosk never answers, `422` for `"all"`, `501` on firefox |
-| `DELETE /v1/stream` | — | `{"ok", "stopped"}`. Puts back what the screen showed before, unless something else has been shown since |
+| `POST /v1/stream` | `{"sdp", "screen"?}` | The PC's complete WebRTC offer in, the kiosk's complete answer out: `{"sdp", "screen", "handle"}`. Blocks up to 15 s; `504` if the kiosk never answers, `409` if the stream was stopped or taken over while starting, `422` for `"all"`, `501` on firefox |
+| `DELETE /v1/stream` | `?screen=`, `?handle=` | `{"ok", "stopped": [names]}`. With `handle`, only the stream it was issued for, so a stream that has been taken over is not stopped by its old sender. Otherwise one screen's stream, or all without `screen`. Puts back what each screen showed before, unless something else has been shown since |
 | `POST /v1/screenshot` | `{"screen"?, "region"?, "format"?, "quality"?}` | `{"image"` (base64)`, "width", "height", "url", "title", …}`. No `"all"` — one request, one picture |
 | `GET /v1/inspect` | `?screen=` | `{"url", "title", "ready_state", "error_page", "scroll_y", "fields": [...]}`. No field *values* |
 | `POST /v1/input` | `{"screen"?, "actions": [...], "deadline_ms"?}` | `{"ok", "results": [...]}`. **501 unless `[interact] enabled = true`** |
@@ -567,9 +596,9 @@ before it keeps working unchanged.
 | `DELETE /v1/extensions/{id}` | — | as `GET` |
 | `GET /v1/screens` | — | `[{"name", "position", "current_url", "autoscroll"}]` |
 | `GET /v1/settings` | — | editable screen settings + what `xrandr` detects now |
-| `PUT /v1/settings` | `{"screens": [{"name", "home_url"}], "splits"?, "mode"?}` | saves, re-reads the layout from `xrandr`, then moves the windows live |
+| `PUT /v1/settings` | `{"screens": [{"name", "home_url"}], "splits"?, "mode"?}` | saves, re-reads the layout from `xrandr`, then moves the windows live. `splits` is `{output: layout}`; `GET` lists the layouts in `"layouts"`, and `"splittable": false` when `config.toml` writes the screens by hand (splits then `422`) |
 | `POST /v1/relaunch` | — | restarts the kiosk browser; the only way to apply `mode` or a split |
-| `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"`, `"error"`, `"https_url"` (`""` without `tailscale serve`) |
+| `GET /v1/status` | — | `"screens"`, plus `"kind"`, `"supports"`, `"started_at"`, `"error"`, `"https_url"` (`""` without `tailscale serve`); each screen also has `"stream"`, the handle of the stream playing there |
 
 Three things to know if the caller is a program rather than a person:
 

@@ -350,8 +350,9 @@ def test_the_installer_sets_home_url_to_the_address_the_unit_binds(tmp_path,
     """The expensive one. setup.sh rewrote five keys and home_url was not among
     them, so a stock install shipped the example's `home_url = "/home"`. That
     resolves against [server] to http://127.0.0.1:8080/home -- and the unit
-    passes --host "$(tailscale ip -4)" and never reads [server], so nothing is
-    listening there.
+    then bound only "$(tailscale ip -4)", so nothing was listening there. (It
+    binds 127.0.0.1 too now, for `tailscale serve`; the tailnet url is still the
+    one the kiosk can always reach, including on a unit file from before that.)
 
     Both monitors then come up on Chromium's error page, /v1/inspect reports
     error_page: true forever, and update.sh's rollback gate fires on *every*
@@ -462,3 +463,44 @@ def test_the_v1_refusal_names_a_command_that_can_actually_run():
     assert "migrate.sh" in block
     # And MIGRATE=1 fetches rather than assuming a sibling file.
     assert 'curl -fsSL "$MIGRATE_URL"' in SETUP_SH
+
+
+# --- the unit's start line ----------------------------------------------------
+
+def _exec_start() -> str:
+    """The shell command inside the agent unit's ExecStart=/bin/sh -c '...'."""
+    unit = (Path(__file__).parent.parent / "deploy/pi/crossdrop-agent.service").read_text()
+    line = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    m = re.fullmatch(r"ExecStart=/bin/sh -c '(.*)'", line)
+    assert m, line
+    return m.group(1)
+
+
+def _run_exec_start(tmp_path, ip: str):
+    """Run the real ExecStart command against a fake tailscale and a fake venv
+    python that records how it was started."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    (bin_ / "tailscale").write_text(f"#!/bin/sh\nprintf '%s' '{ip}'\n", newline="\n")
+    py = tmp_path / ".venv" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text('#!/bin/sh\necho "HOST=$CROSSDROP_HOST ARGS=$*"\n', newline="\n")
+    for f in (bin_ / "tailscale", py):
+        f.chmod(0o755)
+    env = {**os.environ, "PATH": f"{bin_}{os.pathsep}{os.environ['PATH']}"}
+    return _sh("-c", _exec_start(), cwd=tmp_path, env=env)
+
+
+def test_the_unit_starts_the_agent_on_the_tailnet_address(tmp_path):
+    r = _run_exec_start(tmp_path, "100.64.0.1\n")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == "HOST=100.64.0.1 ARGS=-m agent serve", r.stdout
+
+
+def test_the_unit_fails_fast_without_a_tailnet_address(tmp_path):
+    """tailscaled still starting at boot prints nothing. Exiting non-zero is
+    what makes Restart= try again; starting anyway bound loopback only -- an
+    agent nobody could reach, running fine, never restarted."""
+    r = _run_exec_start(tmp_path, "")
+    assert r.returncode != 0
+    assert "HOST=" not in r.stdout, "the agent was started with no address"

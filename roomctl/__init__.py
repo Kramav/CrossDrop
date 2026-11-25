@@ -203,10 +203,13 @@ class Client:
         """
         return self._call("POST", "/v1/relaunch", json={})
 
-    def stream_stop(self) -> dict:
-        """End a stream from a PC and put back what the screen showed before.
-        Starting one is the web UI's job: only a browser can capture."""
-        return self._call("DELETE", "/v1/stream")
+    def stream_stop(self, screen: str | None = None) -> dict:
+        """End the stream on `screen`, or every stream when it is None, and put
+        back what each screen showed before. `stopped` names the screens that
+        had one. Starting a stream is the web UI's job: only a browser can
+        capture."""
+        return self._call("DELETE", "/v1/stream",
+                          params={"screen": screen} if screen else None)
 
     def window(self, state: str, screen: str | None = None) -> dict:
         """normal / minimized / fullscreen. Minimized frees the Pi's desktop

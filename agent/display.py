@@ -122,11 +122,21 @@ def detect() -> list[dict]:
     return sorted(found, key=lambda s: int(s["position"].split(",")[0]))
 
 
-SPLITS = ("lr", "tb")           # side by side, or stacked
+# How a monitor can be cut: name -> (columns, rows, part labels in reading
+# order). The one table: /v1/settings reports it, and the web UI builds its
+# picker and its preview from that, so a layout added here needs nothing else.
+# ponytail: equal cells only. Uneven splits (70/30) are a hand-written
+# [[screen]] block, as before.
+SPLITS = {
+    "lr": (2, 1, ("L", "R")),                   # side by side
+    "tb": (1, 2, ("T", "B")),                   # stacked
+    "lcr": (3, 1, ("L", "C", "R")),             # three columns
+    "grid": (2, 2, ("TL", "TR", "BL", "BR")),   # four quarters
+}
 
 
 def split(monitors: list[dict], splits: dict | None) -> list[dict]:
-    """Cut each named output into two screens. `splits` is {output: "lr"|"tb"}.
+    """Cut each named output into screens. `splits` is {output: a SPLITS key}.
 
     A monitor is one panel; a *screen* is one kiosk window, and nothing says a
     panel only gets one. Half of a 2560-wide monitor is still a 1280-wide web
@@ -136,10 +146,15 @@ def split(monitors: list[dict], splits: dict | None) -> list[dict]:
     follow xrandr: hard-coding "1280,0" in config.toml is exactly the stale
     geometry that put both windows on one monitor and cost an evening.
 
-    Halves are emitted **in place**, so the list stays in the left-to-right order
+    Parts are emitted **in place**, so the list stays in the left-to-right order
     detect() produced and settings.apply's index fallback still means something.
-    That is also why a "tb" split needs no sort change: nothing re-sorts after
-    this, and T is emitted before B.
+    Within a monitor they go in reading order (row by row), so nothing re-sorts
+    after this: T before B, TL TR before BL BR.
+
+    Cell edges are `x + w * i // columns`, so the odd pixel goes to a later
+    cell -- 1365 halves to 682 + 683. No pixel is lost and no two cells
+    overlap, which _by_bounds needs: two windows at one origin is a tie it has
+    to refuse.
     """
     out = []
     for m in monitors:
@@ -153,32 +168,32 @@ def split(monitors: list[dict], splits: dict | None) -> list[dict]:
             continue
         x, y = (int(v) for v in m["position"].split(","))
         w, h = (int(v) for v in m["size"].split("x"))
-        if how == "lr":
-            # The odd column goes to the second half: 1365 -> 682 + 683. No
-            # pixel is lost and the two never overlap, which _by_bounds needs --
-            # two windows at one origin is a tie it has to refuse.
-            a = w // 2
-            parts = [("L", f"{x},{y}", f"{a}x{h}"),
-                     ("R", f"{x + a},{y}", f"{w - a}x{h}")]
-        else:
-            a = h // 2
-            parts = [("T", f"{x},{y}", f"{w}x{a}"),
-                     ("B", f"{x},{y + a}", f"{w}x{h - a}")]
-        out += [{"output": f"{m['output']}-{side}", "position": pos, "size": size,
+        cols, rows, labels = SPLITS[how]
+        xs = [x + w * i // cols for i in range(cols + 1)]
+        ys = [y + h * j // rows for j in range(rows + 1)]
+        cells = [(xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j])
+                 for j in range(rows) for i in range(cols)]
+        out += [{"output": f"{m['output']}-{label}", "position": f"{cx},{cy}",
+                 "size": f"{cw}x{ch}",
                  # The one flag that stops browser._place fullscreening it away.
                  "fullscreen": False}
-                for side, pos, size in parts]
+                for label, (cx, cy, cw, ch) in zip(labels, cells)]
     return out
 
 
-def touch(screen: dict, url: str | None = None) -> None:
+def touch(screen: dict, url: str | None = None, wake: bool = True) -> None:
     """Record activity on `screen` and wake the display. `url` says whether the
     screen is showing something or sitting on its home page — recorded here, at
-    navigate time, so the idle check never has to ask the browser anything."""
+    navigate time, so the idle check never has to ask the browser anything.
+
+    `wake=False` only holds the idle timer off: a stream's heartbeat must keep
+    the display from sleeping mid-film, but never undo someone switching the
+    monitors off on purpose."""
     _last[screen["name"]] = time.monotonic()
     if url is not None:
         _content[screen["name"]] = url != screen["home_url"]
-    power(True)
+    if wake:
+        power(True)
 
 
 def last_active(name: str) -> float:

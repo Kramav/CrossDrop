@@ -417,6 +417,8 @@ systemctl --user restart crossdrop-agent
 # a link to do that and waits, which is the one step a script cannot take.
 # Capped and non-fatal: everything except streaming works without it.
 echo "== https (for streaming)"
+echo "   Note: https certificates are public record -- this display's name and"
+echo "   your tailnet's name appear in Certificate Transparency logs."
 if timeout 300 sudo tailscale serve --bg "http://127.0.0.1:$PORT"; then
   echo "   $(tailscale serve status 2>/dev/null | grep -o 'https://[^ ]*' | head -1)"
 else

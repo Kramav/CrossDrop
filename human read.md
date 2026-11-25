@@ -5,13 +5,13 @@ My quick reference. Update at sign-off. Last updated **2026-11-24**.
 ## Where things stand
 
 - **CrossDrop:** works end to end on the Pi. The server is done and `/v1` is frozen. The M1 extension is built and tested headless, but not yet tried in a real browser.
-- **CrossDrop streaming (v3):** built and passing end to end against real Chrome on this PC. Not yet tried on the Pi, with Max, or from Firefox.
+- **CrossDrop streaming (v3):** built, reviewed, fixed. Passes end to end from Firefox and Chrome on this PC. Not yet tried on the Pi or with Max. Works only with the PC on the same network as the Pi (a browser rule; Tailscale-from-elsewhere won't stream).
 - **Freethrow:** hand tracking and calibration are done (M0–M1.7). Nothing moves a window yet. This PC has no .NET SDK.
 - **Integration:** decided, not started. Freethrow sends a URL or file to CrossDrop over HTTP. See [Freethrow PLAN.md](../Freethrow/docs/PLAN.md), under Open items.
 
 ## Next, in order
 
-1. **Try streaming:** turn on HTTPS certificates in Tailscale, re-run `setup.sh` on the Pi, open the https address, press 📺. Check: Max shows picture (not black), sound arrives through Stereo Mix, Pi CPU stays under 80%. See README "Streaming".
+1. **Try streaming:** turn on HTTPS certificates in Tailscale, re-run `setup.sh` on the Pi, open the https address, press 📺. Check: Max shows picture (not black), sound arrives through Stereo Mix, Pi CPU stays under 80%. Then split a monitor (Settings → three columns or 2×2), stream into one part and show a page in another. See README "Streaming".
 2. **Accept CrossDrop M1:** load `extension\` unpacked, save the Pi in the popup, right-click a page, and check the wall shows it. See [extension/README.md](extension/README.md).
 3. **Freethrow checks:** follow [Freethrow docs/hardware-checks.md](../Freethrow/docs/hardware-checks.md): install the SDK, calibrate, test two hands, test the posture gate. M2 depends on it.
 4. **Freethrow M2:** move a window on one monitor.
@@ -51,6 +51,8 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab
 
 Newest first, one line each.
 
+- **2026-11-24:** Fixed all 16 adversarial-review findings. The kiosk keeps hiding its IPs; the agent gives the address only to the streaming PC.
+- **2026-11-24:** Added split layouts (three columns, 2×2 grid) and one stream per screen, so parts can mix streams and pages.
 - **2026-11-24:** Built streaming from a PC to the wall (WebRTC from the browser, no OBS). Reversed "never streamed pixels" to "the Pi never captures itself".
 
 - **2026-09-12:** Weighed app options and the Freethrow integration. Recorded the plan in Freethrow's PLAN.md.

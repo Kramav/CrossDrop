@@ -542,28 +542,95 @@ def test_a_split_saved_through_the_route_takes_effect(tmp_path, monkeypatch, sto
         assert [s["fullscreen"] for s in r.json()["screens"]] == [False, False, True]
 
 
-def test_the_route_refuses_a_split_in_kiosk_mode(client, store, monkeypatch):
+TWO_PANELS = [{"output": "HDMI-1", "position": "0,0", "size": "2560x1440"},
+              {"output": "HDMI-2", "position": "2560,0", "size": "1366x768"}]
+
+
+@pytest.fixture
+def detected(tmp_path, store, monkeypatch):
+    """An agent whose screens come from xrandr -- the only kind splits apply
+    to. (`client` writes its screens by hand, which splits must refuse.)"""
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'token = "{TOKEN}"\nhome_url = "{HOME}"\n'
+                   '[browser]\nkind = "chromium"\nautolaunch = false\n'
+                   'mode = "fullscreen"\n', encoding="utf-8")
+    monkeypatch.setenv("CROSSDROP_CONFIG", str(cfg))
+    monkeypatch.setattr(appmod.display, "detect", lambda: [dict(m) for m in TWO_PANELS])
+    with TestClient(app) as c:
+        yield c
+
+
+def names_of(c):
+    return [s["name"] for s in c.get("/v1/settings", headers=AUTH).json()["screens"]]
+
+
+def put_screens(c, names, **extra):
+    return c.put("/v1/settings", headers=AUTH, json={
+        "screens": [{"name": n, "home_url": HOME} for n in names], **extra})
+
+
+def test_the_route_refuses_a_split_in_kiosk_mode(detected, store):
     """load_config would drop it silently on the next boot; refusing the save is
     where it can still be explained to whoever pressed the button.
 
     The monitor is real here, so the refusal has to be about the *mode* and not
     about an output that happens not to exist on the machine running the tests.
     """
-    monkeypatch.setattr(appmod.display, "detect", lambda: [
-        {"output": "HDMI-1", "position": "0,0", "size": "2560x1440"}])
-    r = client.put("/v1/settings", headers=AUTH, json={
-        "screens": ok_screens(), "splits": {"HDMI-1": "lr"}, "mode": "kiosk"})
+    r = put_screens(detected, names_of(detected), splits={"HDMI-1": "lr"}, mode="kiosk")
     assert r.status_code == 422
     assert "fullscreen" in r.json()["detail"], r.text
     assert not store.exists(), "a refused split reached disk"
 
 
-def test_the_route_refuses_a_split_of_a_monitor_that_is_not_there(client, store):
+def test_the_route_refuses_a_split_of_a_monitor_that_is_not_there(detected, store):
     """Silently doing nothing is the worst answer on a box you cannot look at."""
-    r = client.put("/v1/settings", headers=AUTH, json={
-        "screens": ok_screens(), "splits": {"HDMI-9": "lr"}, "mode": "fullscreen"})
+    r = put_screens(detected, names_of(detected), splits={"HDMI-9": "lr"})
     assert r.status_code == 422 and "no output" in r.json()["detail"]
     assert not store.exists()
+
+
+def test_hand_written_screens_refuse_splits(client, store, monkeypatch):
+    """[[screen]] blocks win over detection, so a split here would be saved and
+    then ignored. Refused instead, and the UI is told not to offer it."""
+    monkeypatch.setattr(appmod.display, "detect", lambda: [dict(TWO_PANELS[0])])
+    assert client.get("/v1/settings", headers=AUTH).json()["splittable"] is False
+    r = client.put("/v1/settings", headers=AUTH, json={
+        "screens": ok_screens(), "splits": {"HDMI-1": "lr"}, "mode": "fullscreen"})
+    assert r.status_code == 422 and "by hand" in r.json()["detail"]
+    assert not store.exists()
+
+
+@pytest.mark.parametrize("layout", ["lr", "grid"])
+def test_unsplitting_leaves_no_rows_behind(detected, store, layout):
+    """Cut a panel up and put it back, then rename the other monitor. Merged by
+    index, the cut's rows survived the unsplit, the other monitor's row
+    appeared twice, every later save was refused as "name already taken", and
+    a rename came back undone by the stale copy."""
+    assert put_screens(detected, ["HDMI-1", "projector"]).status_code == 200
+    assert put_screens(detected, names_of(detected),
+                       splits={"HDMI-1": layout}).status_code == 200
+    assert put_screens(detected, names_of(detected), splits={}).status_code == 200
+    assert names_of(detected) == ["HDMI-1", "projector"]
+    r = put_screens(detected, ["HDMI-1", "beamer"])
+    assert r.status_code == 200, r.text
+    assert names_of(detected) == ["HDMI-1", "beamer"]
+    assert put_screens(detected, ["HDMI-1", "beamer"]).status_code == 200
+    rows = json.loads(store.read_text())["screens"]
+    assert [r["output"] for r in rows] == ["HDMI-1", "HDMI-2"], rows
+
+
+def test_an_unplugged_monitors_name_survives_a_save(detected, store, monkeypatch):
+    """What the old by-index merge was for, kept: save while a monitor is
+    unplugged, plug it back in, and its name is still there."""
+    assert put_screens(detected, ["desk", "projector"]).status_code == 200
+    monkeypatch.setattr(appmod.display, "detect", lambda: [dict(TWO_PANELS[0])])
+    # A save is what re-reads xrandr; the editor then sees one monitor.
+    assert put_screens(detected, names_of(detected)).status_code == 200
+    assert names_of(detected) == ["desk"]
+    assert put_screens(detected, ["desk2"]).status_code == 200
+    monkeypatch.setattr(appmod.display, "detect", lambda: [dict(m) for m in TWO_PANELS])
+    assert put_screens(detected, names_of(detected)).status_code == 200
+    assert names_of(detected) == ["desk2", "projector"]
 
 
 def test_a_save_that_does_not_mention_splits_keeps_them(tmp_path, monkeypatch, store):

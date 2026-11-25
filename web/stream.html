@@ -48,7 +48,12 @@ function tick() {
 
 async function main() {
   const r = await fetch("/stream-offer?id=" + encodeURIComponent(id));
-  // Already used, or from before a restart: nothing to show.
+  // 410: this page reloaded (a Reload, a renderer crash), which ends a stream
+  // for good -- and the agent says where the screen was before. 404: from
+  // before a restart, and nobody knows; the agent's own idle page then.
+  if (r.status === 410) {
+    back = ((await r.json().catch(() => ({}))).detail || {}).back || back;
+  }
   if (!r.ok) { leave(); return; }
   const offer = await r.json();
   back = offer.back || back;
@@ -61,10 +66,16 @@ async function main() {
     $("#note").textContent = "Couldn't connect to the PC";
     setTimeout(leave, GRACE_MS);
   }, CONNECT_MS);
+  // Only "connected" cancels the connect timeout: "connecting" arrives at once
+  // and used to cancel it too, leaving "Waiting for the PC…" up forever on a
+  // connection that never got through.
   pc.onconnectionstatechange = () => {
     const state = pc.connectionState;
-    clearTimeout(timer);
-    if (state === "disconnected") timer = setTimeout(leave, GRACE_MS);
+    if (state === "connected") clearTimeout(timer);
+    else if (state === "disconnected") {
+      clearTimeout(timer);
+      timer = setTimeout(leave, GRACE_MS);
+    }
     else if (state === "failed" || state === "closed") leave();
   };
 

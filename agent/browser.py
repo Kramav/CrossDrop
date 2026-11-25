@@ -57,9 +57,9 @@ CANDIDATES = {
 # `if kind == "firefox": raise` blocks -- a sync nobody could see going wrong.
 #
 # Routes that never touch the browser (display, upload) are not listed.
-# `stream` navigates only, but the receiver needs launch() to have switched off
-# Chromium's mDNS address hiding; a Firefox kiosk would hide its address and the
-# PC could never connect.
+# `stream` navigates only, but its address handling (app._with_addresses) is
+# written against Chromium's hidden .local candidates; a Firefox kiosk is
+# untested and refused rather than left to time out.
 _CDP_ONLY = ("scroll", "autoscroll", "media", "screens", "window", "extensions",
              "screenshot", "inspect", "input", "stream")
 SUPPORTS = {
@@ -184,13 +184,12 @@ def launch(cfg: dict) -> subprocess.Popen:
         # ONE --disable-features flag, ever: Chromium honours only the last one,
         # so a second silently re-enables everything the first turned off.
         #
-        # WebRtcHideLocalIpsWithMdns: Chromium swaps its own addresses for
-        # random .local names in WebRTC, and those names do not resolve across
-        # the tailnet. Off, the receiver's answer carries its real 100.x address
-        # and the PC streaming to it (/v1/stream) can connect. It exposes this
-        # box's IPs to pages it renders -- which already know them: they are
-        # served to it over that same network.
-        off = ["WebRtcHideLocalIpsWithMdns"]
+        # WebRtcHideLocalIpsWithMdns stays ON, deliberately. Switching it off
+        # would let /v1/stream connect by handing *every* site the kiosk renders
+        # this box's LAN and tailnet addresses. The agent puts the tailnet
+        # address into the one answer that needs it instead -- see
+        # app._with_addresses.
+        off = []
         # Unpacked, because the kiosk has no install UI and Debian's Chromium
         # ignores ExtensionInstallForcelist (deploy/pi/README.md §10). A
         # directory, so installing one is a file operation, not a config edit.
@@ -206,7 +205,8 @@ def launch(cfg: dict) -> subprocess.Popen:
             # silently stops loading -- check the argv against `chromium --help`
             # before assuming the path is wrong.
             off.append("DisableLoadExtensionCommandLineSwitch")
-        argv += [f"--disable-features={','.join(off)}"]
+        if off:
+            argv += [f"--disable-features={','.join(off)}"]
         # Wayland gives the compositor final say on position and Chromium
         # ignores --window-position there; under XWayland the move is an X11
         # configure request, which labwc honours. deploy/pi/README.md.

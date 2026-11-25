@@ -62,8 +62,8 @@ def main(argv: list[str] | None = None) -> int:
                      help="install: Web Store ids. remove: the id shown by list.")
 
     # Stop only: starting a stream needs a browser to capture, so it lives in
-    # the web UI. One stream per display, so -s does not apply.
-    cmd("stream", help="stop a stream from a PC").add_argument("action", choices=["stop"])
+    # the web UI. -s stops one screen's stream; without it, every stream.
+    cmd("stream", help="stop streams from a PC").add_argument("action", choices=["stop"])
 
     # Kept in step with agent/browser.py WINDOW_STATES by hand, same as media below.
     win = cmd("window", help="set the kiosk window aside, or put it back")
@@ -191,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
                 "upload": lambda: c.upload(a.path, a.screen),
                 "extension": lambda: do_extension(c),
                 "window": lambda: c.window(a.state, a.screen),
-                "stream": lambda: c.stream_stop(),
+                "stream": lambda: c.stream_stop(a.screen),
                 "shot": lambda: do_shot(c),
                 "inspect": lambda: c.inspect(a.screen),
                 "click": lambda: c.input([act], a.screen),
